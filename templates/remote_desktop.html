@@ -1,0 +1,626 @@
+{% extends "base.html" %}
+
+{% block stylesheets %}
+{{ super() }}
+<style>
+    /* Full-screen workspace layout */
+    .workspace-container {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 1000;
+        background: #000;
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .workspace-header {
+        background: #343a40;
+        color: white;
+        padding: 10px 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid #495057;
+    }
+    
+    .workspace-controls {
+        background: #343a40;
+        color: white;
+        padding: 10px 20px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 15px;
+        border-top: 1px solid #495057;
+    }
+    
+    .control-btn {
+        background: #495057;
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: background-color 0.3s;
+    }
+    
+    .control-btn:hover {
+        background: #6c757d;
+    }
+    
+    .control-btn.start {
+        background: #28a745;
+    }
+    
+    .control-btn.start:hover {
+        background: #218838;
+    }
+    
+    .control-btn.stop {
+        background: #dc3545;
+    }
+    
+    .control-btn.stop:hover {
+        background: #c82333;
+    }
+    
+    .control-btn.add-time {
+        background: #007bff;
+    }
+    
+    .control-btn.add-time:hover {
+        background: #0056b3;
+    }
+    
+    .control-btn:disabled {
+        background: #495057 !important;
+        cursor: not-allowed;
+        opacity: 0.6;
+    }
+    
+    .timer-display {
+        font-family: monospace;
+        font-size: 18px;
+        font-weight: bold;
+        color: #ffc107;
+        min-width: 80px;
+        text-align: center;
+    }
+    
+    .timer-expired {
+        color: #dc3545;
+    }
+    
+    .workspace-content {
+        flex: 1;
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .no-session-screen {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: white;
+        text-align: center;
+    }
+    
+    .start-session-btn {
+        padding: 15px 30px;
+        font-size: 18px;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        margin-top: 20px;
+        transition: background-color 0.3s;
+    }
+    
+    .start-session-btn:hover {
+        background: #0056b3;
+    }
+    
+    .start-session-btn:disabled {
+        background: #6c757d;
+        cursor: not-allowed;
+    }
+    
+    .loading-spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid #ffffff;
+        border-top: 2px solid transparent;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        display: inline-block;
+        margin-right: 8px;
+    }
+    
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    
+    .terminate-btn {
+        background: #dc3545;
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    
+    .terminate-btn:hover {
+        background: #c82333;
+    }
+    
+    .vnc-frame {
+        width: 100%;
+        height: 100%;
+        border: none;
+        background: #000;
+    }
+    
+    .status-message {
+        position: absolute;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 10px 20px;
+        border-radius: 4px;
+        z-index: 10;
+    }
+    
+    .hidden {
+        display: none !important;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+{% if container_info %}
+<div class="workspace-container" id="workspace-container">
+    <div class="workspace-header">
+        <div>
+            <strong>Kali Linux Desktop</strong>
+            <small class="text-muted ml-2">{{ formatted_time }}</small>
+        </div>
+        <div>
+            <button class="terminate-btn" onclick="terminateSession()">
+                <i class="fas fa-power-off"></i> Terminate Session
+            </button>
+        </div>
+    </div>
+    <div class="workspace-content">
+        <iframe id="vnc-frame" class="vnc-frame" src="{{ vnc_url }}" allow="fullscreen"></iframe>
+        <div id="status-message" class="status-message hidden"></div>
+    </div>
+    <div class="workspace-controls">
+        <button class="control-btn start" onclick="startSession()" id="start-btn" disabled>
+            <i class="fas fa-play"></i> Start
+        </button>
+        <div class="timer-display" id="timer-display">--:--</div>
+        <button class="control-btn stop" onclick="stopSession()" id="stop-btn">
+            <i class="fas fa-stop"></i> Stop
+        </button>
+        <button class="control-btn add-time" onclick="addTime()" id="add-time-btn">
+            <i class="fas fa-plus"></i> Extend Time
+        </button>
+    </div>
+</div>
+{% else %}
+<div class="workspace-container" id="workspace-container">
+    <div class="workspace-content">
+        <div class="no-session-screen" id="no-session-screen">
+            <i class="fas fa-desktop" style="font-size: 64px; margin-bottom: 20px; color: #6c757d;"></i>
+            <h3>No Active Session</h3>
+            <p>Click Start to begin a new Kali Linux desktop environment</p>
+        </div>
+        <div id="status-message" class="status-message hidden"></div>
+    </div>
+    <div class="workspace-controls">
+        <button class="control-btn start" onclick="startSession()" id="start-btn">
+            <i class="fas fa-play"></i> Start
+        </button>
+        <div class="timer-display" id="timer-display">--:--</div>
+        <button class="control-btn stop" onclick="stopSession()" id="stop-btn" disabled>
+            <i class="fas fa-stop"></i> Stop
+        </button>
+        <button class="control-btn add-time" onclick="addTime()" id="add-time-btn" disabled>
+            <i class="fas fa-plus"></i> Extend Time
+        </button>
+    </div>
+</div>
+{% endif %}
+
+<script>
+let debugMode = false;
+let sessionTimer = null;
+let timeRemaining = 0; // in seconds
+let continuationsUsed = 0;
+const maxContinuations = 3;
+
+function showStatusMessage(message, timeout = 3000) {
+    const statusDiv = document.getElementById('status-message');
+    if (!statusDiv) {
+        return;
+    }
+    statusDiv.textContent = message;
+    statusDiv.classList.remove('hidden');
+
+    if (timeout > 0) {
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, timeout);
+    }
+}
+
+function formatTime(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+function updateTimerDisplay() {
+    const display = document.getElementById('timer-display');
+    if (display) {
+        display.textContent = formatTime(timeRemaining);
+        display.classList.toggle('timer-expired', timeRemaining <= 0);
+    }
+}
+
+function startTimer() {
+    // Timer is automatically started when session is created
+    // This function now just syncs the UI
+    syncTimerFromStatus();
+}
+
+function stopTimer() {
+    // Stop timer by destroying session
+    terminateSession();
+}
+
+function updateAddTimeButton() {
+    const addTimeBtn = document.getElementById('add-time-btn');
+    if (addTimeBtn) {
+        if (continuationsUsed >= maxContinuations) {
+            addTimeBtn.disabled = true;
+            addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend Time';
+        } else {
+            addTimeBtn.disabled = false;
+            addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend Time';
+        }
+    }
+}
+
+function addTime() {
+    const formData = new FormData();
+    formData.append('nonce', window.init.csrfNonce);
+    
+    fetch('/remote-desktop/api/extend', {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.timer) {
+            timeRemaining = data.timer.time_remaining;
+            continuationsUsed = data.timer.extensions_used;
+            updateTimerDisplay();
+            updateAddTimeButton();
+            
+            const addTimeBtn = document.getElementById('add-time-btn');
+            if (addTimeBtn && continuationsUsed >= data.timer.max_extensions) {
+                addTimeBtn.disabled = true;
+            }
+        }
+    })
+    .catch(error => {
+        console.error('Extension error:', error);
+    });
+}
+
+let pollInterval = null;
+let pollStartTime = null;
+const POLL_TIMEOUT = 120000;
+
+function checkStatus() {
+    const startBtn = document.getElementById('start-btn');
+    const elapsed = Date.now() - pollStartTime;
+
+    if (elapsed > POLL_TIMEOUT) {
+        clearInterval(pollInterval);
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+        }
+        showStatusMessage('Container creation timed out. Please try again.', 5000);
+        return;
+    }
+
+    fetch('/remote-desktop/api/creation-status', {
+        method: 'GET',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'ready' && data.session) {
+            clearInterval(pollInterval);
+            if (startBtn) {
+                startBtn.innerHTML = '<span class="loading-spinner"></span>Loading desktop...';
+            }
+            showStatusMessage('Desktop ready! Loading...', 1000);
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000);
+        } else if (data.status === 'failed') {
+            clearInterval(pollInterval);
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+            }
+            showStatusMessage('Failed: ' + (data.error || 'Unknown error'), 5000);
+        } else {
+            const message = data.message || 'Creating container...';
+            if (startBtn) {
+                startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
+            }
+            showStatusMessage(message, 0);
+        }
+    })
+    .catch(error => {
+        console.error('Poll error:', error);
+    });
+}
+
+function pollCreationStatus() {
+    pollStartTime = Date.now();
+
+    checkStatus();
+
+    pollInterval = setInterval(() => {
+        checkStatus();
+    }, 5000);
+}
+
+function startSession() {
+    const startBtn = document.getElementById('start-btn');
+    if (startBtn) {
+        startBtn.disabled = true;
+        startBtn.innerHTML = '<span class="loading-spinner"></span>Starting...';
+    }
+
+    const formData = new FormData();
+    formData.append('nonce', window.init.csrfNonce);
+
+    fetch('/remote-desktop/api/create', {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin',
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        return response.json();
+    })
+    .then(data => {
+        if (data.status === 'creating') {
+            showStatusMessage('Creating container...', 0);
+            pollCreationStatus();
+        } else if (data.error) {
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+            }
+            showStatusMessage('Error: ' + data.error, 5000);
+        } else {
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+            }
+            showStatusMessage('Unexpected response format', 5000);
+        }
+    })
+    .catch(error => {
+        if (startBtn) {
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+        }
+        console.error('Create session error:', error);
+        showStatusMessage('Error starting session: ' + error.message, 5000);
+    });
+}
+
+function stopSession() {
+    if (!confirm('Are you sure you want to stop your session?')) return;
+    
+    const stopBtn = document.getElementById('stop-btn');
+    if (stopBtn) {
+        stopBtn.disabled = true;
+        stopBtn.innerHTML = '<span class="loading-spinner"></span>Stopping...';
+    }
+    
+    const formData = new FormData();
+    formData.append('nonce', window.init.csrfNonce);
+    
+    fetch('/remote-desktop/api/destroy', {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        // Reload the page to show the no-session screen
+        window.location.reload();
+    })
+    .catch(error => {
+        if (stopBtn) {
+            stopBtn.disabled = false;
+            stopBtn.innerHTML = '<i class="fas fa-stop"></i> Stop';
+        }
+        alert('Error stopping session');
+    });
+}
+
+function addTime() {
+    const addTimeBtn = document.getElementById('add-time-btn');
+    if (addTimeBtn) {
+        addTimeBtn.disabled = true;
+        addTimeBtn.innerHTML = '<span class="loading-spinner"></span>Adding...';
+    }
+    
+    const formData = new FormData();
+    formData.append('nonce', window.init.csrfNonce);
+    
+    fetch('/remote-desktop/api/extend', {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.timer) {
+            timeRemaining = data.timer.time_remaining;
+            continuationsUsed = data.timer.extensions_used;
+            updateTimerDisplay();
+            updateAddTimeButton();
+            
+            if (addTimeBtn) {
+                addTimeBtn.disabled = false;
+                updateAddTimeButton();
+            }
+        } else if (data.error) {
+            if (addTimeBtn) {
+                addTimeBtn.disabled = false;
+                updateAddTimeButton();
+            }
+            alert('Error: ' + data.error);
+        }
+    })
+    .catch(error => {
+        if (addTimeBtn) {
+            addTimeBtn.disabled = false;
+            updateAddTimeButton();
+        }
+        alert('Error extending session');
+    });
+}
+
+function updateCountdown() {
+    timeRemaining--;
+    updateTimerDisplay();
+
+    if (timeRemaining <= 0) {
+        clearInterval(sessionTimer);
+        sessionTimer = null;
+    }
+}
+
+function terminateSession() {
+    if (!confirm('Are you sure? All unsaved work will be lost.')) {
+        return;
+    }
+    
+    const formData = new FormData();
+    formData.append('nonce', window.init.csrfNonce);
+    
+    fetch('/remote-desktop/api/destroy', {
+        method: 'POST',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        setTimeout(() => {
+            window.location.reload();
+        }, 1000);
+    })
+    .catch(error => {
+        window.location.reload();
+    });
+}
+
+
+function syncWithServer() {
+    if (document.getElementById('vnc-frame') || document.querySelector('.workspace-header')) {
+        fetch('/remote-desktop/api/status', {
+            method: 'GET',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.session && data.session.timer) {
+                timeRemaining = data.session.timer.time_remaining;
+                continuationsUsed = data.session.timer.extensions_used;
+                updateTimerDisplay();
+                updateAddTimeButton();
+
+                if (!sessionTimer && data.session.timer.active && timeRemaining > 0) {
+                    sessionTimer = setInterval(updateCountdown, 1000);
+                }
+
+                const startBtn = document.getElementById('start-btn');
+                const stopBtn = document.getElementById('stop-btn');
+                const addTimeBtn = document.getElementById('add-time-btn');
+
+                if (startBtn) startBtn.disabled = true;
+                if (stopBtn) stopBtn.disabled = false;
+                if (addTimeBtn) {
+                    addTimeBtn.disabled = continuationsUsed >= data.session.timer.max_extensions;
+                }
+            } else if (!data.session) {
+                if (sessionTimer) {
+                    clearInterval(sessionTimer);
+                    sessionTimer = null;
+                }
+                window.location.reload();
+            }
+        })
+        .catch(error => {
+            console.error('Sync error:', error);
+        });
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Remote Desktop workspace initialized');
+
+    setTimeout(syncWithServer, 500);
+
+    setInterval(syncWithServer, 5000);
+});
+</script>
+{% endblock %}

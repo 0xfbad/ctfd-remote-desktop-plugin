@@ -1,0 +1,511 @@
+{% extends "admin/base.html" %}
+
+{% block content %}
+<div class="jumbotron">
+    <div class="container">
+        <h1>Remote Desktop Admin Dashboard</h1>
+    </div>
+</div>
+
+<div class="container">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Active Containers</h3>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>User</th>
+                                    <th>Container Name</th>
+                                    <th>Host</th>
+                                    <th>Started</th>
+                                    <th>Time Remaining</th>
+                                    <th>Extensions Used</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="containers-table">
+                                <!-- Container rows will be loaded here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mt-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Live Activity Feed</h3>
+                </div>
+                <div class="card-body p-0">
+                    <div id="event-feed" class="event-feed">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mt-3 mb-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Host Status</h3>
+                </div>
+                <div class="card-body">
+                    <div id="host-status" class="row">
+                        <!-- Host status cards will be loaded here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .host-card {
+        margin-bottom: 10px;
+    }
+    .status-active {
+        color: #28a745;
+        font-weight: bold;
+    }
+    .status-expired {
+        color: #dc3545;
+        font-weight: bold;
+    }
+    .status-warning {
+        color: #ffc107;
+        font-weight: bold;
+    }
+    .time-remaining {
+        font-family: monospace;
+        font-weight: bold;
+    }
+    .extensions-badge {
+        font-size: 0.9em;
+    }
+    .card:hover {
+        cursor: default;
+    }
+    .event-feed {
+        max-height: 400px;
+        overflow-y: auto;
+    }
+    .event-item {
+        padding: 10px 15px;
+        border-bottom: 1px solid #dee2e6;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        font-size: 14px;
+    }
+    .event-item:hover {
+        background-color: #f8f9fa;
+    }
+    .event-timestamp {
+        color: #6c757d;
+        white-space: nowrap;
+        font-size: 14px;
+        min-width: 140px;
+    }
+    .event-type {
+        font-weight: bold;
+        text-transform: uppercase;
+        font-size: 14px;
+        min-width: 160px;
+        white-space: nowrap;
+    }
+    .event-message {
+        flex: 1;
+        word-wrap: break-word;
+        font-size: 14px;
+    }
+    .event-username {
+        color: #007bff;
+        font-weight: bold;
+    }
+    .event-level-info .event-type {
+        color: #28a745;
+    }
+    .event-level-warning .event-type {
+        color: #ffc107;
+    }
+    .event-level-error .event-type {
+        color: #dc3545;
+    }
+</style>
+
+<script>
+    let autoRefreshInterval = null;
+    let eventSource = null;
+    let maxEvents = 100;
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function addEventToFeed(event) {
+        const feed = document.getElementById('event-feed');
+        const eventItem = document.createElement('div');
+        eventItem.className = `event-item event-level-${event.level}`;
+
+        let messageHtml = escapeHtml(event.message);
+        if (event.username) {
+            messageHtml = `<span class="event-username">${escapeHtml(event.username)}</span> ${messageHtml}`;
+        }
+
+        if (event.metadata && Object.keys(event.metadata).length > 0) {
+            const metaKeys = Object.keys(event.metadata).filter(k => !['traceback', 'error'].includes(k));
+            if (metaKeys.length > 0) {
+                const metaStr = metaKeys.map(k => `${k}=${event.metadata[k]}`).join(', ');
+                messageHtml += ` <small class="text-muted">[${escapeHtml(metaStr)}]</small>`;
+            }
+        }
+
+        eventItem.innerHTML = `
+            <span class="event-timestamp">${escapeHtml(event.datetime)}</span>
+            <span class="event-type">${escapeHtml(event.type)}</span>
+            <span class="event-message">${messageHtml}</span>
+        `;
+
+        feed.insertBefore(eventItem, feed.firstChild);
+
+        while (feed.children.length > maxEvents) {
+            feed.removeChild(feed.lastChild);
+        }
+
+        feed.scrollTop = 0;
+    }
+
+    function connectEventStream() {
+        if (eventSource) {
+            eventSource.close();
+        }
+
+        eventSource = new EventSource('/remote-desktop/admin/api/events/stream');
+
+        eventSource.onmessage = function(e) {
+            try {
+                const event = JSON.parse(e.data);
+                addEventToFeed(event);
+            } catch (err) {
+                console.error('Error parsing event:', err);
+            }
+        };
+
+        eventSource.onerror = function(e) {
+            console.error('EventSource error:', e);
+            setTimeout(() => {
+                connectEventStream();
+            }, 5000);
+        };
+    }
+
+    function formatTime(seconds) {
+        if (seconds <= 0) return 'EXPIRED';
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = seconds % 60;
+        if (hours > 0) {
+            return `${hours}h ${minutes}m ${secs}s`;
+        }
+        return `${minutes}m ${secs}s`;
+    }
+
+    function formatDateTime(timestamp) {
+        const date = new Date(timestamp * 1000);
+        return date.toLocaleString();
+    }
+
+    function refreshContainers() {
+        fetch('/remote-desktop/admin/api/containers', {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            updateContainersTable(data.containers);
+            updateHostStatus(data.hosts);
+        })
+        .catch(error => {
+            console.error('Error fetching containers:', error);
+        });
+    }
+
+    function updateHostStatus(hosts) {
+        const hostStatusDiv = document.getElementById('host-status');
+        hostStatusDiv.innerHTML = '';
+
+        hosts.forEach(host => {
+            const healthBadge = host.healthy ?
+                '<span class="badge badge-success">Healthy</span>' :
+                '<span class="badge badge-danger">Unhealthy</span>';
+
+            const statusBadge = host.active_containers > 0 ?
+                '<span class="badge badge-primary">Active</span>' :
+                '<span class="badge badge-secondary">Idle</span>';
+
+            const hostCard = `
+                <div class="col-md-6 col-lg-4 host-card">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">${host.hostname}</h5>
+                            <p class="card-text">
+                                <small class="text-muted">${host.description || 'Container Host'}</small>
+                            </p>
+                            <div class="mb-2">
+                                ${healthBadge}
+                                ${statusBadge}
+                                <span class="badge badge-info ml-2">
+                                    ${host.active_containers} container${host.active_containers !== 1 ? 's' : ''}
+                                </span>
+                            </div>
+                            <p class="mb-0 text-muted">
+                                <small>Public: ${host.pub_hostname || host.hostname}</small>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            `;
+            hostStatusDiv.innerHTML += hostCard;
+        });
+    }
+
+    function updateContainersTable(containers) {
+        const tbody = document.getElementById('containers-table');
+        
+        if (!containers || containers.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center">No active containers</td></tr>';
+            return;
+        }
+        
+        tbody.innerHTML = '';
+        containers.forEach(container => {
+            const timeRemaining = container.timer ? container.timer.time_remaining : 0;
+            const statusClass = timeRemaining <= 0 ? 'status-expired' : 
+                               timeRemaining < 300 ? 'status-warning' : 'status-active';
+            const status = timeRemaining <= 0 ? 'EXPIRED' : 
+                          timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
+            
+            const row = `
+                <tr>
+                    <td>
+                        <strong>${container.username}</strong>
+                        <br><small class="text-muted">ID: ${container.user_id}</small>
+                    </td>
+                    <td>
+                        <code>${container.container_name}</code>
+                    </td>
+                    <td>${container.hostname}</td>
+                    <td>${formatDateTime(container.created_at)}</td>
+                    <td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
+                    <td>
+                        ${container.timer ? `
+                            <span class="badge badge-${container.timer.extensions_used >= container.timer.max_extensions ? 'danger' : 'primary'} extensions-badge">
+                                ${container.timer.extensions_used}/${container.timer.max_extensions}
+                            </span>
+                        ` : 'N/A'}
+                    </td>
+                    <td><span class="${statusClass}">${status}</span></td>
+                    <td>
+                        <button class="btn btn-sm btn-info" onclick="peekVNC('${container.vnc_url}', '${container.username}')" title="View user's VNC session">
+                            <i class="fas fa-eye"></i> Peek
+                        </button>
+                        <button class="btn btn-sm btn-danger" onclick="killContainer(${container.user_id}, '${container.username}')">
+                            <i class="fas fa-stop"></i> Kill
+                        </button>
+                        ${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
+                            <button class="btn btn-sm btn-warning" onclick="extendContainer(${container.user_id})">
+                                <i class="fas fa-clock"></i> Extend
+                            </button>
+                        ` : ''}
+                    </td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
+    }
+
+    function peekVNC(vncUrl, username) {
+        if (!vncUrl) {
+            CTFd.ui.ezal.ezAlert({
+                title: 'Error',
+                body: 'VNC URL not available for this container',
+                button: 'OK'
+            });
+            return;
+        }
+        
+        // open VNC session in new window with admin branding
+        const windowName = `vnc_peek_${username}`;
+        const windowFeatures = 'width=1200,height=800,scrollbars=yes,resizable=yes';
+        const vncWindow = window.open(vncUrl + '&autoconnect=1&resize=remote&viewonly=1', windowName, windowFeatures);
+        
+        if (vncWindow) {
+            vncWindow.document.title = `[ADMIN PEEK] ${username}'s VNC Session`;
+            // add a small indicator that this is an admin view
+            setTimeout(() => {
+                try {
+                    const adminIndicator = vncWindow.document.createElement('div');
+                    adminIndicator.innerHTML = `
+                        <div style="position: fixed; top: 10px; right: 10px; background: #dc3545; color: white; 
+                                   padding: 5px 10px; border-radius: 3px; font-family: Arial; font-size: 12px; 
+                                   z-index: 9999; opacity: 0.9;">
+                            ADMIN MONITORING: ${username}
+                        </div>
+                    `;
+                    vncWindow.document.body.appendChild(adminIndicator);
+                } catch(e) {
+                    // cross-origin issues are expected, ignore
+                }
+            }, 1000);
+        } else {
+            CTFd.ui.ezal.ezAlert({
+                title: 'Error',
+                body: 'Could not open VNC window. Please check if popups are blocked.',
+                button: 'OK'
+            });
+        }
+    }
+
+    function killContainer(userId, username) {
+        if (!confirm(`Are you sure you want to kill the container for user ${username}?`)) {
+            return;
+        }
+        
+        const formData = new FormData();
+        formData.append('nonce', window.init.csrfNonce);
+        formData.append('user_id', userId);
+        
+        fetch('/remote-desktop/admin/api/kill', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            credentials: 'same-origin',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({
+                    title: 'Success',
+                    body: `Container for ${username} has been terminated`,
+                    button: 'OK'
+                });
+                refreshContainers();
+            } else {
+                CTFd.ui.ezal.ezAlert({
+                    title: 'Error',
+                    body: data.error || 'Failed to kill container',
+                    button: 'OK'
+                });
+            }
+        })
+        .catch(error => {
+            console.error('Error killing container:', error);
+        });
+    }
+
+    function extendContainer(userId) {
+        const formData = new FormData();
+        formData.append('nonce', window.init.csrfNonce);
+        formData.append('user_id', userId);
+        
+        fetch('/remote-desktop/admin/api/extend', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            credentials: 'same-origin',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({
+                    title: 'Success',
+                    body: 'Session extended successfully',
+                    button: 'OK'
+                });
+                refreshContainers();
+            } else {
+                CTFd.ui.ezal.ezAlert({
+                    title: 'Error',
+                    body: data.error || 'Failed to extend session',
+                    button: 'OK'
+                });
+            }
+        })
+        .catch(error => {
+            console.error('Error extending container:', error);
+        });
+    }
+
+    function triggerCleanup() {
+        const formData = new FormData();
+        formData.append('nonce', window.init.csrfNonce);
+        
+        fetch('/remote-desktop/api/cleanup', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            credentials: 'same-origin',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({
+                    title: 'Success',
+                    body: 'Cleanup triggered successfully',
+                    button: 'OK'
+                });
+                refreshContainers();
+            }
+        })
+        .catch(error => {
+            console.error('Error triggering cleanup:', error);
+        });
+    }
+
+    // Auto-refresh every 10 seconds
+    function startAutoRefresh() {
+        stopAutoRefresh();
+        autoRefreshInterval = setInterval(refreshContainers, 10000);
+    }
+
+    function stopAutoRefresh() {
+        if (autoRefreshInterval) {
+            clearInterval(autoRefreshInterval);
+            autoRefreshInterval = null;
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        connectEventStream();
+        refreshContainers();
+        startAutoRefresh();
+    });
+
+    window.addEventListener('beforeunload', function() {
+        if (eventSource) {
+            eventSource.close();
+        }
+        stopAutoRefresh();
+    });
+</script>
+{% endblock %}
