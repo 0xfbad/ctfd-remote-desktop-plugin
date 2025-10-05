@@ -41,7 +41,8 @@ def load(app):
 	def cleanup_worker():
 		while not cleanup_stop_event.is_set():
 			try:
-				container_manager.periodic_cleanup()
+				with app.app_context():
+					container_manager.periodic_cleanup()
 			except Exception as e:
 				logger.error(f"Periodic cleanup error: {str(e)}")
 			cleanup_stop_event.wait(config['timeouts']['cleanup_interval'])
