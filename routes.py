@@ -268,6 +268,7 @@ def create_routes(container_manager, orchestrator, config):
 	@bypass_csrf_protection
 	def admin_get_containers():
 		try:
+			container_manager.periodic_cleanup()
 			containers = container_manager.get_all_containers()
 			hosts = orchestrator.get_host_status()
 
