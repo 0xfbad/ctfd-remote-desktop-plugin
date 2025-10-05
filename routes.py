@@ -28,6 +28,7 @@ def create_routes(container_manager, orchestrator, config):
 		try:
 			user = get_current_user()
 			container_info = container_manager.get_container_info(user.id)
+			creation_status = container_manager.get_creation_status(user.id)
 
 			vnc_url = ""
 			formatted_time = ""
@@ -52,7 +53,8 @@ def create_routes(container_manager, orchestrator, config):
 				'remote_desktop.html',
 				container_info=template_container_info,
 				vnc_url=vnc_url,
-				formatted_time=formatted_time
+				formatted_time=formatted_time,
+				creation_status=creation_status
 			)
 		except Exception as e:
 			logger.error(f"Error rendering remote desktop page: {str(e)}")
@@ -114,6 +116,17 @@ def create_routes(container_manager, orchestrator, config):
 					level='warning'
 				)
 				return jsonify({'error': 'Session already exists'}), 400
+
+			creation_status = container_manager.get_creation_status(user.id)
+			if creation_status and creation_status.get('status') not in ['failed', 'none']:
+				event_logger.log_event(
+					'session_error',
+					'attempted to create session but creation already in progress',
+					user_id=user.id,
+					username=user.name,
+					level='warning'
+				)
+				return jsonify({'error': 'Session creation already in progress'}), 400
 
 			result = container_manager.create_container(user.id)
 

@@ -572,53 +572,104 @@ function terminateSession() {
 
 
 function syncWithServer() {
-    if (document.getElementById('vnc-frame') || document.querySelector('.workspace-header')) {
-        fetch('/remote-desktop/api/status', {
-            method: 'GET',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            credentials: 'same-origin'
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.session && data.session.timer) {
-                timeRemaining = data.session.timer.time_remaining;
-                continuationsUsed = data.session.timer.extensions_used;
-                updateTimerDisplay();
-                updateAddTimeButton();
+    fetch('/remote-desktop/api/status', {
+        method: 'GET',
+        headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        credentials: 'same-origin'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.session && data.session.timer) {
+            timeRemaining = data.session.timer.time_remaining;
+            continuationsUsed = data.session.timer.extensions_used;
+            updateTimerDisplay();
+            updateAddTimeButton();
 
-                if (!sessionTimer && data.session.timer.active && timeRemaining > 0) {
-                    sessionTimer = setInterval(updateCountdown, 1000);
-                }
+            if (!sessionTimer && data.session.timer.active && timeRemaining > 0) {
+                sessionTimer = setInterval(updateCountdown, 1000);
+            }
 
-                const startBtn = document.getElementById('start-btn');
-                const stopBtn = document.getElementById('stop-btn');
-                const addTimeBtn = document.getElementById('add-time-btn');
+            const startBtn = document.getElementById('start-btn');
+            const stopBtn = document.getElementById('stop-btn');
+            const addTimeBtn = document.getElementById('add-time-btn');
 
-                if (startBtn) startBtn.disabled = true;
-                if (stopBtn) stopBtn.disabled = false;
-                if (addTimeBtn) {
-                    addTimeBtn.disabled = continuationsUsed >= data.session.timer.max_extensions;
-                }
-            } else if (!data.session) {
+            if (startBtn) startBtn.disabled = true;
+            if (stopBtn) stopBtn.disabled = false;
+            if (addTimeBtn) {
+                addTimeBtn.disabled = continuationsUsed >= data.session.timer.max_extensions;
+            }
+
+            if (document.getElementById('vnc-frame')) {
+            } else {
+                window.location.reload();
+            }
+        } else if (!data.session) {
+            const noSessionScreen = document.getElementById('no-session-screen');
+            if (noSessionScreen && !pollInterval) {
+                fetch('/remote-desktop/api/creation-status', {
+                    method: 'GET',
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    credentials: 'same-origin'
+                })
+                .then(response => response.json())
+                .then(statusData => {
+                    if (statusData.status && statusData.status !== 'none' && statusData.status !== 'failed') {
+                        const startBtn = document.getElementById('start-btn');
+                        if (startBtn) {
+                            startBtn.disabled = true;
+                            const message = statusData.message || 'Creating container...';
+                            startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
+                        }
+                        showStatusMessage(statusData.message || 'Creating container...', 0);
+                        pollCreationStatus();
+                    } else {
+                        const startBtn = document.getElementById('start-btn');
+                        if (startBtn && startBtn.disabled) {
+                            startBtn.disabled = false;
+                            startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Creation status check error:', error);
+                });
+            } else if (document.getElementById('vnc-frame')) {
                 if (sessionTimer) {
                     clearInterval(sessionTimer);
                     sessionTimer = null;
                 }
                 window.location.reload();
             }
-        })
-        .catch(error => {
-            console.error('Sync error:', error);
-        });
-    }
+        }
+    })
+    .catch(error => {
+        console.error('Sync error:', error);
+    });
 }
 
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Remote Desktop workspace initialized');
 
+    {% if creation_status and creation_status.get('status') not in ['failed', 'ready', 'none', None] %}
+    const creationStatus = {{ creation_status | tojson }};
+    console.log('Page loaded with creation in progress:', creationStatus);
+
+    const startBtn = document.getElementById('start-btn');
+    if (startBtn) {
+        startBtn.disabled = true;
+        const message = creationStatus.message || 'Creating container...';
+        startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
+    }
+
+    showStatusMessage(creationStatus.message || 'Creating container...', 0);
+    pollCreationStatus();
+    {% else %}
     setTimeout(syncWithServer, 500);
+    {% endif %}
 
     setInterval(syncWithServer, 5000);
 });
