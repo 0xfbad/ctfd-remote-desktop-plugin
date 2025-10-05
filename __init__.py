@@ -28,6 +28,7 @@ def load(app):
 		config = yaml.safe_load(f)
 
 	orchestrator = HostOrchestrator(config)
+	orchestrator.test_host_connectivity()
 	container_manager = ContainerManager(config, orchestrator)
 
 	remote_desktop_bp = create_routes(container_manager, orchestrator, config)

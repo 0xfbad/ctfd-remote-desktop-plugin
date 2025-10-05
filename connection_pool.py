@@ -1,4 +1,3 @@
-import os
 import paramiko
 import logging
 from queue import Queue, Empty
@@ -14,42 +13,17 @@ class ConnectionPool:
 		self.available_connections = Queue()
 		self.total_connections = 0
 		self.lock = Lock()
-		self.ssh_key_paths = [
-			'/root/.ssh/id_ed25519',
-			'/root/.ssh/id_rsa',
-			os.path.expanduser('~/.ssh/id_ed25519'),
-			os.path.expanduser('~/.ssh/id_rsa'),
-			'/opt/CTFd/.ssh/id_ed25519',
-			'/opt/CTFd/.ssh/id_rsa'
-		]
 
 	def _create_connection(self):
 		ssh = paramiko.SSHClient()
 		ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-		connected = False
-		for key_path in self.ssh_key_paths:
-			if os.path.exists(key_path):
-				try:
-					ssh.connect(self.hostname, username=self.username, key_filename=key_path, timeout=15)
-					connected = True
-					logger.debug(f"Connected to {self.hostname} with key {key_path}")
-					break
-				except (paramiko.AuthenticationException, Exception):
-					continue
-
-		if not connected:
-			try:
-				ssh.connect(self.hostname, username=self.username, timeout=15)
-				connected = True
-				logger.debug(f"Connected to {self.hostname} with agent")
-			except Exception:
-				pass
-
-		if not connected:
-			raise Exception(f"Could not authenticate to {self.hostname}")
-
-		return ssh
+		try:
+			ssh.connect(self.hostname, username=self.username, timeout=15)
+			logger.debug(f"Connected to {self.hostname}")
+			return ssh
+		except Exception as e:
+			raise Exception(f"Could not authenticate to {self.hostname}: {str(e)}")
 
 	def _is_connection_valid(self, ssh):
 		try:

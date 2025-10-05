@@ -28,12 +28,19 @@ CTFd (gevent WSGI)
 Loads `hosts.yml` containing workspace host definitions, container resource limits, and session timer defaults. Falls back to localhost if config is missing.
 
 ### ConnectionPool
-Per-host paramiko SSH connection pool with max 20 connections. Attempts authentication via multiple key paths then SSH agent. Validates connection health on checkout/checkin to handle stale TCP connections.
+Per-host paramiko SSH connection pool with max 20 connections. Uses paramiko's default SSH authentication (SSH agent, default key locations, agent forwarding). Validates connection health on checkout/checkin to handle stale TCP connections.
 
 Lock contention minimized by keeping `available_connections.get()` call inside lock only when pool is exhausted, preventing connection count from exceeding max under concurrent load.
 
 ### HostOrchestrator
 Manages multiple connection pools and tracks per-host container counts. Implements least-loaded scheduling by sorting hosts by active container count. Marks hosts unhealthy on failure to remove from rotation.
+
+On startup, tests connectivity to all configured hosts:
+- SSH connection test
+- Docker daemon accessibility (`docker ps`)
+- Docker image presence (`docker image inspect`)
+
+Hosts that fail any check are marked unhealthy and excluded from scheduling. Results logged to admin event feed.
 
 Single global lock protects all host state since operations are infrequent and contention is minimal.
 
@@ -130,15 +137,13 @@ session_defaults:
   max_extensions: 3
 ```
 
-### SSH Key Paths
-ConnectionPool tries in order:
-- /root/.ssh/id_ed25519
-- /root/.ssh/id_rsa
-- ~/.ssh/id_ed25519
-- ~/.ssh/id_rsa
-- /opt/CTFd/.ssh/id_ed25519
-- /opt/CTFd/.ssh/id_rsa
-- SSH agent
+### SSH Authentication
+ConnectionPool uses paramiko's default SSH authentication which automatically tries:
+- SSH agent (if available)
+- Default key locations (~/.ssh/id_rsa, ~/.ssh/id_ed25519, etc.)
+- SSH agent forwarding (if configured)
+
+No explicit key paths needed. Works with standard SSH setups and deployment tools.
 
 ### Docker Container Requirements
 Image must:
@@ -172,8 +177,14 @@ Image must:
 ## Host Health Management
 
 Hosts are marked unhealthy when:
+- Startup connectivity test fails (SSH, docker daemon, or image missing)
 - Container creation fails
 - SSH connection fails
+
+Startup tests check each host for:
+- SSH connectivity
+- Docker daemon accessibility
+- Required image presence (does not pull automatically)
 
 Unhealthy hosts are excluded from scheduling but pools remain active. Currently no automatic recovery mechanism - requires manual intervention via admin API.
 

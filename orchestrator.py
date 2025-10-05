@@ -23,6 +23,62 @@ class HostOrchestrator:
 
 		logger.info(f"Orchestrator initialized with {len(self.hosts)} hosts")
 
+	def test_host_connectivity(self):
+		docker_image = self.config.get('docker_image', 'unknown')
+		healthy_count = 0
+
+		for host in self.hosts:
+			hostname = host['hostname']
+			ssh = None
+			reason = None
+
+			try:
+				ssh = self.checkout_connection(hostname)
+
+				stdin, stdout, stderr = ssh.exec_command("docker ps", timeout=5)
+				exit_status = stdout.channel.recv_exit_status()
+				if exit_status != 0:
+					reason = "docker daemon not accessible"
+					raise Exception(reason)
+
+				stdin, stdout, stderr = ssh.exec_command(f"docker image inspect {docker_image}", timeout=5)
+				exit_status = stdout.channel.recv_exit_status()
+				if exit_status != 0:
+					reason = "image not found"
+					raise Exception(reason)
+
+				self.checkin_connection(hostname, ssh)
+				ssh = None
+				healthy_count += 1
+
+				event_logger.log_event(
+					'host_healthy',
+					f'host {hostname} is healthy',
+					level='info',
+					metadata={'hostname': hostname}
+				)
+
+			except Exception as e:
+				if ssh:
+					try:
+						self.checkin_connection(hostname, ssh)
+					except:
+						pass
+
+				if not reason:
+					reason = "ssh connection failed"
+
+				self.mark_unhealthy(hostname)
+
+				event_logger.log_event(
+					'host_unhealthy',
+					f'host {hostname} marked unhealthy: {reason}',
+					level='warning',
+					metadata={'hostname': hostname, 'reason': reason}
+				)
+
+		logger.info(f"Host connectivity test complete: {healthy_count}/{len(self.hosts)} hosts healthy")
+
 	def get_next_host(self):
 		with self.global_lock:
 			available_hosts = []
