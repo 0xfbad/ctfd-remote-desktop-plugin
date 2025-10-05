@@ -229,20 +229,6 @@ def create_routes(container_manager, orchestrator, config):
 			logger.error(f"API error extending session: {str(e)}")
 			return jsonify({'error': str(e)}), 500
 
-	@remote_desktop_bp.route('/remote-desktop/api/hosts', methods=['GET'])
-	@authed_only
-	def get_hosts_status():
-		try:
-			user = get_current_user()
-			if not user.is_admin():
-				return jsonify({'error': 'Admin access required'}), 403
-
-			status = orchestrator.get_host_status()
-			return jsonify({'hosts': status})
-		except Exception as e:
-			logger.error(f"API error getting host status: {str(e)}")
-			return jsonify({'error': str(e)}), 500
-
 	@remote_desktop_bp.route('/remote-desktop/api/cleanup', methods=['POST'])
 	@authed_only
 	@bypass_csrf_protection
@@ -270,11 +256,9 @@ def create_routes(container_manager, orchestrator, config):
 		try:
 			container_manager.periodic_cleanup()
 			containers = container_manager.get_all_containers()
-			hosts = orchestrator.get_host_status()
 
 			return jsonify({
-				'containers': containers,
-				'hosts': hosts
+				'containers': containers
 			})
 		except Exception as e:
 			logger.error(f"Admin API error getting containers: {str(e)}")
