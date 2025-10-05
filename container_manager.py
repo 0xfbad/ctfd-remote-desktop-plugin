@@ -88,7 +88,7 @@ class ContainerManager:
 			memory_limit = self.config['container_defaults']['memory_limit']
 			cpu_limit = self.config['container_defaults']['cpu_limit']
 
-			docker_cmd = f"""docker run -d --name {container_name} -p 0:5900 -p 0:6080 -e VNC_PASSWORD=ctfdvnc -e RESOLUTION={resolution} --shm-size={shm_size} --memory={memory_limit} --cpus={cpu_limit} {self.config['docker_image']}"""
+			docker_cmd = f"""docker run -d --rm --name {container_name} -p 0:5900 -p 0:6080 -e VNC_PASSWORD=ctfdvnc -e RESOLUTION={resolution} --shm-size={shm_size} --memory={memory_limit} --cpus={cpu_limit} {self.config['docker_image']}"""
 
 			with self.lock:
 				self.creation_status[user_id] = {'status': 'starting_container', 'message': f'Starting container on {display_hostname}...'}
@@ -274,7 +274,6 @@ class ContainerManager:
 		try:
 			ssh = self.orchestrator.checkout_connection(hostname)
 			ssh.exec_command(f"docker stop {container_name}", timeout=self.config['timeouts']['docker_quick'])
-			ssh.exec_command(f"docker rm {container_name}", timeout=self.config['timeouts']['docker_quick'])
 			logger.info(f"Destroyed container {container_name} on {hostname}")
 		except Exception as e:
 			logger.error(f"Error executing docker commands for user {user_id}: {str(e)}")
@@ -491,7 +490,6 @@ class ContainerManager:
 				try:
 					ssh = self.orchestrator.checkout_connection(hostname)
 					ssh.exec_command(f"docker stop {container_name}", timeout=self.config['timeouts']['docker_quick'])
-					ssh.exec_command(f"docker rm {container_name}", timeout=self.config['timeouts']['docker_quick'])
 					logger.info(f"Cleaned up {container_name}")
 				finally:
 					if ssh:
