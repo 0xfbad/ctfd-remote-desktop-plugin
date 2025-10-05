@@ -293,7 +293,9 @@ function stopTimer() {
 function updateAddTimeButton() {
     const addTimeBtn = document.getElementById('add-time-btn');
     if (addTimeBtn) {
-        if (continuationsUsed >= maxContinuations) {
+        const hasActiveSession = document.getElementById('vnc-frame') !== null;
+
+        if (!hasActiveSession || continuationsUsed >= maxContinuations) {
             addTimeBtn.disabled = true;
             addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend Time';
         } else {
@@ -301,37 +303,6 @@ function updateAddTimeButton() {
             addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend Time';
         }
     }
-}
-
-function addTime() {
-    const formData = new FormData();
-    formData.append('nonce', window.init.csrfNonce);
-    
-    fetch('/remote-desktop/api/extend', {
-        method: 'POST',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
-        credentials: 'same-origin',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.timer) {
-            timeRemaining = data.timer.time_remaining;
-            continuationsUsed = data.timer.extensions_used;
-            updateTimerDisplay();
-            updateAddTimeButton();
-            
-            const addTimeBtn = document.getElementById('add-time-btn');
-            if (addTimeBtn && continuationsUsed >= data.timer.max_extensions) {
-                addTimeBtn.disabled = true;
-            }
-        }
-    })
-    .catch(error => {
-        console.error('Extension error:', error);
-    });
 }
 
 let pollInterval = null;
@@ -628,9 +599,20 @@ function syncWithServer() {
                         pollCreationStatus();
                     } else {
                         const startBtn = document.getElementById('start-btn');
+                        const stopBtn = document.getElementById('stop-btn');
+                        const addTimeBtn = document.getElementById('add-time-btn');
+
                         if (startBtn && startBtn.disabled) {
                             startBtn.disabled = false;
                             startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+                        }
+
+                        if (stopBtn && !stopBtn.disabled) {
+                            stopBtn.disabled = true;
+                        }
+
+                        if (addTimeBtn && !addTimeBtn.disabled) {
+                            addTimeBtn.disabled = true;
                         }
                     }
                 })
