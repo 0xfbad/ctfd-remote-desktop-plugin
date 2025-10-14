@@ -68,7 +68,7 @@ class HostOrchestrator:
 				if not reason:
 					reason = "ssh connection failed"
 
-				self.mark_unhealthy(hostname)
+				self.mark_unhealthy(hostname, log_event=False)
 
 				event_logger.log_event(
 					'host_unhealthy',
@@ -120,17 +120,18 @@ class HostOrchestrator:
 		if pool:
 			pool.checkin(ssh)
 
-	def mark_unhealthy(self, hostname):
+	def mark_unhealthy(self, hostname, log_event=True):
 		with self.global_lock:
 			self.host_health[hostname]['healthy'] = False
 			logger.warning(f"Host {hostname} marked as unhealthy")
 
-			event_logger.log_event(
-				'host_unhealthy',
-				f'host {hostname} marked as unhealthy',
-				level='warning',
-				metadata={'hostname': hostname}
-			)
+			if log_event:
+				event_logger.log_event(
+					'host_unhealthy',
+					f'host {hostname} marked as unhealthy',
+					level='warning',
+					metadata={'hostname': hostname}
+				)
 
 	def mark_healthy(self, hostname):
 		with self.global_lock:

@@ -276,6 +276,17 @@ def create_routes(container_manager, orchestrator, config):
 			logger.error(f"Admin API error getting containers: {str(e)}")
 			return jsonify({'error': str(e)}), 500
 
+	@remote_desktop_bp.route('/remote-desktop/admin/api/hosts', methods=['GET'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_get_hosts():
+		try:
+			hosts = orchestrator.get_host_status()
+			return jsonify({'hosts': hosts})
+		except Exception as e:
+			logger.error(f"Admin API error getting hosts: {str(e)}")
+			return jsonify({'error': str(e)}), 500
+
 	@remote_desktop_bp.route('/remote-desktop/admin/api/kill', methods=['POST'])
 	@admins_only
 	@bypass_csrf_protection
@@ -399,7 +410,7 @@ def create_routes(container_manager, orchestrator, config):
 			event_logger.add_listener(event_listener)
 
 			try:
-				recent_events = event_logger.get_recent_events(limit=50)
+				recent_events = event_logger.get_recent_events(limit=200)
 				for event in recent_events:
 					yield f"data: {json.dumps(event)}\n\n"
 

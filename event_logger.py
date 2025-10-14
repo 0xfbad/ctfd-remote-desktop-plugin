@@ -7,7 +7,7 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 class EventLogger:
-	def __init__(self, max_events=500):
+	def __init__(self, max_events=2000):
 		self.events = deque(maxlen=max_events)
 		self.lock = Lock()
 		self.listeners = []

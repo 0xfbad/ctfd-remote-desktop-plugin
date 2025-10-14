@@ -3,7 +3,7 @@
 {% block content %}
 <div class="jumbotron">
     <div class="container">
-        <h1>Remote Desktop Admin Dashboard</h1>
+        <h1>Desktop Sessions</h1>
     </div>
 </div>
 
@@ -12,7 +12,7 @@
         <div class="col-md-12">
             <div class="card">
                 <div class="card-header">
-                    <h3 class="card-title">Active Containers</h3>
+                    <h3 class="card-title">Sessions</h3>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -20,11 +20,10 @@
                             <thead>
                                 <tr>
                                     <th>User</th>
-                                    <th>Container Name</th>
+                                    <th>Container</th>
                                     <th>Host</th>
-                                    <th>Started</th>
                                     <th>Time Remaining</th>
-                                    <th>Extensions Used</th>
+                                    <th>Extends</th>
                                     <th>Status</th>
                                     <th>Actions</th>
                                 </tr>
@@ -43,10 +42,36 @@
         <div class="col-md-12">
             <div class="card">
                 <div class="card-header">
-                    <h3 class="card-title">Live Activity Feed</h3>
+                    <h3 class="card-title">Activity</h3>
                 </div>
                 <div class="card-body p-0">
                     <div id="event-feed" class="event-feed">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mt-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Hosts</h3>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Hostname</th>
+                                    <th>Status</th>
+                                    <th>Sessions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="hosts-table">
+                                <!-- Host rows will be loaded here -->
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -70,9 +95,6 @@
     .time-remaining {
         font-family: monospace;
         font-weight: bold;
-    }
-    .extensions-badge {
-        font-size: 0.9em;
     }
     .card:hover {
         cursor: default;
@@ -123,17 +145,57 @@
     .event-level-error .event-type {
         color: #dc3545;
     }
+    .action-buttons {
+        white-space: nowrap;
+        display: flex;
+        gap: 4px;
+    }
+    .action-buttons .btn {
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: transparent;
+    }
+    .action-buttons .btn:hover {
+        background-color: rgba(0,0,0,0.05);
+        border-radius: 3px;
+    }
+    .icon-monitor {
+        color: #6c757d;
+    }
+    .icon-kill {
+        color: #dc3545;
+    }
+    .icon-extend {
+        color: #ffc107;
+    }
 </style>
 
 <script>
     let autoRefreshInterval = null;
     let eventSource = null;
-    let maxEvents = 100;
+    let maxEvents = 500;
 
     function escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    function formatTimestamp(timestamp) {
+        const date = new Date(timestamp * 1000);
+        return date.toLocaleString(undefined, {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
     }
 
     function addEventToFeed(event) {
@@ -154,8 +216,10 @@
             }
         }
 
+        const formattedTimestamp = formatTimestamp(event.timestamp);
+
         eventItem.innerHTML = `
-            <span class="event-timestamp">${escapeHtml(event.datetime)}</span>
+            <span class="event-timestamp">${escapeHtml(formattedTimestamp)}</span>
             <span class="event-type">${escapeHtml(event.type)}</span>
             <span class="event-message">${messageHtml}</span>
         `;
@@ -204,9 +268,45 @@
         return `${minutes}m ${secs}s`;
     }
 
-    function formatDateTime(timestamp) {
-        const date = new Date(timestamp * 1000);
-        return date.toLocaleString();
+    function refreshHosts() {
+        fetch('/remote-desktop/admin/api/hosts', {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            updateHostPoolSummary(data.hosts);
+        })
+        .catch(error => {
+            console.error('Error fetching hosts:', error);
+        });
+    }
+
+    function updateHostPoolSummary(hosts) {
+        const tbody = document.getElementById('hosts-table');
+
+        if (!hosts || hosts.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center">No hosts configured</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = '';
+        hosts.forEach(host => {
+            const displayName = host.hostname.replace('.infra.slugsec.club', '');
+            const statusClass = host.healthy ? 'status-active' : 'status-expired';
+            const statusText = host.healthy ? 'UP' : 'DOWN';
+
+            const row = `
+                <tr>
+                    <td><strong>${escapeHtml(displayName)}</strong></td>
+                    <td><span class="${statusClass}">${statusText}</span></td>
+                    <td>${host.active_containers}</td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
     }
 
     function refreshContainers() {
@@ -225,11 +325,16 @@
         });
     }
 
+    function refreshAll() {
+        refreshHosts();
+        refreshContainers();
+    }
+
     function updateContainersTable(containers) {
         const tbody = document.getElementById('containers-table');
-        
+
         if (!containers || containers.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="8" class="text-center">No active containers</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sessions</td></tr>';
             return;
         }
         
@@ -243,34 +348,24 @@
             
             const row = `
                 <tr>
-                    <td>
-                        <strong>${container.username}</strong>
-                        <br><small class="text-muted">ID: ${container.user_id}</small>
-                    </td>
+                    <td><strong>${container.username}</strong></td>
                     <td>
                         <code>${container.container_name}</code>
                     </td>
                     <td>${container.hostname}</td>
-                    <td>${formatDateTime(container.created_at)}</td>
                     <td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
-                    <td>
-                        ${container.timer ? `
-                            <span class="badge badge-${container.timer.extensions_used >= container.timer.max_extensions ? 'danger' : 'primary'} extensions-badge">
-                                ${container.timer.extensions_used}/${container.timer.max_extensions}
-                            </span>
-                        ` : 'N/A'}
-                    </td>
+                    <td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
                     <td><span class="${statusClass}">${status}</span></td>
-                    <td>
-                        <button class="btn btn-sm btn-info" onclick="peekVNC('${container.vnc_url}', '${container.username}')" title="View user's VNC session">
-                            <i class="fas fa-eye"></i> Peek
+                    <td class="action-buttons">
+                        <button class="btn btn-sm" onclick="peekVNC('${container.vnc_url}', '${container.username}')" title="Monitor">
+                            <i class="fas fa-eye icon-monitor"></i>
                         </button>
-                        <button class="btn btn-sm btn-danger" onclick="killContainer(${container.user_id}, '${container.username}')">
-                            <i class="fas fa-stop"></i> Kill
+                        <button class="btn btn-sm" onclick="killContainer(${container.user_id}, '${container.username}')" title="Kill">
+                            <i class="fas fa-times icon-kill"></i>
                         </button>
                         ${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
-                            <button class="btn btn-sm btn-warning" onclick="extendContainer(${container.user_id})">
-                                <i class="fas fa-clock"></i> Extend
+                            <button class="btn btn-sm" onclick="extendContainer(${container.user_id})" title="Extend">
+                                <i class="fas fa-clock icon-extend"></i>
                             </button>
                         ` : ''}
                     </td>
@@ -284,7 +379,7 @@
         if (!vncUrl) {
             CTFd.ui.ezal.ezAlert({
                 title: 'Error',
-                body: 'VNC URL not available for this container',
+                body: 'VNC unavailable',
                 button: 'OK'
             });
             return;
@@ -316,14 +411,14 @@
         } else {
             CTFd.ui.ezal.ezAlert({
                 title: 'Error',
-                body: 'Could not open VNC window. Please check if popups are blocked.',
+                body: 'Failed to open VNC (check popup blocker)',
                 button: 'OK'
             });
         }
     }
 
     function killContainer(userId, username) {
-        if (!confirm(`Are you sure you want to kill the container for user ${username}?`)) {
+        if (!confirm(`Kill ${username}'s session?`)) {
             return;
         }
         
@@ -344,14 +439,14 @@
             if (data.success) {
                 CTFd.ui.ezal.ezAlert({
                     title: 'Success',
-                    body: `Container for ${username} has been terminated`,
+                    body: `Killed ${username}`,
                     button: 'OK'
                 });
-                refreshContainers();
+                refreshAll();
             } else {
                 CTFd.ui.ezal.ezAlert({
                     title: 'Error',
-                    body: data.error || 'Failed to kill container',
+                    body: data.error || 'Kill failed',
                     button: 'OK'
                 });
             }
@@ -379,14 +474,14 @@
             if (data.success) {
                 CTFd.ui.ezal.ezAlert({
                     title: 'Success',
-                    body: 'Session extended successfully',
+                    body: 'Extended',
                     button: 'OK'
                 });
-                refreshContainers();
+                refreshAll();
             } else {
                 CTFd.ui.ezal.ezAlert({
                     title: 'Error',
-                    body: data.error || 'Failed to extend session',
+                    body: data.error || 'Extend failed',
                     button: 'OK'
                 });
             }
@@ -413,10 +508,10 @@
             if (data.success) {
                 CTFd.ui.ezal.ezAlert({
                     title: 'Success',
-                    body: 'Cleanup triggered successfully',
+                    body: 'Cleanup started',
                     button: 'OK'
                 });
-                refreshContainers();
+                refreshAll();
             }
         })
         .catch(error => {
@@ -424,10 +519,9 @@
         });
     }
 
-    // Auto-refresh every 10 seconds
     function startAutoRefresh() {
         stopAutoRefresh();
-        autoRefreshInterval = setInterval(refreshContainers, 10000);
+        autoRefreshInterval = setInterval(refreshAll, 10000);
     }
 
     function stopAutoRefresh() {
@@ -439,7 +533,7 @@
 
     document.addEventListener('DOMContentLoaded', function() {
         connectEventStream();
-        refreshContainers();
+        refreshAll();
         startAutoRefresh();
     });
 

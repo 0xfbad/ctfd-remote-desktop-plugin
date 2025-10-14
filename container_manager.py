@@ -264,7 +264,7 @@ class ContainerManager:
 		with self.lock:
 			return self.creation_status.get(user_id)
 
-	def destroy_container(self, user_id):
+	def destroy_container(self, user_id, log_destruction=True):
 		from CTFd.models import Users
 		user = Users.query.filter_by(id=user_id).first()
 		username = user.name if user else f"User {user_id}"
@@ -299,14 +299,15 @@ class ContainerManager:
 			if user_id in self.creation_status:
 				del self.creation_status[user_id]
 
-		event_logger.log_event(
-			'session_destroyed',
-			'remote desktop session destroyed',
-			user_id=user_id,
-			username=username,
-			level='info',
-			metadata={'hostname': hostname, 'container_name': container_name}
-		)
+		if log_destruction:
+			event_logger.log_event(
+				'session_destroyed',
+				'remote desktop session destroyed',
+				user_id=user_id,
+				username=username,
+				level='info',
+				metadata={'hostname': hostname, 'container_name': container_name}
+			)
 
 		return {'success': True}
 
@@ -328,6 +329,8 @@ class ContainerManager:
 
 			timer_status = self.get_session_timer_status(user_id)
 
+			vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=1&resize=remote&path=websockify"
+
 			container_data = {
 				'user_id': user_id,
 				'username': user.name if user else 'Unknown',
@@ -337,6 +340,7 @@ class ContainerManager:
 				'created_at': container_info['created_at'],
 				'vnc_port': container_info['vnc_port'],
 				'novnc_port': container_info['novnc_port'],
+				'vnc_url': vnc_url,
 				'timer': {
 					'active': timer_status.get('started', False),
 					'time_remaining': timer_status.get('time_remaining', 0),
@@ -471,14 +475,14 @@ class ContainerManager:
 
 			event_logger.log_event(
 				'session_expired',
-				'session expired and will be destroyed',
+				'session expired',
 				user_id=user_id,
 				username=username,
 				level='warning'
 			)
 
 			try:
-				self.destroy_container(user_id)
+				self.destroy_container(user_id, log_destruction=False)
 			except Exception as e:
 				logger.error(f"Failed to destroy expired session for user {user_id}: {str(e)}")
 
