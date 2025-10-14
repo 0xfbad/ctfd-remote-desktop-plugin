@@ -250,6 +250,7 @@ let continuationsUsed = 0;
 const maxContinuations = 3;
 let lastFailedHostname = '';
 let errorAlreadyShown = false;
+let expirationWarningShown = false;
 
 function showStatusMessage(message, timeout = 3000) {
     const statusDiv = document.getElementById('status-message');
@@ -505,9 +506,10 @@ function addTime() {
         if (data.timer) {
             timeRemaining = data.timer.time_remaining;
             continuationsUsed = data.timer.extensions_used;
+            expirationWarningShown = false;
             updateTimerDisplay();
             updateAddTimeButton();
-            
+
             if (addTimeBtn) {
                 addTimeBtn.disabled = false;
                 updateAddTimeButton();
@@ -532,6 +534,11 @@ function addTime() {
 function updateCountdown() {
     timeRemaining--;
     updateTimerDisplay();
+
+    if (timeRemaining <= 300 && timeRemaining > 0 && !expirationWarningShown) {
+        expirationWarningShown = true;
+        alert('Your session will expire in less than 5 minutes. Consider extending your session using the "Extend Time" button.');
+    }
 
     if (timeRemaining <= 0) {
         clearInterval(sessionTimer);
@@ -580,6 +587,11 @@ function syncWithServer() {
         if (data.session && data.session.timer) {
             timeRemaining = data.session.timer.time_remaining;
             continuationsUsed = data.session.timer.extensions_used;
+
+            if (timeRemaining > 300) {
+                expirationWarningShown = false;
+            }
+
             updateTimerDisplay();
             updateAddTimeButton();
 
