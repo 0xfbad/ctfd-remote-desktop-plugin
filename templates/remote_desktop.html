@@ -3,7 +3,6 @@
 {% block stylesheets %}
 {{ super() }}
 <style>
-    /* Full-screen workspace layout */
     .workspace-container {
         position: fixed;
         top: 0;
@@ -246,9 +245,11 @@
 <script>
 let debugMode = false;
 let sessionTimer = null;
-let timeRemaining = 0; // in seconds
+let timeRemaining = 0;
 let continuationsUsed = 0;
 const maxContinuations = 3;
+let lastFailedHostname = '';
+let errorAlreadyShown = false;
 
 function showStatusMessage(message, timeout = 3000) {
     const statusDiv = document.getElementById('status-message');
@@ -280,13 +281,10 @@ function updateTimerDisplay() {
 }
 
 function startTimer() {
-    // Timer is automatically started when session is created
-    // This function now just syncs the UI
     syncTimerFromStatus();
 }
 
 function stopTimer() {
-    // Stop timer by destroying session
     terminateSession();
 }
 
@@ -315,6 +313,7 @@ function checkStatus() {
 
     if (elapsed > POLL_TIMEOUT) {
         clearInterval(pollInterval);
+        pollInterval = null;
         if (startBtn) {
             startBtn.disabled = false;
             startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
@@ -334,6 +333,8 @@ function checkStatus() {
     .then(data => {
         if (data.status === 'ready' && data.session) {
             clearInterval(pollInterval);
+            pollInterval = null;
+            lastFailedHostname = '';
             if (startBtn) {
                 startBtn.innerHTML = '<span class="loading-spinner"></span>Loading desktop...';
             }
@@ -343,13 +344,36 @@ function checkStatus() {
             }, 1000);
         } else if (data.status === 'failed') {
             clearInterval(pollInterval);
-            if (startBtn) {
-                startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+            pollInterval = null;
+
+            const errorMsg = data.error || 'Unknown error';
+            const failedHost = data.hostname || lastFailedHostname || 'unknown host';
+
+            if (errorMsg.includes('No healthy hosts available')) {
+                if (startBtn) {
+                    startBtn.disabled = false;
+                    startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+                }
+                if (!errorAlreadyShown) {
+                    alert('Failed: ' + errorMsg);
+                    errorAlreadyShown = true;
+                }
+                lastFailedHostname = '';
+            } else {
+                lastFailedHostname = failedHost;
+                showStatusMessage(`Failed to start on ${failedHost}, retrying...`, 0);
+                setTimeout(() => {
+                    startSession();
+                }, 1000);
             }
-            showStatusMessage('Failed: ' + (data.error || 'Unknown error'), 5000);
         } else {
             const message = data.message || 'Creating container...';
+
+            const hostnameMatch = message.match(/(?:to|on|for)\s+(\w+)/i);
+            if (hostnameMatch) {
+                lastFailedHostname = hostnameMatch[1];
+            }
+
             if (startBtn) {
                 startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
             }
@@ -372,6 +396,8 @@ function pollCreationStatus() {
 }
 
 function startSession() {
+    errorAlreadyShown = false;
+
     const startBtn = document.getElementById('start-btn');
     if (startBtn) {
         startBtn.disabled = true;
@@ -445,7 +471,6 @@ function stopSession() {
     })
     .then(response => response.json())
     .then(data => {
-        // Reload the page to show the no-session screen
         window.location.reload();
     })
     .catch(error => {
@@ -577,49 +602,7 @@ function syncWithServer() {
                 window.location.reload();
             }
         } else if (!data.session) {
-            const noSessionScreen = document.getElementById('no-session-screen');
-            if (noSessionScreen && !pollInterval) {
-                fetch('/remote-desktop/api/creation-status', {
-                    method: 'GET',
-                    headers: {
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    credentials: 'same-origin'
-                })
-                .then(response => response.json())
-                .then(statusData => {
-                    if (statusData.status && statusData.status !== 'none' && statusData.status !== 'failed') {
-                        const startBtn = document.getElementById('start-btn');
-                        if (startBtn) {
-                            startBtn.disabled = true;
-                            const message = statusData.message || 'Creating container...';
-                            startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
-                        }
-                        showStatusMessage(statusData.message || 'Creating container...', 0);
-                        pollCreationStatus();
-                    } else {
-                        const startBtn = document.getElementById('start-btn');
-                        const stopBtn = document.getElementById('stop-btn');
-                        const addTimeBtn = document.getElementById('add-time-btn');
-
-                        if (startBtn && startBtn.disabled) {
-                            startBtn.disabled = false;
-                            startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
-                        }
-
-                        if (stopBtn && !stopBtn.disabled) {
-                            stopBtn.disabled = true;
-                        }
-
-                        if (addTimeBtn && !addTimeBtn.disabled) {
-                            addTimeBtn.disabled = true;
-                        }
-                    }
-                })
-                .catch(error => {
-                    console.error('Creation status check error:', error);
-                });
-            } else if (document.getElementById('vnc-frame')) {
+            if (document.getElementById('vnc-frame')) {
                 if (sessionTimer) {
                     clearInterval(sessionTimer);
                     sessionTimer = null;
@@ -634,11 +617,8 @@ function syncWithServer() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('Remote Desktop workspace initialized');
-
     {% if creation_status and creation_status.get('status') not in ['failed', 'ready', 'none', None] %}
     const creationStatus = {{ creation_status | tojson }};
-    console.log('Page loaded with creation in progress:', creationStatus);
 
     const startBtn = document.getElementById('start-btn');
     if (startBtn) {
@@ -649,11 +629,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     showStatusMessage(creationStatus.message || 'Creating container...', 0);
     pollCreationStatus();
-    {% else %}
+    {% elif container_info %}
     setTimeout(syncWithServer, 500);
-    {% endif %}
-
     setInterval(syncWithServer, 5000);
+    {% endif %}
 });
 </script>
 {% endblock %}

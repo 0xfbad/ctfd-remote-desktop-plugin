@@ -135,7 +135,7 @@ class ContainerManager:
 			ssh = None
 
 			with self.lock:
-				self.creation_status[user_id] = {'status': 'waiting_vnc', 'message': 'Waiting for display server...'}
+				self.creation_status[user_id] = {'status': 'waiting_vnc', 'message': f'Waiting for {display_hostname} display server...'}
 
 			vnc_ready = self.wait_for_vnc_ready(hostname, novnc_port)
 
@@ -198,10 +198,18 @@ class ContainerManager:
 			logger.error(f"Error creating container for user {user_id}: {str(e)}")
 			logger.error(traceback.format_exc())
 
+			failed_hostname = None
+			if selected_host:
+				try:
+					failed_hostname = selected_host['hostname'].replace('.infra.slugsec.club', '')
+				except:
+					pass
+
 			with self.lock:
 				self.creation_status[user_id] = {
 					'status': 'failed',
-					'error': str(e)
+					'error': str(e),
+					'hostname': failed_hostname
 				}
 
 			event_logger.log_event(
