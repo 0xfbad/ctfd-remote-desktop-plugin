@@ -11,9 +11,6 @@ from .event_logger import event_logger
 
 logger = logging.getLogger(__name__)
 
-def _build_vnc_url(user_id):
-	return f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=1&resize=remote&path=websockify"
-
 def create_routes(container_manager, orchestrator, config):
 	remote_desktop_bp = Blueprint(
 		'remote_desktop',
@@ -33,7 +30,7 @@ def create_routes(container_manager, orchestrator, config):
 			vnc_url = ""
 			formatted_time = ""
 			if container_info:
-				vnc_url = _build_vnc_url(user.id)
+				vnc_url = container_info.get('vnc_url', '')
 				created_timestamp = container_info['created_at']
 				created_dt = datetime.datetime.fromtimestamp(created_timestamp)
 				formatted_time = created_dt.strftime('%B %d, %Y at %I:%M %p')
@@ -81,7 +78,7 @@ def create_routes(container_manager, orchestrator, config):
 				container_manager.start_session_timer(user.id)
 				timer_status = container_manager.get_session_timer_status(user.id)
 
-			vnc_url = _build_vnc_url(user.id)
+			vnc_url = container_info.get('vnc_url', '')
 
 			return jsonify({
 				'session': {
@@ -153,7 +150,7 @@ def create_routes(container_manager, orchestrator, config):
 				if container_info:
 					container_manager.start_session_timer(user.id)
 					timer_status = container_manager.get_session_timer_status(user.id)
-					vnc_url = _build_vnc_url(user.id)
+					vnc_url = container_info.get('vnc_url', '')
 					return jsonify({
 						'status': 'ready',
 						'message': 'Desktop ready!',
@@ -174,7 +171,7 @@ def create_routes(container_manager, orchestrator, config):
 				container_manager.start_session_timer(user.id)
 				container_info = container_manager.get_container_info(user.id)
 				timer_status = container_manager.get_session_timer_status(user.id)
-				vnc_url = _build_vnc_url(user.id)
+				vnc_url = container_info.get('vnc_url', '')
 
 				return jsonify({
 					'status': 'ready',
@@ -323,36 +320,6 @@ def create_routes(container_manager, orchestrator, config):
 		except Exception as e:
 			logger.error(f"Admin API error killing container: {str(e)}")
 			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/auth-check', methods=['GET'])
-	@authed_only
-	def auth_check():
-		try:
-			current_user = get_current_user()
-			user_id = request.headers.get('X-User-ID')
-
-			if not user_id:
-				return '', 400
-
-			user_id = int(user_id)
-
-			is_admin = hasattr(current_user, 'type') and current_user.type == 'admin'
-			if not is_admin and current_user.id != user_id:
-				logger.warning(f"User {current_user.id} attempted to access VNC for user {user_id}")
-				return '', 403
-
-			container_info = container_manager.get_container_info(user_id)
-			if not container_info:
-				return '', 404
-
-			response = Response('', 200)
-			response.headers['X-VNC-Host'] = container_info['hostname']
-			response.headers['X-VNC-Port'] = str(container_info['novnc_port'])
-			return response
-
-		except Exception as e:
-			logger.error(f"Auth check error: {str(e)}")
-			return '', 500
 
 	@remote_desktop_bp.route('/remote-desktop/admin/api/extend', methods=['POST'])
 	@admins_only
