@@ -385,10 +385,9 @@
             return;
         }
         
-        // open VNC session in new window with admin branding
         const windowName = `vnc_peek_${username}`;
         const windowFeatures = 'width=1200,height=800,scrollbars=yes,resizable=yes';
-        const vncWindow = window.open(vncUrl + '&autoconnect=1&resize=remote&viewonly=1', windowName, windowFeatures);
+        const vncWindow = window.open(vncUrl + '&viewonly=1', windowName, windowFeatures);
         
         if (vncWindow) {
             vncWindow.document.title = `[ADMIN PEEK] ${username}'s VNC Session`;
