@@ -4,7 +4,9 @@ CTFd plugin for provisioning on-demand remote desktop sessions across a distribu
 
 ## Architecture
 
-This plugin orchestrates containerized desktop environments across multiple remote hosts, using SSH for control plane communication and nginx for VNC traffic proxying. Container creation runs asynchronously via gevent greenlets to avoid blocking request handlers.
+This plugin orchestrates containerized desktop environments across multiple remote hosts, using SSH for control plane communication and per-container VNC passwords for access control. Container creation runs asynchronously via gevent greenlets to avoid blocking request handlers.
+
+Students connect directly to the container's noVNC endpoint, the plugin generates a random password per container, passes it as an env var, and builds a URL with the password embedded as a query param so noVNC auto-connects with no dialog and no typing. Admins can peek at any student's desktop through the same stored password.
 
 ### System Topology
 
@@ -19,7 +21,7 @@ CTFd (gevent WSGI)
                  |
                  +-- Remote Docker Hosts (run VNC containers)
                       |
-                      +-- nginx auth_request (validates, proxies VNC traffic)
+                      +-- Students connect directly via noVNC URL with embedded password
 ```
 
 ## Components
@@ -52,11 +54,13 @@ Core state machine for container lifecycle:
 2. Spawns gevent greenlet with Flask app context
 3. Background task selects least-loaded healthy host
 4. Checks out SSH connection from pool
-5. Executes `docker run` with dynamic port mapping (0:5900, 0:6080)
-6. Polls `docker port` to discover mapped ports
-7. HTTP polls noVNC endpoint until ready (max 90s)
-8. Updates `active_containers` dict and initializes session timer
-9. Returns connection to pool
+5. Generates random VNC password via `secrets.token_urlsafe(6)[:8]`
+6. Executes `docker run` with dynamic port mapping (0:5900, 0:6080), `VNC_PASSWORD`, `CTFD_USERNAME`, and `RESOLUTION` env vars
+7. Polls `docker port` to discover mapped ports
+8. HTTP polls noVNC endpoint until ready (max 90s)
+9. Builds direct URL `http://{host}:{port}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true`
+10. Stores password and URL in `active_containers` dict, initializes session timer
+11. Returns connection to pool
 
 **Destruction flow:**
 1. User or periodic cleanup triggers destruction
@@ -77,32 +81,21 @@ Error handling in creation path individually wraps SSH checkin, slot release, an
 ### EventLogger
 Thread-safe event log using deque with 500 event limit. Supports real-time listener callbacks for SSE streaming to admin dashboard. Failed listeners are removed and logged.
 
-## Nginx Integration
+## VNC Authentication
 
-The plugin relies on nginx auth_request subrequest pattern for access control and dynamic backend routing.
+Students connect directly to the container's noVNC port on the runner host, no nginx proxy in the path. Access control is handled by VNC's native password auth rather than a reverse proxy layer.
 
-### VNC Proxy Flow
+### Connection Flow
 
-1. Client requests `/remote-desktop/vnc/123/websockify`
-2. Nginx extracts user_id=123 from URL via regex capture
-3. Nginx triggers internal subrequest to `/remote-desktop/auth-check` with `X-User-ID: 123` header
-4. CTFd validates:
-   - User is authenticated
-   - User owns container 123 OR user is admin
-   - Container exists
-5. CTFd returns 200 with `X-VNC-Host: hostname` and `X-VNC-Port: 12345` headers
-6. Nginx captures headers via `auth_request_set` and proxies to `http://$vnc_host:$vnc_port/websockify`
-7. WebSocket upgrade headers preserved for VNC connection
+1. Plugin generates a random 8-char password and passes it as `VNC_PASSWORD` to `docker run`
+2. Container's startup script writes a VNC passwd file and launches Xvnc with `-SecurityTypes VncAuth`
+3. Plugin builds a direct URL with the password as a query param, noVNC reads it and sends it to VNC automatically
+4. Student gets the URL in an iframe, connects with zero interaction
+5. Admin dashboard uses the same stored password to build peek URLs
 
-Static assets (vnc.html, noVNC JS) follow same pattern but without WebSocket upgrade.
+### Security
 
-### Why This Pattern
-
-- Nginx handles WebSocket proxying and load distribution
-- CTFd maintains session state and authorization logic
-- No need for CTFd to serve binary VNC traffic
-- Per-request authorization without shared session store
-- Dynamic backend routing without nginx config reloads
+VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:8]` gives 48 bits of entropy which is plenty for preventing port-scan drive-bys in a classroom setting. The password appears in the browser URL bar and history, fine for a lab environment. Students who share their URL share their desktop, which is expected
 
 ## Concurrency Model
 
@@ -149,7 +142,9 @@ No explicit key paths needed. Works with standard SSH setups and deployment tool
 Image must:
 - Expose VNC on port 5900
 - Expose noVNC on port 6080
-- Accept `VNC_PASSWORD` and `RESOLUTION` env vars
+- Accept `CTFD_USERNAME` env var and use it as the linux account name (sanitize it, CTFd display names can have spaces and special chars)
+- Accept `VNC_PASSWORD` env var and configure Xvnc with VncAuth using it (fall back to a random password if not set)
+- Accept `RESOLUTION` env var
 - Serve noVNC web client at `/vnc.html`
 - Provide WebSocket endpoint at `/websockify`
 
@@ -170,9 +165,6 @@ Image must:
 - `POST /remote-desktop/admin/api/extend` - Extend any user session
 - `GET /remote-desktop/admin/api/events/stream` - SSE event stream
 - `GET /remote-desktop/admin/api/events/recent` - Recent event log
-
-### Internal Endpoints
-- `GET /remote-desktop/api/auth-check` - Nginx subrequest for VNC auth
 
 ## Host Health Management
 
