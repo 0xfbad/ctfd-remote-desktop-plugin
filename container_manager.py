@@ -1,6 +1,7 @@
 import time
 import socket
 import logging
+import secrets
 import traceback
 from threading import Lock
 from .event_logger import event_logger
@@ -82,13 +83,14 @@ class ContainerManager:
 			logger.debug(f"Checked out SSH connection to {hostname}")
 
 			container_name = f"kali-desktop-{user_id}-{int(time.time())}"
+			vnc_password = secrets.token_urlsafe(6)[:8]
 
 			resolution = self.config['container_defaults']['resolution']
 			shm_size = self.config['container_defaults']['shm_size']
 			memory_limit = self.config['container_defaults']['memory_limit']
 			cpu_limit = self.config['container_defaults']['cpu_limit']
 
-			docker_cmd = f"""docker run -d --rm --name {container_name} -p 0:5900 -p 0:6080 -e VNC_PASSWORD=ctfdvnc -e RESOLUTION={resolution} --shm-size={shm_size} --memory={memory_limit} --cpus={cpu_limit} {self.config['docker_image']}"""
+			docker_cmd = f"""docker run -d --rm --name {container_name} -p 0:5900 -p 0:6080 -e VNC_PASSWORD={vnc_password} -e RESOLUTION={resolution} -e CTFD_USERNAME={username} --shm-size={shm_size} --memory={memory_limit} --cpus={cpu_limit} {self.config['docker_image']}"""
 
 			with self.lock:
 				self.creation_status[user_id] = {'status': 'starting_container', 'message': f'Starting container on {display_hostname}...'}
@@ -142,6 +144,8 @@ class ContainerManager:
 			if not vnc_ready:
 				raise Exception(f"VNC server on {hostname}:{novnc_port} did not become ready in time")
 
+			vnc_url = f"http://{pub_hostname}:{novnc_port}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
+
 			with self.lock:
 				self.active_containers[user_id] = {
 					'container_id': container_id,
@@ -150,6 +154,8 @@ class ContainerManager:
 					'novnc_port': novnc_port,
 					'hostname': hostname,
 					'pub_hostname': pub_hostname,
+					'vnc_password': vnc_password,
+					'vnc_url': vnc_url,
 					'created_at': time.time()
 				}
 
@@ -329,7 +335,7 @@ class ContainerManager:
 
 			timer_status = self.get_session_timer_status(user_id)
 
-			vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=1&resize=remote&path=websockify"
+			vnc_url = container_info.get('vnc_url', '')
 
 			container_data = {
 				'user_id': user_id,
