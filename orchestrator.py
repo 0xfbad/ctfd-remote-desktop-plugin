@@ -1,168 +1,140 @@
 import logging
 from threading import Lock
 from collections import defaultdict
-from .connection_pool import ConnectionPool
 from .event_logger import event_logger
 
 logger = logging.getLogger(__name__)
 
-class HostOrchestrator:
-	def __init__(self, config):
-		self.config = config
-		self.hosts = config['workspace_hosts']
-		self.host_pools = {}
-		self.host_container_counts = defaultdict(int)
-		self.host_health = {}
-		self.global_lock = Lock()
 
-		max_connections = config['connection_pool']['max_connections_per_host']
-		for host in self.hosts:
-			hostname = host['hostname']
-			self.host_pools[hostname] = ConnectionPool(hostname, host['user'], max_connections)
-			self.host_health[hostname] = {'healthy': True}
+class Orchestrator:
+	def __init__(self, host_manager):
+		self.host_manager = host_manager
+		self.container_counts = defaultdict(int)  # context_name -> count
+		self.health = {}                          # context_name -> bool
+		self.weights = {}                         # context_name -> int
+		self.lock = Lock()
 
-		logger.info(f"Orchestrator initialized with {len(self.hosts)} hosts")
+	def load_from_db(self):
+		from .models import DesktopDockerContextModel, get_setting
 
-	def test_host_connectivity(self):
-		docker_image = self.config.get('docker_image', 'unknown')
-		healthy_count = 0
+		try:
+			contexts = DesktopDockerContextModel.query.filter_by(enabled=True).all()
+		except Exception as e:
+			logger.error(f"could not query docker contexts: {e}")
+			contexts = []
 
-		for host in self.hosts:
-			hostname = host['hostname']
-			ssh = None
-			reason = None
+		self.host_manager.load_contexts(contexts)
+		connected = set(self.host_manager.get_connected_contexts())
+		docker_image = get_setting('docker_image')
 
-			try:
-				ssh = self.checkout_connection(hostname)
+		with self.lock:
+			self.health.clear()
+			self.weights.clear()
 
-				stdin, stdout, stderr = ssh.exec_command("docker ps", timeout=5)
-				exit_status = stdout.channel.recv_exit_status()
-				if exit_status != 0:
-					reason = "docker daemon not accessible"
-					raise Exception(reason)
+			for ctx in contexts:
+				name = ctx.context_name
+				is_connected = name in connected
 
-				stdin, stdout, stderr = ssh.exec_command(f"docker image inspect {docker_image}", timeout=5)
-				exit_status = stdout.channel.recv_exit_status()
-				if exit_status != 0:
-					reason = "image not found"
-					raise Exception(reason)
+				if is_connected:
+					has_image = self.host_manager.check_image(name, docker_image)
+				else:
+					has_image = False
 
-				self.checkin_connection(hostname, ssh)
-				ssh = None
-				healthy_count += 1
+				healthy = is_connected and has_image
+				self.health[name] = healthy
+				self.weights[name] = ctx.weight
 
-				event_logger.log_event(
-					'host_healthy',
-					f'host {hostname} is healthy',
-					level='info',
-					metadata={'hostname': hostname}
-				)
+				if name not in self.container_counts:
+					self.container_counts[name] = 0
 
-			except Exception as e:
-				if ssh:
-					try:
-						self.checkin_connection(hostname, ssh)
-					except:
-						pass
+				if healthy:
+					event_logger.log_event(
+						'host_healthy',
+						f'context {name} is healthy',
+						level='info',
+						metadata={'context_name': name}
+					)
+				else:
+					reason = 'connection failed' if not is_connected else 'image not found'
+					event_logger.log_event(
+						'host_unhealthy',
+						f'context {name} marked unhealthy: {reason}',
+						level='warning',
+						metadata={'context_name': name, 'reason': reason}
+					)
 
-				if not reason:
-					reason = "ssh connection failed"
+			# prune counts for contexts that no longer exist
+			known = {ctx.context_name for ctx in contexts}
+			for name in list(self.container_counts.keys()):
+				if name not in known:
+					del self.container_counts[name]
 
-				self.mark_unhealthy(hostname, log_event=False)
+		healthy_count = sum(1 for h in self.health.values() if h)
+		logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
 
-				event_logger.log_event(
-					'host_unhealthy',
-					f'host {hostname} marked unhealthy: {reason}',
-					level='warning',
-					metadata={'hostname': hostname, 'reason': reason}
-				)
-
-		logger.info(f"Host connectivity test complete: {healthy_count}/{len(self.hosts)} hosts healthy")
-
-	def get_next_host(self):
-		with self.global_lock:
-			available_hosts = []
-
-			for host in self.hosts:
-				hostname = host['hostname']
-
-				if not self.host_health[hostname]['healthy']:
+	def get_next_context(self):
+		with self.lock:
+			candidates = []
+			for name, healthy in self.health.items():
+				if not healthy:
 					continue
+				count = self.container_counts[name]
+				weight = self.weights.get(name, 1)
+				score = weight / (count + 1)
+				candidates.append((score, name))
 
-				current_count = self.host_container_counts[hostname]
-				available_hosts.append((host, current_count, hostname))
+			if not candidates:
+				raise Exception("no healthy contexts available")
 
-			if not available_hosts:
-				raise Exception("No healthy hosts available")
+			candidates.sort(key=lambda x: (-x[0], x[1]))
+			return candidates[0][1]
 
-			available_hosts.sort(key=lambda x: (x[1], x[2]))
-			return available_hosts[0][0]
+	def reserve_slot(self, context_name):
+		with self.lock:
+			self.container_counts[context_name] += 1
+			logger.debug(f"reserved slot on {context_name}, now {self.container_counts[context_name]}")
 
-	def reserve_slot(self, hostname):
-		with self.global_lock:
-			self.host_container_counts[hostname] += 1
-			logger.debug(f"Reserved slot on {hostname}, now {self.host_container_counts[hostname]} containers")
+	def release_slot(self, context_name):
+		with self.lock:
+			if self.container_counts[context_name] > 0:
+				self.container_counts[context_name] -= 1
+				logger.debug(f"released slot on {context_name}, now {self.container_counts[context_name]}")
 
-	def release_slot(self, hostname):
-		with self.global_lock:
-			if self.host_container_counts[hostname] > 0:
-				self.host_container_counts[hostname] -= 1
-				logger.debug(f"Released slot on {hostname}, now {self.host_container_counts[hostname]} containers")
-
-	def checkout_connection(self, hostname):
-		pool = self.host_pools.get(hostname)
-		if pool:
-			return pool.checkout()
-		raise Exception(f"No connection pool for {hostname}")
-
-	def checkin_connection(self, hostname, ssh):
-		pool = self.host_pools.get(hostname)
-		if pool:
-			pool.checkin(ssh)
-
-	def mark_unhealthy(self, hostname, log_event=True):
-		with self.global_lock:
-			self.host_health[hostname]['healthy'] = False
-			logger.warning(f"Host {hostname} marked as unhealthy")
-
-			if log_event:
-				event_logger.log_event(
-					'host_unhealthy',
-					f'host {hostname} marked as unhealthy',
-					level='warning',
-					metadata={'hostname': hostname}
-				)
-
-	def mark_healthy(self, hostname):
-		with self.global_lock:
-			self.host_health[hostname]['healthy'] = True
-			logger.info(f"Host {hostname} marked as healthy")
-
+	def mark_unhealthy(self, context_name):
+		with self.lock:
+			self.health[context_name] = False
+			logger.warning(f"context {context_name} marked unhealthy")
 			event_logger.log_event(
-				'host_healthy',
-				f'host {hostname} marked as healthy',
-				level='info',
-				metadata={'hostname': hostname}
+				'host_unhealthy',
+				f'context {context_name} marked unhealthy',
+				level='warning',
+				metadata={'context_name': context_name}
 			)
 
-	def get_host_status(self):
-		with self.global_lock:
-			status = []
-			for host in self.hosts:
-				hostname = host['hostname']
-				container_count = self.host_container_counts[hostname]
-				healthy = self.host_health[hostname]['healthy']
+	def mark_healthy(self, context_name):
+		with self.lock:
+			self.health[context_name] = True
+			logger.info(f"context {context_name} marked healthy")
+			event_logger.log_event(
+				'host_healthy',
+				f'context {context_name} marked healthy',
+				level='info',
+				metadata={'context_name': context_name}
+			)
 
+	def get_status(self):
+		with self.lock:
+			status = []
+			for name in self.health:
 				status.append({
-					'hostname': hostname,
-					'pub_hostname': host['pub_hostname'],
-					'active_containers': container_count,
-					'healthy': healthy,
-					'available': healthy
+					'context_name': name,
+					'pub_hostname': self.host_manager.get_pub_hostname(name),
+					'active_containers': self.container_counts.get(name, 0),
+					'healthy': self.health[name],
+					'weight': self.weights.get(name, 1),
 				})
 			return status
 
 	def cleanup(self):
-		for pool in self.host_pools.values():
-			pool.close_all()
-		logger.info("Orchestrator cleanup completed")
+		self.host_manager.close()
+		logger.info("orchestrator cleanup completed")
