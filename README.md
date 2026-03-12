@@ -19,7 +19,7 @@ Students connect directly to the container's noVNC port on the runner host, no r
 5. Calls `DockerHostManager.run_container()` which hits the Docker API through aiodocker's SSH tunnel, creates the container with dynamic port mapping (0:5900, 0:6080), `VNC_PASSWORD`, `CTFD_USERNAME`, and `RESOLUTION` env vars
 6. Inspects container for mapped ports via the Docker API
 7. HTTP polls noVNC until it responds (configurable attempts, default 180)
-8. Builds direct URL -- `http://{pub_hostname}:{port}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true`
+8. Builds direct URL like `http://{pub_hostname}:{port}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true`
 9. Stores password and URL in `active_containers`, starts session timer
 
 ### Destruction
@@ -84,13 +84,13 @@ The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_
 
 ## API endpoints
 
-**User** -- `GET /remote-desktop` (main UI), `POST /api/create` (request session), `GET /api/creation-status` (poll progress), `GET /api/status` (current session), `POST /api/destroy` (destroy session), `POST /api/extend` (extend timer)
+**User**: `GET /remote-desktop` (main UI), `POST /api/create` (request session), `GET /api/creation-status` (poll progress), `GET /api/status` (current session), `POST /api/destroy` (destroy session), `POST /api/extend` (extend timer)
 
-**Admin** -- `GET /admin` (dashboard), `GET /admin/api/containers` (list sessions), `POST /admin/api/kill` (force kill), `POST /admin/api/extend` (extend any session), `GET /admin/api/events/stream` (SSE), `GET /admin/api/events/recent` (event log)
+**Admin**: `GET /admin` (dashboard), `GET /admin/api/containers` (list sessions), `POST /admin/api/kill` (force kill), `POST /admin/api/extend` (extend any session), `GET /admin/api/events/stream` (SSE), `GET /admin/api/events/recent` (event log)
 
-**Contexts** -- `GET /admin/api/contexts` (list with live status), `POST /admin/api/contexts` (add), `PUT /admin/api/contexts/<id>` (update), `DELETE /admin/api/contexts/<id>` (delete), `GET /admin/api/contexts/<id>/test` (ping + image check), `POST /admin/api/contexts/reload` (reconnect all)
+**Contexts**: `GET /admin/api/contexts` (list with live status), `POST /admin/api/contexts` (add), `PUT /admin/api/contexts/<id>` (update), `DELETE /admin/api/contexts/<id>` (delete), `GET /admin/api/contexts/<id>/test` (ping + image check), `POST /admin/api/contexts/reload` (reconnect all)
 
-**Settings** -- `GET /admin/api/settings` (all settings as JSON), `PUT /admin/api/settings` (bulk upsert)
+**Settings**: `GET /admin/api/settings` (all settings as JSON), `PUT /admin/api/settings` (bulk upsert)
 
 All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-desktop/admin/`
 
@@ -100,7 +100,7 @@ CTFd runs under gunicorn with gevent workers. Container creation uses `gevent.sp
 
 The AsyncBridge runs in a real OS thread (not a gevent greenlet) so the asyncio event loop doesn't conflict with gevent's monkey-patched threading. aiodocker maintains persistent SSH tunnels per host so there's no connection pool or per-request SSH overhead
 
-All shared state is guarded by component-level locks -- ContainerManager.lock for active_containers/session_timers/creation_status, Orchestrator.lock for container counts and health, EventLogger.lock for the events deque and listeners list. Lock acquisition is never nested so there's no deadlock risk
+All shared state is guarded by component-level locks: ContainerManager.lock for active_containers/session_timers/creation_status, Orchestrator.lock for container counts and health, EventLogger.lock for the events deque and listeners list. Lock acquisition is never nested so there's no deadlock risk
 
 ## Context health
 
