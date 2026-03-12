@@ -21,7 +21,7 @@
                                 <tr>
                                     <th>User</th>
                                     <th>Container</th>
-                                    <th>Host</th>
+                                    <th>Context</th>
                                     <th>Time Remaining</th>
                                     <th>Extends</th>
                                     <th>Status</th>
@@ -29,7 +29,6 @@
                                 </tr>
                             </thead>
                             <tbody id="containers-table">
-                                <!-- Container rows will be loaded here -->
                             </tbody>
                         </table>
                     </div>
@@ -55,25 +54,180 @@
     <div class="row mt-3">
         <div class="col-md-12">
             <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Hosts</h3>
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h3 class="card-title mb-0">Docker Contexts</h3>
+                    <div>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="reloadContexts()">Reload</button>
+                        <button class="btn btn-sm btn-outline-primary" onclick="showAddContextModal()">Add Context</button>
+                    </div>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
                         <table class="table table-striped">
                             <thead>
                                 <tr>
-                                    <th>Hostname</th>
+                                    <th>Context Name</th>
+                                    <th>Public Hostname</th>
+                                    <th>Weight</th>
+                                    <th>Enabled</th>
                                     <th>Status</th>
                                     <th>Sessions</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
-                            <tbody id="hosts-table">
-                                <!-- Host rows will be loaded here -->
+                            <tbody id="contexts-table">
                             </tbody>
                         </table>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mt-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h3 class="card-title mb-0">Settings</h3>
+                    <button class="btn btn-sm btn-outline-primary" onclick="saveSettings()">Save</button>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <h5>Container</h5>
+                            <div class="form-group">
+                                <label>Docker Image</label>
+                                <input type="text" class="form-control" id="setting-docker_image">
+                            </div>
+                            <div class="form-group">
+                                <label>Memory Limit</label>
+                                <input type="text" class="form-control" id="setting-memory_limit">
+                            </div>
+                            <div class="form-group">
+                                <label>SHM Size</label>
+                                <input type="text" class="form-control" id="setting-shm_size">
+                            </div>
+                            <div class="form-group">
+                                <label>Resolution</label>
+                                <input type="text" class="form-control" id="setting-resolution">
+                            </div>
+                            <div class="form-group">
+                                <label>CPU Limit</label>
+                                <input type="text" class="form-control" id="setting-cpu_limit">
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <h5>Session Timers</h5>
+                            <div class="form-group">
+                                <label>Initial Duration (seconds)</label>
+                                <input type="number" class="form-control" id="setting-initial_duration">
+                            </div>
+                            <div class="form-group">
+                                <label>Extension Duration (seconds)</label>
+                                <input type="number" class="form-control" id="setting-extension_duration">
+                            </div>
+                            <div class="form-group">
+                                <label>Max Extensions</label>
+                                <input type="number" class="form-control" id="setting-max_extensions">
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <h5>Timeouts</h5>
+                            <div class="form-group">
+                                <label>VNC Ready Attempts</label>
+                                <input type="number" class="form-control" id="setting-vnc_ready_attempts">
+                            </div>
+                            <div class="form-group">
+                                <label>HTTP Request Timeout (seconds)</label>
+                                <input type="number" class="form-control" id="setting-http_request_timeout">
+                            </div>
+                            <div class="form-group">
+                                <label>Cleanup Interval (seconds)</label>
+                                <input type="number" class="form-control" id="setting-cleanup_interval">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- add context modal -->
+<div class="modal fade" id="addContextModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Add Docker Context</h5>
+                <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Context Name</label>
+                    <input type="text" class="form-control" id="add-context-name" placeholder="worker1">
+                    <small class="form-text text-muted">Matches a docker context name, or used as a label when hostname is set</small>
+                </div>
+                <div class="form-group">
+                    <label>Hostname (SSH)</label>
+                    <input type="text" class="form-control" id="add-context-hostname" placeholder="deploy@host.example.com">
+                    <small class="form-text text-muted">SSH target, optional if a matching docker context exists on the host</small>
+                </div>
+                <div class="form-group">
+                    <label>Public Hostname</label>
+                    <input type="text" class="form-control" id="add-context-pub-hostname" placeholder="host.example.com">
+                    <small class="form-text text-muted">What students see in VNC URLs</small>
+                </div>
+                <div class="form-group">
+                    <label>Weight</label>
+                    <input type="number" class="form-control" id="add-context-weight" value="1" min="1">
+                </div>
+                <div class="form-check">
+                    <input type="checkbox" class="form-check-input" id="add-context-enabled" checked>
+                    <label class="form-check-label" for="add-context-enabled">Enabled</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="addContext()">Add</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- edit context modal -->
+<div class="modal fade" id="editContextModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Docker Context</h5>
+                <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-context-id">
+                <div class="form-group">
+                    <label>Context Name</label>
+                    <input type="text" class="form-control" id="edit-context-name" disabled>
+                </div>
+                <div class="form-group">
+                    <label>Hostname (SSH)</label>
+                    <input type="text" class="form-control" id="edit-context-hostname">
+                </div>
+                <div class="form-group">
+                    <label>Public Hostname</label>
+                    <input type="text" class="form-control" id="edit-context-pub-hostname">
+                </div>
+                <div class="form-group">
+                    <label>Weight</label>
+                    <input type="number" class="form-control" id="edit-context-weight" min="1">
+                </div>
+                <div class="form-check">
+                    <input type="checkbox" class="form-check-input" id="edit-context-enabled">
+                    <label class="form-check-label" for="edit-context-enabled">Enabled</label>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="updateContext()">Save</button>
             </div>
         </div>
     </div>
@@ -173,12 +327,32 @@
     .icon-extend {
         color: #ffc107;
     }
+    .context-actions .btn {
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        background: transparent;
+    }
+    .context-actions .btn:hover {
+        background-color: rgba(0,0,0,0.05);
+        border-radius: 3px;
+    }
 </style>
 
 <script>
     let autoRefreshInterval = null;
     let eventSource = null;
     let maxEvents = 500;
+
+    const settingKeys = [
+        'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit',
+        'initial_duration', 'extension_duration', 'max_extensions',
+        'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'
+    ];
 
     function escapeHtml(text) {
         const div = document.createElement('div');
@@ -268,61 +442,308 @@
         return `${minutes}m ${secs}s`;
     }
 
-    function refreshHosts() {
-        fetch('/remote-desktop/admin/api/hosts', {
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
+    // ── settings ────────────────────────────────────────────────
+
+    function loadSettings() {
+        fetch('/remote-desktop/admin/api/settings', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
             credentials: 'same-origin'
         })
         .then(response => response.json())
         .then(data => {
-            updateHostPoolSummary(data.hosts);
+            const settings = data.settings || {};
+            settingKeys.forEach(key => {
+                const el = document.getElementById(`setting-${key}`);
+                if (el && settings[key] !== undefined) {
+                    el.value = settings[key];
+                }
+            });
         })
-        .catch(error => {
-            console.error('Error fetching hosts:', error);
-        });
+        .catch(error => console.error('Error loading settings:', error));
     }
 
-    function updateHostPoolSummary(hosts) {
-        const tbody = document.getElementById('hosts-table');
+    function saveSettings() {
+        const payload = {};
+        settingKeys.forEach(key => {
+            const el = document.getElementById(`setting-${key}`);
+            if (el) {
+                payload[key] = el.value;
+            }
+        });
 
-        if (!hosts || hosts.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="3" class="text-center">No hosts configured</td></tr>';
+        fetch('/remote-desktop/admin/api/settings', {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'CSRF-Token': window.init.csrfNonce
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Settings saved', button: 'OK' });
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Save failed', button: 'OK' });
+            }
+        })
+        .catch(error => console.error('Error saving settings:', error));
+    }
+
+    // ── contexts ────────────────────────────────────────────────
+
+    let hostsData = [];
+
+    function refreshContexts() {
+        fetch('/remote-desktop/admin/api/contexts', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => updateContextsTable(data.contexts || []))
+        .catch(error => console.error('Error fetching contexts:', error));
+    }
+
+    function refreshHosts() {
+        fetch('/remote-desktop/admin/api/hosts', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            hostsData = data.hosts || [];
+            refreshContexts();
+        })
+        .catch(error => console.error('Error fetching hosts:', error));
+    }
+
+    function updateContextsTable(contexts) {
+        const tbody = document.getElementById('contexts-table');
+
+        if (!contexts || contexts.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" class="text-center">No contexts configured</td></tr>';
             return;
         }
 
+        const hostMap = {};
+        hostsData.forEach(h => { hostMap[h.context_name] = h; });
+
         tbody.innerHTML = '';
-        hosts.forEach(host => {
-            const displayName = host.hostname.replace('.infra.slugsec.club', '');
-            const statusClass = host.healthy ? 'status-active' : 'status-expired';
-            const statusText = host.healthy ? 'UP' : 'DOWN';
+        contexts.forEach(ctx => {
+            const hostInfo = hostMap[ctx.context_name] || {};
+            const healthy = hostInfo.healthy || false;
+            const sessions = hostInfo.active_containers || 0;
+            const connected = ctx.connected;
+
+            let statusClass, statusText;
+            if (!ctx.enabled) {
+                statusClass = 'text-muted';
+                statusText = 'DISABLED';
+            } else if (healthy) {
+                statusClass = 'status-active';
+                statusText = 'UP';
+            } else if (connected) {
+                statusClass = 'status-warning';
+                statusText = 'NO IMAGE';
+            } else {
+                statusClass = 'status-expired';
+                statusText = 'DOWN';
+            }
 
             const row = `
                 <tr>
-                    <td><strong>${escapeHtml(displayName)}</strong></td>
+                    <td><strong>${escapeHtml(ctx.context_name)}</strong></td>
+                    <td>${escapeHtml(ctx.pub_hostname)}</td>
+                    <td>${ctx.weight}</td>
+                    <td>${ctx.enabled ? 'Yes' : 'No'}</td>
                     <td><span class="${statusClass}">${statusText}</span></td>
-                    <td>${host.active_containers}</td>
+                    <td>${sessions}</td>
+                    <td class="context-actions" style="white-space: nowrap; display: flex; gap: 4px;">
+                        <button class="btn btn-sm" onclick="testContext(${ctx.id}, '${escapeHtml(ctx.context_name)}')" title="Test">
+                            <i class="fas fa-heartbeat" style="color: #28a745;"></i>
+                        </button>
+                        <button class="btn btn-sm" onclick="showEditContextModal(${ctx.id}, '${escapeHtml(ctx.context_name)}', '${escapeHtml(ctx.hostname || '')}', '${escapeHtml(ctx.pub_hostname)}', ${ctx.weight}, ${ctx.enabled})" title="Edit">
+                            <i class="fas fa-edit" style="color: #6c757d;"></i>
+                        </button>
+                        <button class="btn btn-sm" onclick="deleteContext(${ctx.id}, '${escapeHtml(ctx.context_name)}')" title="Delete">
+                            <i class="fas fa-trash" style="color: #dc3545;"></i>
+                        </button>
+                    </td>
                 </tr>
             `;
             tbody.innerHTML += row;
         });
     }
 
-    function refreshContainers() {
-        fetch('/remote-desktop/admin/api/containers', {
+    function showAddContextModal() {
+        document.getElementById('add-context-name').value = '';
+        document.getElementById('add-context-hostname').value = '';
+        document.getElementById('add-context-pub-hostname').value = '';
+        document.getElementById('add-context-weight').value = '1';
+        document.getElementById('add-context-enabled').checked = true;
+        $('#addContextModal').modal('show');
+    }
+
+    function addContext() {
+        const payload = {
+            context_name: document.getElementById('add-context-name').value,
+            hostname: document.getElementById('add-context-hostname').value || null,
+            pub_hostname: document.getElementById('add-context-pub-hostname').value,
+            weight: parseInt(document.getElementById('add-context-weight').value) || 1,
+            enabled: document.getElementById('add-context-enabled').checked
+        };
+
+        if (!payload.context_name) {
+            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Context name is required', button: 'OK' });
+            return;
+        }
+        if (!payload.pub_hostname) {
+            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' });
+            return;
+        }
+
+        fetch('/remote-desktop/admin/api/contexts', {
+            method: 'POST',
             headers: {
-                'X-Requested-With': 'XMLHttpRequest'
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'CSRF-Token': window.init.csrfNonce
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                $('#addContextModal').modal('hide');
+                refreshAll();
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Add failed', button: 'OK' });
+            }
+        })
+        .catch(error => console.error('Error adding context:', error));
+    }
+
+    function showEditContextModal(id, name, hostname, pubHostname, weight, enabled) {
+        document.getElementById('edit-context-id').value = id;
+        document.getElementById('edit-context-name').value = name;
+        document.getElementById('edit-context-hostname').value = hostname;
+        document.getElementById('edit-context-pub-hostname').value = pubHostname;
+        document.getElementById('edit-context-weight').value = weight;
+        document.getElementById('edit-context-enabled').checked = enabled;
+        $('#editContextModal').modal('show');
+    }
+
+    function updateContext() {
+        const id = document.getElementById('edit-context-id').value;
+        const payload = {
+            hostname: document.getElementById('edit-context-hostname').value || null,
+            pub_hostname: document.getElementById('edit-context-pub-hostname').value,
+            weight: parseInt(document.getElementById('edit-context-weight').value) || 1,
+            enabled: document.getElementById('edit-context-enabled').checked
+        };
+
+        if (!payload.pub_hostname) {
+            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' });
+            return;
+        }
+
+        fetch(`/remote-desktop/admin/api/contexts/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'CSRF-Token': window.init.csrfNonce
+            },
+            credentials: 'same-origin',
+            body: JSON.stringify(payload)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                $('#editContextModal').modal('hide');
+                refreshAll();
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Update failed', button: 'OK' });
+            }
+        })
+        .catch(error => console.error('Error updating context:', error));
+    }
+
+    function deleteContext(id, name) {
+        if (!confirm(`Delete context "${name}"?`)) return;
+
+        fetch(`/remote-desktop/admin/api/contexts/${id}`, {
+            method: 'DELETE',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'CSRF-Token': window.init.csrfNonce
             },
             credentials: 'same-origin'
         })
         .then(response => response.json())
         .then(data => {
-            updateContainersTable(data.containers);
+            if (data.success) {
+                refreshAll();
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
+            }
         })
-        .catch(error => {
-            console.error('Error fetching containers:', error);
-        });
+        .catch(error => console.error('Error deleting context:', error));
+    }
+
+    function testContext(id, name) {
+        fetch(`/remote-desktop/admin/api/contexts/${id}/test`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: `${name} is reachable`, button: 'OK' });
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Test failed', button: 'OK' });
+            }
+        })
+        .catch(error => console.error('Error testing context:', error));
+    }
+
+    function reloadContexts() {
+        const formData = new FormData();
+        formData.append('nonce', window.init.csrfNonce);
+
+        fetch('/remote-desktop/admin/api/contexts/reload', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'CSRF-Token': window.init.csrfNonce
+            },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Contexts reloaded', button: 'OK' });
+                refreshAll();
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Reload failed', button: 'OK' });
+            }
+        })
+        .catch(error => console.error('Error reloading contexts:', error));
+    }
+
+    // ── containers ──────────────────────────────────────────────
+
+    function refreshContainers() {
+        fetch('/remote-desktop/admin/api/containers', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => updateContainersTable(data.containers))
+        .catch(error => console.error('Error fetching containers:', error));
     }
 
     function refreshAll() {
@@ -337,22 +758,22 @@
             tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sessions</td></tr>';
             return;
         }
-        
+
         tbody.innerHTML = '';
         containers.forEach(container => {
             const timeRemaining = container.timer ? container.timer.time_remaining : 0;
-            const statusClass = timeRemaining <= 0 ? 'status-expired' : 
+            const statusClass = timeRemaining <= 0 ? 'status-expired' :
                                timeRemaining < 300 ? 'status-warning' : 'status-active';
-            const status = timeRemaining <= 0 ? 'EXPIRED' : 
+            const status = timeRemaining <= 0 ? 'EXPIRED' :
                           timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
-            
+
             const row = `
                 <tr>
                     <td><strong>${container.username}</strong></td>
                     <td>
                         <code>${container.container_name}</code>
                     </td>
-                    <td>${container.hostname}</td>
+                    <td>${escapeHtml(container.docker_context || '')}</td>
                     <td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
                     <td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
                     <td><span class="${statusClass}">${status}</span></td>
@@ -377,145 +798,102 @@
 
     function peekVNC(vncUrl, username) {
         if (!vncUrl) {
-            CTFd.ui.ezal.ezAlert({
-                title: 'Error',
-                body: 'VNC unavailable',
-                button: 'OK'
-            });
+            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'VNC unavailable', button: 'OK' });
             return;
         }
-        
+
         const windowName = `vnc_peek_${username}`;
         const windowFeatures = 'width=1200,height=800,scrollbars=yes,resizable=yes';
         const vncWindow = window.open(vncUrl + '&viewonly=1', windowName, windowFeatures);
-        
+
         if (vncWindow) {
             vncWindow.document.title = `[ADMIN PEEK] ${username}'s VNC Session`;
-            // add a small indicator that this is an admin view
             setTimeout(() => {
                 try {
                     const adminIndicator = vncWindow.document.createElement('div');
                     adminIndicator.innerHTML = `
-                        <div style="position: fixed; top: 10px; right: 10px; background: #dc3545; color: white; 
-                                   padding: 5px 10px; border-radius: 3px; font-family: Arial; font-size: 12px; 
+                        <div style="position: fixed; top: 10px; right: 10px; background: #dc3545; color: white;
+                                   padding: 5px 10px; border-radius: 3px; font-family: Arial; font-size: 12px;
                                    z-index: 9999; opacity: 0.9;">
                             ADMIN MONITORING: ${username}
                         </div>
                     `;
                     vncWindow.document.body.appendChild(adminIndicator);
                 } catch(e) {
-                    // cross-origin issues are expected, ignore
+                    // cross-origin issues are expected
                 }
             }, 1000);
         } else {
-            CTFd.ui.ezal.ezAlert({
-                title: 'Error',
-                body: 'Failed to open VNC (check popup blocker)',
-                button: 'OK'
-            });
+            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
         }
     }
 
     function killContainer(userId, username) {
-        if (!confirm(`Kill ${username}'s session?`)) {
-            return;
-        }
-        
+        if (!confirm(`Kill ${username}'s session?`)) return;
+
         const formData = new FormData();
         formData.append('nonce', window.init.csrfNonce);
         formData.append('user_id', userId);
-        
+
         fetch('/remote-desktop/admin/api/kill', {
             method: 'POST',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
             credentials: 'same-origin',
             body: formData
         })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                CTFd.ui.ezal.ezAlert({
-                    title: 'Success',
-                    body: `Killed ${username}`,
-                    button: 'OK'
-                });
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: `Killed ${username}`, button: 'OK' });
                 refreshAll();
             } else {
-                CTFd.ui.ezal.ezAlert({
-                    title: 'Error',
-                    body: data.error || 'Kill failed',
-                    button: 'OK'
-                });
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Kill failed', button: 'OK' });
             }
         })
-        .catch(error => {
-            console.error('Error killing container:', error);
-        });
+        .catch(error => console.error('Error killing container:', error));
     }
 
     function extendContainer(userId) {
         const formData = new FormData();
         formData.append('nonce', window.init.csrfNonce);
         formData.append('user_id', userId);
-        
+
         fetch('/remote-desktop/admin/api/extend', {
             method: 'POST',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
             credentials: 'same-origin',
             body: formData
         })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                CTFd.ui.ezal.ezAlert({
-                    title: 'Success',
-                    body: 'Extended',
-                    button: 'OK'
-                });
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Extended', button: 'OK' });
                 refreshAll();
             } else {
-                CTFd.ui.ezal.ezAlert({
-                    title: 'Error',
-                    body: data.error || 'Extend failed',
-                    button: 'OK'
-                });
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Extend failed', button: 'OK' });
             }
         })
-        .catch(error => {
-            console.error('Error extending container:', error);
-        });
+        .catch(error => console.error('Error extending container:', error));
     }
 
     function triggerCleanup() {
         const formData = new FormData();
         formData.append('nonce', window.init.csrfNonce);
-        
+
         fetch('/remote-desktop/api/cleanup', {
             method: 'POST',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest'
-            },
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
             credentials: 'same-origin',
             body: formData
         })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                CTFd.ui.ezal.ezAlert({
-                    title: 'Success',
-                    body: 'Cleanup started',
-                    button: 'OK'
-                });
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Cleanup started', button: 'OK' });
                 refreshAll();
             }
         })
-        .catch(error => {
-            console.error('Error triggering cleanup:', error);
-        });
+        .catch(error => console.error('Error triggering cleanup:', error));
     }
 
     function startAutoRefresh() {
@@ -532,6 +910,7 @@
 
     document.addEventListener('DOMContentLoaded', function() {
         connectEventStream();
+        loadSettings();
         refreshAll();
         startAutoRefresh();
     });
