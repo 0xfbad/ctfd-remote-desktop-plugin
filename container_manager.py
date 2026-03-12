@@ -1,25 +1,35 @@
 import time
-import socket
 import logging
 import secrets
 import traceback
 from threading import Lock
 from .event_logger import event_logger
+from .docker_host_manager import parse_size
 
 logger = logging.getLogger(__name__)
 
+
 class ContainerManager:
-	def __init__(self, config, orchestrator):
-		self.config = config
+	def __init__(self, host_manager, orchestrator):
+		self.host_manager = host_manager
 		self.orchestrator = orchestrator
 		self.active_containers = {}
 		self.session_timers = {}
 		self.creation_status = {}
 		self.lock = Lock()
 
+	def _get_setting(self, key, cast=None):
+		from .models import get_setting
+		val = get_setting(key)
+		if cast and val is not None:
+			return cast(val)
+		return val
+
 	def wait_for_vnc_ready(self, hostname, novnc_port, max_attempts=None):
 		if max_attempts is None:
-			max_attempts = self.config['timeouts']['vnc_ready_attempts']
+			max_attempts = self._get_setting('vnc_ready_attempts', cast=int)
+		http_timeout = self._get_setting('http_request_timeout', cast=int)
+
 		import urllib.request
 		import urllib.error
 
@@ -27,7 +37,7 @@ class ContainerManager:
 			try:
 				req = urllib.request.Request(f"http://{hostname}:{novnc_port}/", method='GET')
 				req.add_header('User-Agent', 'CTFd-VNC-Check')
-				with urllib.request.urlopen(req, timeout=self.config['timeouts']['http_request']) as response:
+				with urllib.request.urlopen(req, timeout=http_timeout) as response:
 					if response.status == 200:
 						logger.info(f"VNC ready on {hostname}:{novnc_port} after {attempt + 1} attempts")
 						return True
@@ -47,102 +57,72 @@ class ContainerManager:
 			self._create_container_background(user_id)
 
 	def _create_container_background(self, user_id):
-		logger.info(f"[BACKGROUND TASK STARTED] Creating container for user {user_id}")
+		logger.info(f"[BACKGROUND] creating container for user {user_id}")
 
 		from CTFd.models import Users
 		try:
 			user = Users.query.filter_by(id=user_id).first()
 			username = user.name if user else f"User {user_id}"
-			logger.info(f"[BACKGROUND] Retrieved user: {username}")
 		except Exception as e:
-			logger.error(f"[BACKGROUND] Failed to get user {user_id}: {str(e)}")
+			logger.error(f"[BACKGROUND] failed to get user {user_id}: {e}")
 			username = f"User {user_id}"
 
-		logger.info(f"[BACKGROUND] Starting container creation for {username}")
-
-		ssh = None
-		selected_host = None
+		context_name = None
 
 		try:
 			with self.lock:
 				self.creation_status[user_id] = {'status': 'selecting_host', 'message': 'Requesting a server...'}
 
-			selected_host = self.orchestrator.get_next_host()
-			hostname = selected_host['hostname']
-			pub_hostname = selected_host['pub_hostname']
-			display_hostname = hostname.replace('.infra.slugsec.club', '')
+			context_name = self.orchestrator.get_next_context()
+			pub_hostname = self.host_manager.get_pub_hostname(context_name)
+			display_hostname = context_name
 
-			logger.info(f"Selected host: {hostname} (public: {pub_hostname}) for user {user_id}")
+			logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
 
-			self.orchestrator.reserve_slot(hostname)
-
-			with self.lock:
-				self.creation_status[user_id] = {'status': 'connecting', 'message': f'Connecting to {display_hostname}...'}
-
-			ssh = self.orchestrator.checkout_connection(hostname)
-			logger.debug(f"Checked out SSH connection to {hostname}")
-
-			container_name = f"kali-desktop-{user_id}-{int(time.time())}"
-			vnc_password = secrets.token_urlsafe(6)[:8]
-
-			resolution = self.config['container_defaults']['resolution']
-			shm_size = self.config['container_defaults']['shm_size']
-			memory_limit = self.config['container_defaults']['memory_limit']
-			cpu_limit = self.config['container_defaults']['cpu_limit']
-
-			docker_cmd = f"""docker run -d --rm --name {container_name} -p 0:5900 -p 0:6080 -e VNC_PASSWORD={vnc_password} -e RESOLUTION={resolution} -e CTFD_USERNAME={username} --shm-size={shm_size} --memory={memory_limit} --cpus={cpu_limit} {self.config['docker_image']}"""
+			self.orchestrator.reserve_slot(context_name)
 
 			with self.lock:
 				self.creation_status[user_id] = {'status': 'starting_container', 'message': f'Starting container on {display_hostname}...'}
 
-			logger.info(f"Executing docker command on {hostname}")
-			stdin, stdout, stderr = ssh.exec_command(docker_cmd, timeout=self.config['timeouts']['docker_command'])
-			container_id = stdout.read().decode().strip()
-			error = stderr.read().decode().strip()
+			container_name = f"kali-desktop-{user_id}-{int(time.time())}"
+			vnc_password = secrets.token_urlsafe(6)[:8]
 
-			if error and "Error" in error:
-				raise Exception(f"Docker error: {error}")
+			docker_image = self._get_setting('docker_image')
+			resolution = self._get_setting('resolution')
+			shm_size = parse_size(self._get_setting('shm_size'))
+			memory_limit = parse_size(self._get_setting('memory_limit'))
+			cpu_limit = self._get_setting('cpu_limit')
+			nano_cpus = int(float(cpu_limit) * 1e9)
 
-			with self.lock:
-				self.creation_status[user_id] = {'status': 'getting_ports', 'message': f'Container started on {display_hostname}...'}
+			result = self.host_manager.run_container(
+				context_name=context_name,
+				image=docker_image,
+				name=container_name,
+				env={
+					'VNC_PASSWORD': vnc_password,
+					'RESOLUTION': resolution,
+					'CTFD_USERNAME': username,
+				},
+				ports=['5900/tcp', '6080/tcp'],
+				shm_size=shm_size,
+				memory=memory_limit,
+				nano_cpus=nano_cpus,
+			)
 
-			for attempt in range(5):
-				stdin, stdout, stderr = ssh.exec_command(f"docker port {container_name}", timeout=self.config['timeouts']['docker_quick'])
-				port_output = stdout.read().decode().strip()
+			container_id = result['container_id']
+			vnc_port = result['ports']['5900/tcp']
+			novnc_port = result['ports']['6080/tcp']
 
-				if port_output:
-					break
-
-				if attempt < 4:
-					time.sleep(0.3)
-
-			if not port_output:
-				raise Exception("Could not get port mappings from Docker")
-
-			vnc_port = None
-			novnc_port = None
-
-			for line in port_output.split('\n'):
-				if '5900/tcp' in line and '->' in line:
-					vnc_port = int(line.split(':')[-1])
-				elif '6080/tcp' in line and '->' in line:
-					novnc_port = int(line.split(':')[-1])
-
-			if not vnc_port or not novnc_port:
-				raise Exception(f"Could not parse port mappings: {port_output}")
-
-			logger.info(f"Container {container_name} created - VNC:{vnc_port} noVNC:{novnc_port}")
-
-			self.orchestrator.checkin_connection(hostname, ssh)
-			ssh = None
+			logger.info(f"container {container_name} created - VNC:{vnc_port} noVNC:{novnc_port}")
 
 			with self.lock:
 				self.creation_status[user_id] = {'status': 'waiting_vnc', 'message': f'Waiting for {display_hostname} display server...'}
 
-			vnc_ready = self.wait_for_vnc_ready(hostname, novnc_port)
+			# vnc readiness check hits the novnc http endpoint on the pub_hostname
+			vnc_ready = self.wait_for_vnc_ready(pub_hostname, novnc_port)
 
 			if not vnc_ready:
-				raise Exception(f"VNC server on {hostname}:{novnc_port} did not become ready in time")
+				raise Exception(f"VNC server on {pub_hostname}:{novnc_port} did not become ready in time")
 
 			vnc_url = f"http://{pub_hostname}:{novnc_port}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
 
@@ -152,19 +132,20 @@ class ContainerManager:
 					'container_name': container_name,
 					'vnc_port': vnc_port,
 					'novnc_port': novnc_port,
-					'hostname': hostname,
+					'docker_context': context_name,
 					'pub_hostname': pub_hostname,
 					'vnc_password': vnc_password,
 					'vnc_url': vnc_url,
-					'created_at': time.time()
+					'created_at': time.time(),
 				}
 
+				max_extensions = self._get_setting('max_extensions', cast=int)
 				self.session_timers[user_id] = {
 					'started': False,
 					'start_time': None,
 					'duration': 0,
 					'extensions_used': 0,
-					'max_extensions': self.config['session_defaults']['max_extensions']
+					'max_extensions': max_extensions,
 				}
 
 				self.creation_status[user_id] = {'status': 'ready', 'message': 'Desktop ready!', 'hostname': display_hostname}
@@ -176,46 +157,33 @@ class ContainerManager:
 				username=username,
 				level='info',
 				metadata={
-					'hostname': hostname,
+					'context': context_name,
 					'container_name': container_name,
 					'vnc_port': vnc_port,
-					'novnc_port': novnc_port
+					'novnc_port': novnc_port,
 				}
 			)
 
 		except Exception as e:
-			try:
-				if ssh:
-					self.orchestrator.checkin_connection(hostname, ssh)
-			except Exception as checkin_error:
-				logger.error(f"Failed to checkin connection during cleanup: {str(checkin_error)}")
-
-			if selected_host:
+			if context_name:
 				try:
-					self.orchestrator.release_slot(selected_host['hostname'])
+					self.orchestrator.release_slot(context_name)
 				except Exception as release_error:
-					logger.error(f"Failed to release slot during cleanup: {str(release_error)}")
+					logger.error(f"failed to release slot during cleanup: {release_error}")
 
 				try:
-					self.orchestrator.mark_unhealthy(selected_host['hostname'])
+					self.orchestrator.mark_unhealthy(context_name)
 				except Exception as health_error:
-					logger.error(f"Failed to mark host unhealthy during cleanup: {str(health_error)}")
+					logger.error(f"failed to mark context unhealthy during cleanup: {health_error}")
 
-			logger.error(f"Error creating container for user {user_id}: {str(e)}")
+			logger.error(f"error creating container for user {user_id}: {e}")
 			logger.error(traceback.format_exc())
-
-			failed_hostname = None
-			if selected_host:
-				try:
-					failed_hostname = selected_host['hostname'].replace('.infra.slugsec.club', '')
-				except:
-					pass
 
 			with self.lock:
 				self.creation_status[user_id] = {
 					'status': 'failed',
 					'error': str(e),
-					'hostname': failed_hostname
+					'hostname': context_name,
 				}
 
 			event_logger.log_event(
@@ -233,7 +201,7 @@ class ContainerManager:
 		user = Users.query.filter_by(id=user_id).first()
 		username = user.name if user else f"User {user_id}"
 
-		logger.info(f"[MAIN] create_container called for user {user_id} ({username})")
+		logger.info(f"create_container called for user {user_id} ({username})")
 
 		event_logger.log_event(
 			'session_requested',
@@ -246,21 +214,18 @@ class ContainerManager:
 		with self.lock:
 			self.creation_status[user_id] = {'status': 'queued', 'message': 'Queued...'}
 
-		logger.info(f"[MAIN] Submitting background task for user {user_id}")
-
 		app = current_app._get_current_object()
 
 		try:
 			import gevent
-			greenlet = gevent.spawn(self._create_container_background_wrapper, app, user_id)
-			logger.info(f"[MAIN] Background task submitted successfully via gevent: {greenlet}")
+			gevent.spawn(self._create_container_background_wrapper, app, user_id)
 		except Exception as e:
-			logger.error(f"[MAIN] Failed to submit background task: {str(e)}")
+			logger.error(f"failed to submit background task: {e}")
 			logger.error(traceback.format_exc())
 			with self.lock:
 				self.creation_status[user_id] = {
 					'status': 'failed',
-					'error': f'Failed to start background task: {str(e)}'
+					'error': f'Failed to start background task: {str(e)}',
 				}
 			return {'success': False, 'error': str(e)}
 
@@ -281,21 +246,12 @@ class ContainerManager:
 				return {'success': False, 'error': 'No active container found'}
 			container_info = self.active_containers[user_id].copy()
 
-		hostname = container_info['hostname']
+		context_name = container_info['docker_context']
 		container_name = container_info['container_name']
 
-		ssh = None
-		try:
-			ssh = self.orchestrator.checkout_connection(hostname)
-			ssh.exec_command(f"docker stop {container_name}", timeout=self.config['timeouts']['docker_quick'])
-			logger.info(f"Destroyed container {container_name} on {hostname}")
-		except Exception as e:
-			logger.error(f"Error executing docker commands for user {user_id}: {str(e)}")
-		finally:
-			if ssh:
-				self.orchestrator.checkin_connection(hostname, ssh)
+		self.host_manager.stop_container(context_name, container_name)
 
-		self.orchestrator.release_slot(hostname)
+		self.orchestrator.release_slot(context_name)
 
 		with self.lock:
 			if user_id in self.active_containers:
@@ -312,7 +268,7 @@ class ContainerManager:
 				user_id=user_id,
 				username=username,
 				level='info',
-				metadata={'hostname': hostname, 'container_name': container_name}
+				metadata={'context': context_name, 'container_name': container_name}
 			)
 
 		return {'success': True}
@@ -326,15 +282,12 @@ class ContainerManager:
 		from CTFd.models import Users
 
 		containers = []
-		active_containers_copy = {}
 		with self.lock:
 			active_containers_copy = dict(self.active_containers)
 
 		for user_id, container_info in active_containers_copy.items():
 			user = Users.query.filter_by(id=user_id).first()
-
 			timer_status = self.get_session_timer_status(user_id)
-
 			vnc_url = container_info.get('vnc_url', '')
 
 			container_data = {
@@ -342,7 +295,7 @@ class ContainerManager:
 				'username': user.name if user else 'Unknown',
 				'container_name': container_info['container_name'],
 				'container_id': container_info['container_id'],
-				'hostname': container_info['hostname'],
+				'docker_context': container_info['docker_context'],
 				'created_at': container_info['created_at'],
 				'vnc_port': container_info['vnc_port'],
 				'novnc_port': container_info['novnc_port'],
@@ -351,8 +304,8 @@ class ContainerManager:
 					'active': timer_status.get('started', False),
 					'time_remaining': timer_status.get('time_remaining', 0),
 					'extensions_used': timer_status.get('extensions_used', 0),
-					'max_extensions': timer_status.get('max_extensions', 3)
-				} if timer_status.get('success') else None
+					'max_extensions': timer_status.get('max_extensions', 3),
+				} if timer_status.get('success') else None,
 			}
 			containers.append(container_data)
 
@@ -360,7 +313,7 @@ class ContainerManager:
 
 	def start_session_timer(self, user_id, duration=None):
 		if duration is None:
-			duration = self.config['session_defaults']['initial_duration']
+			duration = self._get_setting('initial_duration', cast=int)
 
 		with self.lock:
 			if user_id not in self.session_timers:
@@ -375,7 +328,7 @@ class ContainerManager:
 			timer['duration'] = duration
 			timer['extensions_used'] = 0
 
-			logger.info(f"Started timer for user {user_id}: {duration}s")
+			logger.info(f"started timer for user {user_id}: {duration}s")
 			return {'success': True, 'duration': duration}
 
 	def stop_session_timer(self, user_id):
@@ -391,7 +344,7 @@ class ContainerManager:
 			timer['start_time'] = None
 			timer['duration'] = 0
 
-			logger.info(f"Stopped timer for user {user_id}")
+			logger.info(f"stopped timer for user {user_id}")
 			return {'success': True}
 
 	def extend_session_timer(self, user_id, new_duration=None):
@@ -400,7 +353,7 @@ class ContainerManager:
 		username = user.name if user else f"User {user_id}"
 
 		if new_duration is None:
-			new_duration = self.config['session_defaults']['extension_duration']
+			new_duration = self._get_setting('extension_duration', cast=int)
 
 		with self.lock:
 			if user_id not in self.session_timers:
@@ -420,7 +373,7 @@ class ContainerManager:
 			timer['duration'] = remaining + new_duration
 			timer['extensions_used'] += 1
 
-			logger.info(f"Extended timer for user {user_id}: {timer['extensions_used']}/{max_extensions}")
+			logger.info(f"extended timer for user {user_id}: {timer['extensions_used']}/{max_extensions}")
 
 			event_logger.log_event(
 				'session_extended',
@@ -431,7 +384,7 @@ class ContainerManager:
 				metadata={
 					'extensions_used': timer['extensions_used'],
 					'max_extensions': max_extensions,
-					'new_duration': new_duration
+					'new_duration': new_duration,
 				}
 			)
 
@@ -457,13 +410,12 @@ class ContainerManager:
 				'started': True,
 				'time_remaining': int(time_remaining),
 				'extensions_used': timer['extensions_used'],
-				'max_extensions': timer['max_extensions']
+				'max_extensions': timer['max_extensions'],
 			}
 
 	def periodic_cleanup(self):
 		from CTFd.models import Users
 
-		user_ids = []
 		with self.lock:
 			user_ids = list(self.session_timers.keys())
 
@@ -477,7 +429,7 @@ class ContainerManager:
 			user = Users.query.filter_by(id=user_id).first()
 			username = user.name if user else f"User {user_id}"
 
-			logger.info(f"Auto-destroying expired session for user {user_id}")
+			logger.info(f"auto-destroying expired session for user {user_id}")
 
 			event_logger.log_event(
 				'session_expired',
@@ -490,31 +442,22 @@ class ContainerManager:
 			try:
 				self.destroy_container(user_id, log_destruction=False)
 			except Exception as e:
-				logger.error(f"Failed to destroy expired session for user {user_id}: {str(e)}")
+				logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
 	def cleanup_all_containers(self):
-		logger.info("Cleaning up all containers on shutdown")
+		logger.info("cleaning up all containers on shutdown")
 
-		containers_to_cleanup = {}
 		with self.lock:
 			containers_to_cleanup = dict(self.active_containers)
 
 		for user_id, container_info in containers_to_cleanup.items():
 			try:
-				hostname = container_info['hostname']
+				context_name = container_info['docker_context']
 				container_name = container_info['container_name']
-
-				ssh = None
-				try:
-					ssh = self.orchestrator.checkout_connection(hostname)
-					ssh.exec_command(f"docker stop {container_name}", timeout=self.config['timeouts']['docker_quick'])
-					logger.info(f"Cleaned up {container_name}")
-				finally:
-					if ssh:
-						self.orchestrator.checkin_connection(hostname, ssh)
-
+				self.host_manager.stop_container(context_name, container_name)
+				logger.info(f"cleaned up {container_name}")
 			except Exception as e:
-				logger.error(f"Failed to cleanup container for user {user_id}: {str(e)}")
+				logger.error(f"failed to cleanup container for user {user_id}: {e}")
 
 		with self.lock:
 			self.active_containers.clear()
@@ -522,4 +465,4 @@ class ContainerManager:
 			self.creation_status.clear()
 
 		self.orchestrator.cleanup()
-		logger.info("Cleanup completed")
+		logger.info("cleanup completed")
