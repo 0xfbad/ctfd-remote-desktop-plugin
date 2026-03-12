@@ -1,13 +1,12 @@
-import os
 import sys
 import signal
 import atexit
 import logging
-import yaml
 from threading import Thread, Event
 from CTFd.plugins import register_plugin_assets_directory, register_user_page_menu_bar, register_admin_plugin_menu_bar
 
-from .orchestrator import HostOrchestrator
+from .docker_host_manager import DockerHostManager
+from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
 
@@ -18,20 +17,24 @@ cleanup_stop_event = None
 cleanup_thread = None
 container_manager = None
 
+
 def load(app):
 	global cleanup_stop_event, cleanup_thread, container_manager
 
-	plugin_dir = os.path.dirname(__file__)
+	app.db.create_all()
 
-	config_path = os.path.join(plugin_dir, 'config.yml')
-	with open(config_path, 'r') as f:
-		config = yaml.safe_load(f)
+	host_manager = DockerHostManager()
+	orchestrator = Orchestrator(host_manager)
 
-	orchestrator = HostOrchestrator(config)
-	orchestrator.test_host_connectivity()
-	container_manager = ContainerManager(config, orchestrator)
+	with app.app_context():
+		orchestrator.load_from_db()
 
-	remote_desktop_bp = create_routes(container_manager, orchestrator, config)
+	container_manager = ContainerManager(host_manager, orchestrator)
+
+	app.desktop_host_manager = host_manager
+	app.desktop_orchestrator = orchestrator
+
+	remote_desktop_bp = create_routes(container_manager, orchestrator)
 
 	app.register_blueprint(remote_desktop_bp)
 	register_plugin_assets_directory(app, base_path="/plugins/remote_desktop/assets/")
@@ -39,22 +42,24 @@ def load(app):
 	register_admin_plugin_menu_bar("Remote Desktop", "/remote-desktop/admin")
 
 	def cleanup_worker():
+		from .models import get_setting
 		while not cleanup_stop_event.is_set():
 			try:
 				with app.app_context():
 					container_manager.periodic_cleanup()
 			except Exception as e:
-				logger.error(f"Periodic cleanup error: {str(e)}")
-			cleanup_stop_event.wait(config['timeouts']['cleanup_interval'])
+				logger.error(f"periodic cleanup error: {e}")
+			interval = int(get_setting('cleanup_interval', '300'))
+			cleanup_stop_event.wait(interval)
 
 	def signal_handler(signum, frame):
-		logger.info(f"Received signal {signum}, cleaning up containers...")
+		logger.info(f"received signal {signum}, cleaning up containers...")
 		cleanup_stop_event.set()
 		try:
 			import gevent
 			gevent.spawn(container_manager.cleanup_all_containers)
 			gevent.sleep(2)
-		except:
+		except Exception:
 			pass
 		sys.exit(0)
 
@@ -67,4 +72,4 @@ def load(app):
 	cleanup_thread = Thread(target=cleanup_worker, daemon=True)
 	cleanup_thread.start()
 
-	logger.info(f"Remote Desktop plugin loaded with {len(config['workspace_hosts'])} hosts")
+	logger.info("remote desktop plugin loaded")
