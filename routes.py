@@ -11,13 +11,16 @@ from .event_logger import event_logger
 
 logger = logging.getLogger(__name__)
 
-def create_routes(container_manager, orchestrator, config):
+
+def create_routes(container_manager, orchestrator):
 	remote_desktop_bp = Blueprint(
 		'remote_desktop',
 		__name__,
 		template_folder='templates',
 		static_folder='assets'
 	)
+
+	# user endpoints
 
 	@remote_desktop_bp.route('/remote-desktop')
 	@authed_only
@@ -42,8 +45,8 @@ def create_routes(container_manager, orchestrator, config):
 					'container_name': container_info['container_name'],
 					'vnc_port': container_info['vnc_port'],
 					'novnc_port': container_info['novnc_port'],
-					'hostname': container_info['hostname'],
-					'created_at': container_info['created_at']
+					'docker_context': container_info['docker_context'],
+					'created_at': container_info['created_at'],
 				}
 
 			return render_template(
@@ -54,7 +57,7 @@ def create_routes(container_manager, orchestrator, config):
 				creation_status=creation_status
 			)
 		except Exception as e:
-			logger.error(f"Error rendering remote desktop page: {str(e)}")
+			logger.error(f"error rendering remote desktop page: {e}")
 			logger.error(traceback.format_exc())
 			return f"Error loading remote desktop page: {str(e)}", 500
 
@@ -88,12 +91,12 @@ def create_routes(container_manager, orchestrator, config):
 						'active': timer_status.get('started', False),
 						'time_remaining': timer_status.get('time_remaining', 0),
 						'extensions_used': timer_status.get('extensions_used', 0),
-						'max_extensions': timer_status.get('max_extensions', 3)
-					} if timer_status.get('success') else None
+						'max_extensions': timer_status.get('max_extensions', 3),
+					} if timer_status.get('success') else None,
 				}
 			})
 		except Exception as e:
-			logger.error(f"API error getting status: {str(e)}")
+			logger.error(f"API error getting status: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/api/create', methods=['POST'])
@@ -102,7 +105,7 @@ def create_routes(container_manager, orchestrator, config):
 	def create_session():
 		try:
 			user = get_current_user()
-			logger.info(f"Create session request from user {user.name} (ID: {user.id})")
+			logger.info(f"create session request from user {user.name} (ID: {user.id})")
 
 			if container_manager.get_container_info(user.id):
 				event_logger.log_event(
@@ -132,10 +135,10 @@ def create_routes(container_manager, orchestrator, config):
 
 			return jsonify({
 				'status': 'creating',
-				'message': 'Container creation started'
+				'message': 'Container creation started',
 			})
 		except Exception as e:
-			logger.error(f"API error creating session: {str(e)}", exc_info=True)
+			logger.error(f"API error creating session: {e}", exc_info=True)
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/api/creation-status', methods=['GET'])
@@ -161,8 +164,8 @@ def create_routes(container_manager, orchestrator, config):
 								'active': timer_status.get('started', False),
 								'time_remaining': timer_status.get('time_remaining', 0),
 								'extensions_used': timer_status.get('extensions_used', 0),
-								'max_extensions': timer_status.get('max_extensions', 3)
-							} if timer_status.get('success') else None
+								'max_extensions': timer_status.get('max_extensions', 3),
+							} if timer_status.get('success') else None,
 						}
 					})
 				return jsonify({'status': 'none'})
@@ -183,14 +186,14 @@ def create_routes(container_manager, orchestrator, config):
 							'active': timer_status.get('started', False),
 							'time_remaining': timer_status.get('time_remaining', 0),
 							'extensions_used': timer_status.get('extensions_used', 0),
-							'max_extensions': timer_status.get('max_extensions', 3)
-						} if timer_status.get('success') else None
+							'max_extensions': timer_status.get('max_extensions', 3),
+						} if timer_status.get('success') else None,
 					}
 				})
 
 			return jsonify(status)
 		except Exception as e:
-			logger.error(f"API error getting creation status: {str(e)}")
+			logger.error(f"API error getting creation status: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/api/destroy', methods=['POST'])
@@ -209,7 +212,7 @@ def create_routes(container_manager, orchestrator, config):
 
 			return jsonify({'session': None})
 		except Exception as e:
-			logger.error(f"API error destroying session: {str(e)}")
+			logger.error(f"API error destroying session: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/api/extend', methods=['POST'])
@@ -232,11 +235,11 @@ def create_routes(container_manager, orchestrator, config):
 					'active': timer_status.get('started', False),
 					'time_remaining': timer_status.get('time_remaining', 0),
 					'extensions_used': timer_status.get('extensions_used', 0),
-					'max_extensions': timer_status.get('max_extensions', 3)
+					'max_extensions': timer_status.get('max_extensions', 3),
 				}
 			})
 		except Exception as e:
-			logger.error(f"API error extending session: {str(e)}")
+			logger.error(f"API error extending session: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/api/cleanup', methods=['POST'])
@@ -251,8 +254,10 @@ def create_routes(container_manager, orchestrator, config):
 			container_manager.periodic_cleanup()
 			return jsonify({'success': True, 'message': 'Cleanup triggered'})
 		except Exception as e:
-			logger.error(f"API error triggering cleanup: {str(e)}")
+			logger.error(f"API error triggering cleanup: {e}")
 			return jsonify({'error': str(e)}), 500
+
+	# admin dashboard
 
 	@remote_desktop_bp.route('/remote-desktop/admin')
 	@admins_only
@@ -265,12 +270,9 @@ def create_routes(container_manager, orchestrator, config):
 	def admin_get_containers():
 		try:
 			containers = container_manager.get_all_containers()
-
-			return jsonify({
-				'containers': containers
-			})
+			return jsonify({'containers': containers})
 		except Exception as e:
-			logger.error(f"Admin API error getting containers: {str(e)}")
+			logger.error(f"admin API error getting containers: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/admin/api/hosts', methods=['GET'])
@@ -278,10 +280,10 @@ def create_routes(container_manager, orchestrator, config):
 	@bypass_csrf_protection
 	def admin_get_hosts():
 		try:
-			hosts = orchestrator.get_host_status()
-			return jsonify({'hosts': hosts})
+			status = orchestrator.get_status()
+			return jsonify({'hosts': status})
 		except Exception as e:
-			logger.error(f"Admin API error getting hosts: {str(e)}")
+			logger.error(f"admin API error getting hosts: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/admin/api/kill', methods=['POST'])
@@ -312,13 +314,12 @@ def create_routes(container_manager, orchestrator, config):
 			result = container_manager.destroy_container(user_id)
 
 			if result.get('success'):
-				logger.info(f"Admin killed container for user {user_id}")
 				return jsonify({'success': True})
 			else:
 				return jsonify({'error': result.get('error', 'Failed to kill container')}), 500
 
 		except Exception as e:
-			logger.error(f"Admin API error killing container: {str(e)}")
+			logger.error(f"admin API error killing container: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	@remote_desktop_bp.route('/remote-desktop/admin/api/extend', methods=['POST'])
@@ -352,14 +353,206 @@ def create_routes(container_manager, orchestrator, config):
 			result = container_manager.extend_session_timer(user_id)
 
 			if result.get('success'):
-				logger.info(f"Admin extended session for user {user_id}")
 				return jsonify({'success': True})
 			else:
 				return jsonify({'error': result.get('error', 'Failed to extend session')}), 400
 
 		except Exception as e:
-			logger.error(f"Admin API error extending session: {str(e)}")
+			logger.error(f"admin API error extending session: {e}")
 			return jsonify({'error': str(e)}), 500
+
+	# context crud
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts', methods=['GET'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_get_contexts():
+		from .models import DesktopDockerContextModel
+		try:
+			contexts = DesktopDockerContextModel.query.all()
+			connected = set(container_manager.host_manager.get_connected_contexts())
+			data = []
+			for ctx in contexts:
+				data.append({
+					'id': ctx.id,
+					'context_name': ctx.context_name,
+					'hostname': ctx.hostname,
+					'pub_hostname': ctx.pub_hostname,
+					'weight': ctx.weight,
+					'enabled': ctx.enabled,
+					'connected': ctx.context_name in connected,
+				})
+			return jsonify({'contexts': data})
+		except Exception as e:
+			logger.error(f"admin API error getting contexts: {e}")
+			return jsonify({'error': str(e)}), 500
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts', methods=['POST'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_add_context():
+		from .models import DesktopDockerContextModel
+		from CTFd.models import db
+
+		if not request.is_json:
+			return jsonify({'error': 'invalid request'}), 400
+
+		context_name = request.json.get('context_name')
+		hostname = request.json.get('hostname')
+		pub_hostname = request.json.get('pub_hostname')
+		weight = request.json.get('weight', 1)
+		enabled = request.json.get('enabled', True)
+
+		if not context_name:
+			return jsonify({'error': 'context_name is required'}), 400
+		if not pub_hostname:
+			return jsonify({'error': 'pub_hostname is required'}), 400
+
+		existing = DesktopDockerContextModel.query.filter_by(context_name=context_name).first()
+		if existing:
+			return jsonify({'error': 'context already exists'}), 400
+
+		try:
+			weight = int(weight)
+			if weight < 1:
+				return jsonify({'error': 'weight must be at least 1'}), 400
+		except ValueError:
+			return jsonify({'error': 'weight must be an integer'}), 400
+
+		new_context = DesktopDockerContextModel(
+			context_name=context_name,
+			hostname=hostname,
+			pub_hostname=pub_hostname,
+			weight=weight,
+			enabled=enabled,
+		)
+		db.session.add(new_context)
+		db.session.commit()
+
+		orchestrator.load_from_db()
+
+		return jsonify({'success': True, 'id': new_context.id})
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/<int:context_id>', methods=['PUT'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_update_context(context_id):
+		from .models import DesktopDockerContextModel
+		from CTFd.models import db
+
+		if not request.is_json:
+			return jsonify({'error': 'invalid request'}), 400
+
+		context = DesktopDockerContextModel.query.get(context_id)
+		if not context:
+			return jsonify({'error': 'context not found'}), 404
+
+		if 'hostname' in request.json:
+			context.hostname = request.json['hostname']
+
+		if 'pub_hostname' in request.json:
+			if not request.json['pub_hostname']:
+				return jsonify({'error': 'pub_hostname cannot be empty'}), 400
+			context.pub_hostname = request.json['pub_hostname']
+
+		if 'weight' in request.json:
+			try:
+				weight = int(request.json['weight'])
+				if weight < 1:
+					return jsonify({'error': 'weight must be at least 1'}), 400
+				context.weight = weight
+			except ValueError:
+				return jsonify({'error': 'weight must be an integer'}), 400
+
+		if 'enabled' in request.json:
+			context.enabled = bool(request.json['enabled'])
+
+		db.session.commit()
+		orchestrator.load_from_db()
+
+		return jsonify({'success': True})
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/<int:context_id>', methods=['DELETE'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_delete_context(context_id):
+		from .models import DesktopDockerContextModel
+		from CTFd.models import db
+
+		context = DesktopDockerContextModel.query.get(context_id)
+		if not context:
+			return jsonify({'error': 'context not found'}), 404
+
+		db.session.delete(context)
+		db.session.commit()
+		orchestrator.load_from_db()
+
+		return jsonify({'success': True})
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/<int:context_id>/test', methods=['GET'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_test_context(context_id):
+		from .models import DesktopDockerContextModel, get_setting
+
+		context = DesktopDockerContextModel.query.get(context_id)
+		if not context:
+			return jsonify({'error': 'context not found'}), 404
+
+		ping_ok = container_manager.host_manager.ping(context.context_name)
+		if not ping_ok:
+			return jsonify({'error': 'context unreachable (ping failed)'}), 500
+
+		docker_image = get_setting('docker_image')
+		image_ok = container_manager.host_manager.check_image(context.context_name, docker_image)
+		if not image_ok:
+			return jsonify({'error': f'image {docker_image} not found on context'}), 500
+
+		return jsonify({'success': True})
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/reload', methods=['POST'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_reload_contexts():
+		try:
+			orchestrator.load_from_db()
+			return jsonify({'success': True})
+		except Exception as e:
+			logger.error(f"admin API error reloading contexts: {e}")
+			return jsonify({'error': str(e)}), 500
+
+	# settings
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/settings', methods=['GET'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_get_settings():
+		from .models import get_all_settings
+		try:
+			settings = get_all_settings()
+			return jsonify({'settings': settings})
+		except Exception as e:
+			logger.error(f"admin API error getting settings: {e}")
+			return jsonify({'error': str(e)}), 500
+
+	@remote_desktop_bp.route('/remote-desktop/admin/api/settings', methods=['PUT'])
+	@admins_only
+	@bypass_csrf_protection
+	def admin_update_settings():
+		from .models import set_setting
+
+		if not request.is_json:
+			return jsonify({'error': 'invalid request'}), 400
+
+		try:
+			for key, value in request.json.items():
+				set_setting(key, value)
+			return jsonify({'success': True})
+		except Exception as e:
+			logger.error(f"admin API error updating settings: {e}")
+			return jsonify({'error': str(e)}), 500
+
+	# events sse
 
 	@remote_desktop_bp.route('/remote-desktop/admin/api/events/stream')
 	@admins_only
@@ -397,7 +590,7 @@ def create_routes(container_manager, orchestrator, config):
 			headers={
 				'Cache-Control': 'no-cache',
 				'X-Accel-Buffering': 'no',
-				'Connection': 'keep-alive'
+				'Connection': 'keep-alive',
 			}
 		)
 
@@ -409,7 +602,7 @@ def create_routes(container_manager, orchestrator, config):
 			events = event_logger.get_recent_events(limit=limit)
 			return jsonify({'events': events})
 		except Exception as e:
-			logger.error(f"Error getting recent events: {str(e)}")
+			logger.error(f"error getting recent events: {e}")
 			return jsonify({'error': str(e)}), 500
 
 	return remote_desktop_bp
