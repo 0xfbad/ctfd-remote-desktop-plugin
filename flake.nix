@@ -24,6 +24,13 @@
             mypy
             uv
           ];
+          shellHook = ''
+            echo "ruff check .          lint"
+            echo "ruff format .         format"
+            echo "ruff format --check . format (dry run)"
+            echo "mypy .                type check"
+            echo "nix flake check       run all checks"
+          '';
         };
       });
     };
