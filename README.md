@@ -64,19 +64,19 @@ Managed through the admin dashboard, each context has a name (matching a docker 
 
 ### Default settings
 
-| Key | Default |
-|-----|---------|
-| docker_image | ctfd-remote-desktop:latest |
-| memory_limit | 4g |
-| shm_size | 512m |
-| resolution | 1920x1080 |
-| cpu_limit | 2 |
-| initial_duration | 3600 |
-| extension_duration | 1800 |
-| max_extensions | 3 |
-| vnc_ready_attempts | 180 |
-| http_request_timeout | 3 |
-| cleanup_interval | 300 |
+| Key | Default | Description |
+|-----|---------|-------------|
+| docker_image | ctfd-remote-desktop:latest | container image to run for each desktop session |
+| memory_limit | 4g | max memory per container |
+| shm_size | 512m | shared memory size, needs to be large enough for the browser and desktop compositor |
+| resolution | 1920x1080 | desktop resolution passed to the container as an env var |
+| cpu_limit | 2 | max cpu cores per container |
+| initial_duration | 3600 | how long a session lasts in seconds before it expires |
+| extension_duration | 1800 | how many seconds each extension adds |
+| max_extensions | 3 | how many times a student can extend their session |
+| vnc_ready_attempts | 180 | number of http polls to wait for novnc to come up, each attempt is 0.5s apart |
+| http_request_timeout | 3 | timeout in seconds for each novnc readiness poll |
+| cleanup_interval | 300 | how often the background thread scans for expired sessions in seconds |
 
 ### Container image requirements
 
