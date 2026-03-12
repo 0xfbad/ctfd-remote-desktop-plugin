@@ -2,7 +2,6 @@ import datetime
 import logging
 import traceback
 import json
-import time
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
@@ -13,596 +12,614 @@ logger = logging.getLogger(__name__)
 
 
 def create_routes(container_manager, orchestrator):
-	remote_desktop_bp = Blueprint(
-		'remote_desktop',
-		__name__,
-		template_folder='templates',
-		static_folder='assets'
-	)
-
-	# user endpoints
-
-	@remote_desktop_bp.route('/remote-desktop')
-	@authed_only
-	def remote_desktop_page():
-		try:
-			user = get_current_user()
-			container_info = container_manager.get_container_info(user.id)
-			creation_status = container_manager.get_creation_status(user.id)
-
-			vnc_url = ""
-			formatted_time = ""
-			if container_info:
-				vnc_url = container_info.get('vnc_url', '')
-				created_timestamp = container_info['created_at']
-				created_dt = datetime.datetime.fromtimestamp(created_timestamp)
-				formatted_time = created_dt.strftime('%B %d, %Y at %I:%M %p')
-
-			template_container_info = None
-			if container_info:
-				template_container_info = {
-					'container_id': container_info['container_id'],
-					'container_name': container_info['container_name'],
-					'vnc_port': container_info['vnc_port'],
-					'novnc_port': container_info['novnc_port'],
-					'docker_context': container_info['docker_context'],
-					'created_at': container_info['created_at'],
-				}
-
-			return render_template(
-				'remote_desktop.html',
-				container_info=template_container_info,
-				vnc_url=vnc_url,
-				formatted_time=formatted_time,
-				creation_status=creation_status
-			)
-		except Exception as e:
-			logger.error(f"error rendering remote desktop page: {e}")
-			logger.error(traceback.format_exc())
-			return f"Error loading remote desktop page: {str(e)}", 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/status', methods=['GET'])
-	@authed_only
-	def get_status():
-		try:
-			user = get_current_user()
-			container_info = container_manager.get_container_info(user.id)
-
-			if not container_info:
-				return jsonify({'session': None})
-
-			timer_status = container_manager.get_session_timer_status(user.id)
-
-			if timer_status.get('expired'):
-				container_manager.destroy_container(user.id)
-				return jsonify({'session': None})
-
-			if timer_status.get('success') and not timer_status.get('started'):
-				container_manager.start_session_timer(user.id)
-				timer_status = container_manager.get_session_timer_status(user.id)
-
-			vnc_url = container_info.get('vnc_url', '')
-
-			return jsonify({
-				'session': {
-					'created_at': container_info['created_at'],
-					'vnc_url': vnc_url,
-					'timer': {
-						'active': timer_status.get('started', False),
-						'time_remaining': timer_status.get('time_remaining', 0),
-						'extensions_used': timer_status.get('extensions_used', 0),
-						'max_extensions': timer_status.get('max_extensions', 3),
-					} if timer_status.get('success') else None,
-				}
-			})
-		except Exception as e:
-			logger.error(f"API error getting status: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/create', methods=['POST'])
-	@authed_only
-	@bypass_csrf_protection
-	def create_session():
-		try:
-			user = get_current_user()
-			logger.info(f"create session request from user {user.name} (ID: {user.id})")
-
-			if container_manager.get_container_info(user.id):
-				event_logger.log_event(
-					'session_error',
-					'attempted to create session but already exists',
-					user_id=user.id,
-					username=user.name,
-					level='warning'
-				)
-				return jsonify({'error': 'Session already exists'}), 400
-
-			creation_status = container_manager.get_creation_status(user.id)
-			if creation_status and creation_status.get('status') not in ['failed', 'none']:
-				event_logger.log_event(
-					'session_error',
-					'attempted to create session but creation already in progress',
-					user_id=user.id,
-					username=user.name,
-					level='warning'
-				)
-				return jsonify({'error': 'Session creation already in progress'}), 400
-
-			result = container_manager.create_container(user.id)
-
-			if not result.get('success'):
-				return jsonify({'error': result.get('error', 'Creation failed')}), 500
-
-			return jsonify({
-				'status': 'creating',
-				'message': 'Container creation started',
-			})
-		except Exception as e:
-			logger.error(f"API error creating session: {e}", exc_info=True)
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/creation-status', methods=['GET'])
-	@authed_only
-	def get_creation_status():
-		try:
-			user = get_current_user()
-			status = container_manager.get_creation_status(user.id)
-
-			if not status:
-				container_info = container_manager.get_container_info(user.id)
-				if container_info:
-					container_manager.start_session_timer(user.id)
-					timer_status = container_manager.get_session_timer_status(user.id)
-					vnc_url = container_info.get('vnc_url', '')
-					return jsonify({
-						'status': 'ready',
-						'message': 'Desktop ready!',
-						'session': {
-							'created_at': container_info['created_at'],
-							'vnc_url': vnc_url,
-							'timer': {
-								'active': timer_status.get('started', False),
-								'time_remaining': timer_status.get('time_remaining', 0),
-								'extensions_used': timer_status.get('extensions_used', 0),
-								'max_extensions': timer_status.get('max_extensions', 3),
-							} if timer_status.get('success') else None,
-						}
-					})
-				return jsonify({'status': 'none'})
-
-			if status.get('status') == 'ready':
-				container_manager.start_session_timer(user.id)
-				container_info = container_manager.get_container_info(user.id)
-				timer_status = container_manager.get_session_timer_status(user.id)
-				vnc_url = container_info.get('vnc_url', '')
-
-				return jsonify({
-					'status': 'ready',
-					'message': status.get('message', 'Desktop ready!'),
-					'session': {
-						'created_at': container_info['created_at'],
-						'vnc_url': vnc_url,
-						'timer': {
-							'active': timer_status.get('started', False),
-							'time_remaining': timer_status.get('time_remaining', 0),
-							'extensions_used': timer_status.get('extensions_used', 0),
-							'max_extensions': timer_status.get('max_extensions', 3),
-						} if timer_status.get('success') else None,
-					}
-				})
-
-			return jsonify(status)
-		except Exception as e:
-			logger.error(f"API error getting creation status: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/destroy', methods=['POST'])
-	@authed_only
-	@bypass_csrf_protection
-	def destroy_session():
-		try:
-			user = get_current_user()
-
-			if not container_manager.get_container_info(user.id):
-				return jsonify({'error': 'No active session'}), 400
-
-			result = container_manager.destroy_container(user.id)
-			if not result.get('success'):
-				return jsonify({'error': result.get('error', 'Destruction failed')}), 500
-
-			return jsonify({'session': None})
-		except Exception as e:
-			logger.error(f"API error destroying session: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/extend', methods=['POST'])
-	@authed_only
-	@bypass_csrf_protection
-	def extend_session():
-		try:
-			user = get_current_user()
-
-			if not container_manager.get_container_info(user.id):
-				return jsonify({'error': 'No active session'}), 400
-
-			result = container_manager.extend_session_timer(user.id)
-			if not result.get('success'):
-				return jsonify({'error': result.get('error', 'Extension failed')}), 400
-
-			timer_status = container_manager.get_session_timer_status(user.id)
-			return jsonify({
-				'timer': {
-					'active': timer_status.get('started', False),
-					'time_remaining': timer_status.get('time_remaining', 0),
-					'extensions_used': timer_status.get('extensions_used', 0),
-					'max_extensions': timer_status.get('max_extensions', 3),
-				}
-			})
-		except Exception as e:
-			logger.error(f"API error extending session: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/api/cleanup', methods=['POST'])
-	@authed_only
-	@bypass_csrf_protection
-	def trigger_cleanup():
-		try:
-			user = get_current_user()
-			if not user.is_admin():
-				return jsonify({'error': 'Admin access required'}), 403
-
-			container_manager.periodic_cleanup()
-			return jsonify({'success': True, 'message': 'Cleanup triggered'})
-		except Exception as e:
-			logger.error(f"API error triggering cleanup: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	# admin dashboard
-
-	@remote_desktop_bp.route('/remote-desktop/admin')
-	@admins_only
-	def admin_dashboard():
-		return render_template('admin_dashboard.html')
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/containers', methods=['GET'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_get_containers():
-		try:
-			containers = container_manager.get_all_containers()
-			return jsonify({'containers': containers})
-		except Exception as e:
-			logger.error(f"admin API error getting containers: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/hosts', methods=['GET'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_get_hosts():
-		try:
-			status = orchestrator.get_status()
-			return jsonify({'hosts': status})
-		except Exception as e:
-			logger.error(f"admin API error getting hosts: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/kill', methods=['POST'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_kill_container():
-		try:
-			admin_user = get_current_user()
-			user_id = request.form.get('user_id')
-			if not user_id:
-				return jsonify({'error': 'user_id required'}), 400
-
-			user_id = int(user_id)
-
-			from CTFd.models import Users
-			target_user = Users.query.filter_by(id=user_id).first()
-			target_username = target_user.name if target_user else f"User {user_id}"
-
-			event_logger.log_event(
-				'admin_action',
-				f'admin {admin_user.name} manually killed session for {target_username}',
-				user_id=user_id,
-				username=target_username,
-				level='warning',
-				metadata={'admin_id': admin_user.id, 'admin_name': admin_user.name}
-			)
-
-			result = container_manager.destroy_container(user_id)
-
-			if result.get('success'):
-				return jsonify({'success': True})
-			else:
-				return jsonify({'error': result.get('error', 'Failed to kill container')}), 500
-
-		except Exception as e:
-			logger.error(f"admin API error killing container: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/extend', methods=['POST'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_extend_session():
-		try:
-			admin_user = get_current_user()
-			user_id = request.form.get('user_id')
-			if not user_id:
-				return jsonify({'error': 'user_id required'}), 400
-
-			user_id = int(user_id)
-
-			if not container_manager.get_container_info(user_id):
-				return jsonify({'error': 'No active session for user'}), 400
-
-			from CTFd.models import Users
-			target_user = Users.query.filter_by(id=user_id).first()
-			target_username = target_user.name if target_user else f"User {user_id}"
-
-			event_logger.log_event(
-				'admin_action',
-				f'admin {admin_user.name} extended session for {target_username}',
-				user_id=user_id,
-				username=target_username,
-				level='info',
-				metadata={'admin_id': admin_user.id, 'admin_name': admin_user.name}
-			)
-
-			result = container_manager.extend_session_timer(user_id)
-
-			if result.get('success'):
-				return jsonify({'success': True})
-			else:
-				return jsonify({'error': result.get('error', 'Failed to extend session')}), 400
-
-		except Exception as e:
-			logger.error(f"admin API error extending session: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	# context crud
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts', methods=['GET'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_get_contexts():
-		from .models import DesktopDockerContextModel
-		try:
-			contexts = DesktopDockerContextModel.query.all()
-			connected = set(container_manager.host_manager.get_connected_contexts())
-			data = []
-			for ctx in contexts:
-				data.append({
-					'id': ctx.id,
-					'context_name': ctx.context_name,
-					'hostname': ctx.hostname,
-					'pub_hostname': ctx.pub_hostname,
-					'weight': ctx.weight,
-					'enabled': ctx.enabled,
-					'connected': ctx.context_name in connected,
-				})
-			return jsonify({'contexts': data})
-		except Exception as e:
-			logger.error(f"admin API error getting contexts: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts', methods=['POST'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_add_context():
-		from .models import DesktopDockerContextModel
-		from CTFd.models import db
-
-		if not request.is_json:
-			return jsonify({'error': 'invalid request'}), 400
-
-		context_name = request.json.get('context_name')
-		hostname = request.json.get('hostname')
-		pub_hostname = request.json.get('pub_hostname')
-		weight = request.json.get('weight', 1)
-		enabled = request.json.get('enabled', True)
-
-		if not context_name:
-			return jsonify({'error': 'context_name is required'}), 400
-		if not pub_hostname:
-			return jsonify({'error': 'pub_hostname is required'}), 400
-
-		existing = DesktopDockerContextModel.query.filter_by(context_name=context_name).first()
-		if existing:
-			return jsonify({'error': 'context already exists'}), 400
-
-		try:
-			weight = int(weight)
-			if weight < 1:
-				return jsonify({'error': 'weight must be at least 1'}), 400
-		except ValueError:
-			return jsonify({'error': 'weight must be an integer'}), 400
-
-		new_context = DesktopDockerContextModel(
-			context_name=context_name,
-			hostname=hostname,
-			pub_hostname=pub_hostname,
-			weight=weight,
-			enabled=enabled,
-		)
-		db.session.add(new_context)
-		db.session.commit()
-
-		orchestrator.load_from_db()
-
-		return jsonify({'success': True, 'id': new_context.id})
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/<int:context_id>', methods=['PUT'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_update_context(context_id):
-		from .models import DesktopDockerContextModel
-		from CTFd.models import db
-
-		if not request.is_json:
-			return jsonify({'error': 'invalid request'}), 400
-
-		context = DesktopDockerContextModel.query.get(context_id)
-		if not context:
-			return jsonify({'error': 'context not found'}), 404
-
-		if 'hostname' in request.json:
-			context.hostname = request.json['hostname']
-
-		if 'pub_hostname' in request.json:
-			if not request.json['pub_hostname']:
-				return jsonify({'error': 'pub_hostname cannot be empty'}), 400
-			context.pub_hostname = request.json['pub_hostname']
-
-		if 'weight' in request.json:
-			try:
-				weight = int(request.json['weight'])
-				if weight < 1:
-					return jsonify({'error': 'weight must be at least 1'}), 400
-				context.weight = weight
-			except ValueError:
-				return jsonify({'error': 'weight must be an integer'}), 400
-
-		if 'enabled' in request.json:
-			context.enabled = bool(request.json['enabled'])
-
-		db.session.commit()
-		orchestrator.load_from_db()
-
-		return jsonify({'success': True})
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/<int:context_id>', methods=['DELETE'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_delete_context(context_id):
-		from .models import DesktopDockerContextModel
-		from CTFd.models import db
-
-		context = DesktopDockerContextModel.query.get(context_id)
-		if not context:
-			return jsonify({'error': 'context not found'}), 404
-
-		db.session.delete(context)
-		db.session.commit()
-		orchestrator.load_from_db()
-
-		return jsonify({'success': True})
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/<int:context_id>/test', methods=['GET'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_test_context(context_id):
-		from .models import DesktopDockerContextModel, get_setting
-
-		context = DesktopDockerContextModel.query.get(context_id)
-		if not context:
-			return jsonify({'error': 'context not found'}), 404
-
-		ping_ok = container_manager.host_manager.ping(context.context_name)
-		if not ping_ok:
-			return jsonify({'error': 'context unreachable (ping failed)'}), 500
-
-		docker_image = get_setting('docker_image')
-		image_ok = container_manager.host_manager.check_image(context.context_name, docker_image)
-		if not image_ok:
-			return jsonify({'error': f'image {docker_image} not found on context'}), 500
-
-		return jsonify({'success': True})
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/contexts/reload', methods=['POST'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_reload_contexts():
-		try:
-			orchestrator.load_from_db()
-			return jsonify({'success': True})
-		except Exception as e:
-			logger.error(f"admin API error reloading contexts: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	# settings
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/settings', methods=['GET'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_get_settings():
-		from .models import get_all_settings
-		try:
-			settings = get_all_settings()
-			return jsonify({'settings': settings})
-		except Exception as e:
-			logger.error(f"admin API error getting settings: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/settings', methods=['PUT'])
-	@admins_only
-	@bypass_csrf_protection
-	def admin_update_settings():
-		from .models import set_setting
-
-		if not request.is_json:
-			return jsonify({'error': 'invalid request'}), 400
-
-		try:
-			for key, value in request.json.items():
-				set_setting(key, value)
-			return jsonify({'success': True})
-		except Exception as e:
-			logger.error(f"admin API error updating settings: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	# events sse
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/events/stream')
-	@admins_only
-	def admin_events_stream():
-		def event_stream():
-			import queue
-			event_queue = queue.Queue(maxsize=100)
-
-			def event_listener(event):
-				try:
-					event_queue.put_nowait(event)
-				except queue.Full:
-					pass
-
-			event_logger.add_listener(event_listener)
-
-			try:
-				recent_events = event_logger.get_recent_events(limit=200)
-				for event in recent_events:
-					yield f"data: {json.dumps(event)}\n\n"
-
-				while True:
-					try:
-						event = event_queue.get(timeout=30)
-						yield f"data: {json.dumps(event)}\n\n"
-					except queue.Empty:
-						yield f": keepalive\n\n"
-
-			finally:
-				event_logger.remove_listener(event_listener)
-
-		return Response(
-			stream_with_context(event_stream()),
-			mimetype='text/event-stream',
-			headers={
-				'Cache-Control': 'no-cache',
-				'X-Accel-Buffering': 'no',
-				'Connection': 'keep-alive',
-			}
-		)
-
-	@remote_desktop_bp.route('/remote-desktop/admin/api/events/recent')
-	@admins_only
-	def admin_get_recent_events():
-		try:
-			limit = request.args.get('limit', 100, type=int)
-			events = event_logger.get_recent_events(limit=limit)
-			return jsonify({'events': events})
-		except Exception as e:
-			logger.error(f"error getting recent events: {e}")
-			return jsonify({'error': str(e)}), 500
-
-	return remote_desktop_bp
+    remote_desktop_bp = Blueprint("remote_desktop", __name__, template_folder="templates", static_folder="assets")
+
+    # user endpoints
+
+    @remote_desktop_bp.route("/remote-desktop")
+    @authed_only
+    def remote_desktop_page():
+        try:
+            user = get_current_user()
+            container_info = container_manager.get_container_info(user.id)
+            creation_status = container_manager.get_creation_status(user.id)
+
+            vnc_url = ""
+            formatted_time = ""
+            if container_info:
+                vnc_url = container_info.get("vnc_url", "")
+                created_timestamp = container_info["created_at"]
+                created_dt = datetime.datetime.fromtimestamp(created_timestamp)
+                formatted_time = created_dt.strftime("%B %d, %Y at %I:%M %p")
+
+            template_container_info = None
+            if container_info:
+                template_container_info = {
+                    "container_id": container_info["container_id"],
+                    "container_name": container_info["container_name"],
+                    "vnc_port": container_info["vnc_port"],
+                    "novnc_port": container_info["novnc_port"],
+                    "docker_context": container_info["docker_context"],
+                    "created_at": container_info["created_at"],
+                }
+
+            return render_template(
+                "remote_desktop.html",
+                container_info=template_container_info,
+                vnc_url=vnc_url,
+                formatted_time=formatted_time,
+                creation_status=creation_status,
+            )
+        except Exception as e:
+            logger.error(f"error rendering remote desktop page: {e}")
+            logger.error(traceback.format_exc())
+            return f"Error loading remote desktop page: {str(e)}", 500
+
+    @remote_desktop_bp.route("/remote-desktop/api/status", methods=["GET"])
+    @authed_only
+    def get_status():
+        try:
+            user = get_current_user()
+            container_info = container_manager.get_container_info(user.id)
+
+            if not container_info:
+                return jsonify({"session": None})
+
+            timer_status = container_manager.get_session_timer_status(user.id)
+
+            if timer_status.get("expired"):
+                container_manager.destroy_container(user.id)
+                return jsonify({"session": None})
+
+            if timer_status.get("success") and not timer_status.get("started"):
+                container_manager.start_session_timer(user.id)
+                timer_status = container_manager.get_session_timer_status(user.id)
+
+            vnc_url = container_info.get("vnc_url", "")
+
+            return jsonify(
+                {
+                    "session": {
+                        "created_at": container_info["created_at"],
+                        "vnc_url": vnc_url,
+                        "timer": {
+                            "active": timer_status.get("started", False),
+                            "time_remaining": timer_status.get("time_remaining", 0),
+                            "extensions_used": timer_status.get("extensions_used", 0),
+                            "max_extensions": timer_status.get("max_extensions", 3),
+                        }
+                        if timer_status.get("success")
+                        else None,
+                    }
+                }
+            )
+        except Exception as e:
+            logger.error(f"API error getting status: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/api/create", methods=["POST"])
+    @authed_only
+    @bypass_csrf_protection
+    def create_session():
+        try:
+            user = get_current_user()
+            logger.info(f"create session request from user {user.name} (ID: {user.id})")
+
+            if container_manager.get_container_info(user.id):
+                event_logger.log_event(
+                    "session_error",
+                    "attempted to create session but already exists",
+                    user_id=user.id,
+                    username=user.name,
+                    level="warning",
+                )
+                return jsonify({"error": "Session already exists"}), 400
+
+            creation_status = container_manager.get_creation_status(user.id)
+            if creation_status and creation_status.get("status") not in ["failed", "none"]:
+                event_logger.log_event(
+                    "session_error",
+                    "attempted to create session but creation already in progress",
+                    user_id=user.id,
+                    username=user.name,
+                    level="warning",
+                )
+                return jsonify({"error": "Session creation already in progress"}), 400
+
+            result = container_manager.create_container(user.id)
+
+            if not result.get("success"):
+                return jsonify({"error": result.get("error", "Creation failed")}), 500
+
+            return jsonify(
+                {
+                    "status": "creating",
+                    "message": "Container creation started",
+                }
+            )
+        except Exception as e:
+            logger.error(f"API error creating session: {e}", exc_info=True)
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/api/creation-status", methods=["GET"])
+    @authed_only
+    def get_creation_status():
+        try:
+            user = get_current_user()
+            status = container_manager.get_creation_status(user.id)
+
+            if not status:
+                container_info = container_manager.get_container_info(user.id)
+                if container_info:
+                    container_manager.start_session_timer(user.id)
+                    timer_status = container_manager.get_session_timer_status(user.id)
+                    vnc_url = container_info.get("vnc_url", "")
+                    return jsonify(
+                        {
+                            "status": "ready",
+                            "message": "Desktop ready!",
+                            "session": {
+                                "created_at": container_info["created_at"],
+                                "vnc_url": vnc_url,
+                                "timer": {
+                                    "active": timer_status.get("started", False),
+                                    "time_remaining": timer_status.get("time_remaining", 0),
+                                    "extensions_used": timer_status.get("extensions_used", 0),
+                                    "max_extensions": timer_status.get("max_extensions", 3),
+                                }
+                                if timer_status.get("success")
+                                else None,
+                            },
+                        }
+                    )
+                return jsonify({"status": "none"})
+
+            if status.get("status") == "ready":
+                container_manager.start_session_timer(user.id)
+                container_info = container_manager.get_container_info(user.id)
+                timer_status = container_manager.get_session_timer_status(user.id)
+                vnc_url = container_info.get("vnc_url", "")
+
+                return jsonify(
+                    {
+                        "status": "ready",
+                        "message": status.get("message", "Desktop ready!"),
+                        "session": {
+                            "created_at": container_info["created_at"],
+                            "vnc_url": vnc_url,
+                            "timer": {
+                                "active": timer_status.get("started", False),
+                                "time_remaining": timer_status.get("time_remaining", 0),
+                                "extensions_used": timer_status.get("extensions_used", 0),
+                                "max_extensions": timer_status.get("max_extensions", 3),
+                            }
+                            if timer_status.get("success")
+                            else None,
+                        },
+                    }
+                )
+
+            return jsonify(status)
+        except Exception as e:
+            logger.error(f"API error getting creation status: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/api/destroy", methods=["POST"])
+    @authed_only
+    @bypass_csrf_protection
+    def destroy_session():
+        try:
+            user = get_current_user()
+
+            if not container_manager.get_container_info(user.id):
+                return jsonify({"error": "No active session"}), 400
+
+            result = container_manager.destroy_container(user.id)
+            if not result.get("success"):
+                return jsonify({"error": result.get("error", "Destruction failed")}), 500
+
+            return jsonify({"session": None})
+        except Exception as e:
+            logger.error(f"API error destroying session: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/api/extend", methods=["POST"])
+    @authed_only
+    @bypass_csrf_protection
+    def extend_session():
+        try:
+            user = get_current_user()
+
+            if not container_manager.get_container_info(user.id):
+                return jsonify({"error": "No active session"}), 400
+
+            result = container_manager.extend_session_timer(user.id)
+            if not result.get("success"):
+                return jsonify({"error": result.get("error", "Extension failed")}), 400
+
+            timer_status = container_manager.get_session_timer_status(user.id)
+            return jsonify(
+                {
+                    "timer": {
+                        "active": timer_status.get("started", False),
+                        "time_remaining": timer_status.get("time_remaining", 0),
+                        "extensions_used": timer_status.get("extensions_used", 0),
+                        "max_extensions": timer_status.get("max_extensions", 3),
+                    }
+                }
+            )
+        except Exception as e:
+            logger.error(f"API error extending session: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/api/cleanup", methods=["POST"])
+    @authed_only
+    @bypass_csrf_protection
+    def trigger_cleanup():
+        try:
+            user = get_current_user()
+            if not user.is_admin():
+                return jsonify({"error": "Admin access required"}), 403
+
+            container_manager.periodic_cleanup()
+            return jsonify({"success": True, "message": "Cleanup triggered"})
+        except Exception as e:
+            logger.error(f"API error triggering cleanup: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # admin dashboard
+
+    @remote_desktop_bp.route("/remote-desktop/admin")
+    @admins_only
+    def admin_dashboard():
+        return render_template("admin_dashboard.html")
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/containers", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_get_containers():
+        try:
+            containers = container_manager.get_all_containers()
+            return jsonify({"containers": containers})
+        except Exception as e:
+            logger.error(f"admin API error getting containers: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/hosts", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_get_hosts():
+        try:
+            status = orchestrator.get_status()
+            return jsonify({"hosts": status})
+        except Exception as e:
+            logger.error(f"admin API error getting hosts: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/kill", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_kill_container():
+        try:
+            admin_user = get_current_user()
+            user_id = request.form.get("user_id")
+            if not user_id:
+                return jsonify({"error": "user_id required"}), 400
+
+            user_id = int(user_id)
+
+            from CTFd.models import Users
+
+            target_user = Users.query.filter_by(id=user_id).first()
+            target_username = target_user.name if target_user else f"User {user_id}"
+
+            event_logger.log_event(
+                "admin_action",
+                f"admin {admin_user.name} manually killed session for {target_username}",
+                user_id=user_id,
+                username=target_username,
+                level="warning",
+                metadata={"admin_id": admin_user.id, "admin_name": admin_user.name},
+            )
+
+            result = container_manager.destroy_container(user_id)
+
+            if result.get("success"):
+                return jsonify({"success": True})
+            else:
+                return jsonify({"error": result.get("error", "Failed to kill container")}), 500
+
+        except Exception as e:
+            logger.error(f"admin API error killing container: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/extend", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_extend_session():
+        try:
+            admin_user = get_current_user()
+            user_id = request.form.get("user_id")
+            if not user_id:
+                return jsonify({"error": "user_id required"}), 400
+
+            user_id = int(user_id)
+
+            if not container_manager.get_container_info(user_id):
+                return jsonify({"error": "No active session for user"}), 400
+
+            from CTFd.models import Users
+
+            target_user = Users.query.filter_by(id=user_id).first()
+            target_username = target_user.name if target_user else f"User {user_id}"
+
+            event_logger.log_event(
+                "admin_action",
+                f"admin {admin_user.name} extended session for {target_username}",
+                user_id=user_id,
+                username=target_username,
+                level="info",
+                metadata={"admin_id": admin_user.id, "admin_name": admin_user.name},
+            )
+
+            result = container_manager.extend_session_timer(user_id)
+
+            if result.get("success"):
+                return jsonify({"success": True})
+            else:
+                return jsonify({"error": result.get("error", "Failed to extend session")}), 400
+
+        except Exception as e:
+            logger.error(f"admin API error extending session: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # context crud
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_get_contexts():
+        from .models import DesktopDockerContextModel
+
+        try:
+            contexts = DesktopDockerContextModel.query.all()
+            connected = set(container_manager.host_manager.get_connected_contexts())
+            data = []
+            for ctx in contexts:
+                data.append(
+                    {
+                        "id": ctx.id,
+                        "context_name": ctx.context_name,
+                        "hostname": ctx.hostname,
+                        "pub_hostname": ctx.pub_hostname,
+                        "weight": ctx.weight,
+                        "enabled": ctx.enabled,
+                        "connected": ctx.context_name in connected,
+                    }
+                )
+            return jsonify({"contexts": data})
+        except Exception as e:
+            logger.error(f"admin API error getting contexts: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_add_context():
+        from .models import DesktopDockerContextModel
+        from CTFd.models import db
+
+        if not request.is_json:
+            return jsonify({"error": "invalid request"}), 400
+
+        context_name = request.json.get("context_name")
+        hostname = request.json.get("hostname")
+        pub_hostname = request.json.get("pub_hostname")
+        weight = request.json.get("weight", 1)
+        enabled = request.json.get("enabled", True)
+
+        if not context_name:
+            return jsonify({"error": "context_name is required"}), 400
+        if not pub_hostname:
+            return jsonify({"error": "pub_hostname is required"}), 400
+
+        existing = DesktopDockerContextModel.query.filter_by(context_name=context_name).first()
+        if existing:
+            return jsonify({"error": "context already exists"}), 400
+
+        try:
+            weight = int(weight)
+            if weight < 1:
+                return jsonify({"error": "weight must be at least 1"}), 400
+        except ValueError:
+            return jsonify({"error": "weight must be an integer"}), 400
+
+        new_context = DesktopDockerContextModel(
+            context_name=context_name,
+            hostname=hostname,
+            pub_hostname=pub_hostname,
+            weight=weight,
+            enabled=enabled,
+        )
+        db.session.add(new_context)
+        db.session.commit()
+
+        orchestrator.load_from_db()
+
+        return jsonify({"success": True, "id": new_context.id})
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/<int:context_id>", methods=["PUT"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_update_context(context_id):
+        from .models import DesktopDockerContextModel
+        from CTFd.models import db
+
+        if not request.is_json:
+            return jsonify({"error": "invalid request"}), 400
+
+        context = DesktopDockerContextModel.query.get(context_id)
+        if not context:
+            return jsonify({"error": "context not found"}), 404
+
+        if "hostname" in request.json:
+            context.hostname = request.json["hostname"]
+
+        if "pub_hostname" in request.json:
+            if not request.json["pub_hostname"]:
+                return jsonify({"error": "pub_hostname cannot be empty"}), 400
+            context.pub_hostname = request.json["pub_hostname"]
+
+        if "weight" in request.json:
+            try:
+                weight = int(request.json["weight"])
+                if weight < 1:
+                    return jsonify({"error": "weight must be at least 1"}), 400
+                context.weight = weight
+            except ValueError:
+                return jsonify({"error": "weight must be an integer"}), 400
+
+        if "enabled" in request.json:
+            context.enabled = bool(request.json["enabled"])
+
+        db.session.commit()
+        orchestrator.load_from_db()
+
+        return jsonify({"success": True})
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/<int:context_id>", methods=["DELETE"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_delete_context(context_id):
+        from .models import DesktopDockerContextModel
+        from CTFd.models import db
+
+        context = DesktopDockerContextModel.query.get(context_id)
+        if not context:
+            return jsonify({"error": "context not found"}), 404
+
+        db.session.delete(context)
+        db.session.commit()
+        orchestrator.load_from_db()
+
+        return jsonify({"success": True})
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/<int:context_id>/test", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_test_context(context_id):
+        from .models import DesktopDockerContextModel, get_setting
+
+        context = DesktopDockerContextModel.query.get(context_id)
+        if not context:
+            return jsonify({"error": "context not found"}), 404
+
+        ping_ok = container_manager.host_manager.ping(context.context_name)
+        if not ping_ok:
+            return jsonify({"error": "context unreachable (ping failed)"}), 500
+
+        docker_image = get_setting("docker_image")
+        image_ok = container_manager.host_manager.check_image(context.context_name, docker_image)
+        if not image_ok:
+            return jsonify({"error": f"image {docker_image} not found on context"}), 500
+
+        return jsonify({"success": True})
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/reload", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_reload_contexts():
+        try:
+            orchestrator.load_from_db()
+            return jsonify({"success": True})
+        except Exception as e:
+            logger.error(f"admin API error reloading contexts: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # settings
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/settings", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_get_settings():
+        from .models import get_all_settings
+
+        try:
+            settings = get_all_settings()
+            return jsonify({"settings": settings})
+        except Exception as e:
+            logger.error(f"admin API error getting settings: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/settings", methods=["PUT"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_update_settings():
+        from .models import set_setting
+
+        if not request.is_json:
+            return jsonify({"error": "invalid request"}), 400
+
+        try:
+            for key, value in request.json.items():
+                set_setting(key, value)
+            return jsonify({"success": True})
+        except Exception as e:
+            logger.error(f"admin API error updating settings: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # events sse
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/events/stream")
+    @admins_only
+    def admin_events_stream():
+        def event_stream():
+            import queue
+
+            event_queue = queue.Queue(maxsize=100)
+
+            def event_listener(event):
+                try:
+                    event_queue.put_nowait(event)
+                except queue.Full:
+                    pass
+
+            event_logger.add_listener(event_listener)
+
+            try:
+                recent_events = event_logger.get_recent_events(limit=200)
+                for event in recent_events:
+                    yield f"data: {json.dumps(event)}\n\n"
+
+                while True:
+                    try:
+                        event = event_queue.get(timeout=30)
+                        yield f"data: {json.dumps(event)}\n\n"
+                    except queue.Empty:
+                        yield ": keepalive\n\n"
+
+            finally:
+                event_logger.remove_listener(event_listener)
+
+        return Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/events/recent")
+    @admins_only
+    def admin_get_recent_events():
+        try:
+            limit = request.args.get("limit", 100, type=int)
+            events = event_logger.get_recent_events(limit=limit)
+            return jsonify({"events": events})
+        except Exception as e:
+            logger.error(f"error getting recent events: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    return remote_desktop_bp
