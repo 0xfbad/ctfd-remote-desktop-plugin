@@ -84,15 +84,39 @@ The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_
 
 ## API endpoints
 
-**User**: `GET /remote-desktop` (main UI), `POST /api/create` (request session), `GET /api/creation-status` (poll progress), `GET /api/status` (current session), `POST /api/destroy` (destroy session), `POST /api/extend` (extend timer)
-
-**Admin**: `GET /admin` (dashboard), `GET /admin/api/containers` (list sessions), `POST /admin/api/kill` (force kill), `POST /admin/api/extend` (extend any session), `GET /admin/api/events/stream` (SSE), `GET /admin/api/events/recent` (event log)
-
-**Contexts**: `GET /admin/api/contexts` (list with live status), `POST /admin/api/contexts` (add), `PUT /admin/api/contexts/<id>` (update), `DELETE /admin/api/contexts/<id>` (delete), `GET /admin/api/contexts/<id>/test` (ping + image check), `POST /admin/api/contexts/reload` (reconnect all)
-
-**Settings**: `GET /admin/api/settings` (all settings as JSON), `PUT /admin/api/settings` (bulk upsert)
-
 All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-desktop/admin/`
+
+**User**
+
+- `GET /remote-desktop` main UI
+- `POST /api/create` request session
+- `GET /api/creation-status` poll progress
+- `GET /api/status` current session
+- `POST /api/destroy` destroy session
+- `POST /api/extend` extend timer
+
+**Admin**
+
+- `GET /admin` dashboard
+- `GET /admin/api/containers` list sessions
+- `POST /admin/api/kill` force kill
+- `POST /admin/api/extend` extend any session
+- `GET /admin/api/events/stream` SSE
+- `GET /admin/api/events/recent` event log
+
+**Contexts**
+
+- `GET /admin/api/contexts` list with live status
+- `POST /admin/api/contexts` add
+- `PUT /admin/api/contexts/<id>` update
+- `DELETE /admin/api/contexts/<id>` delete
+- `GET /admin/api/contexts/<id>/test` ping + image check
+- `POST /admin/api/contexts/reload` reconnect all
+
+**Settings**
+
+- `GET /admin/api/settings` all settings as JSON
+- `PUT /admin/api/settings` bulk upsert
 
 ## Concurrency
 
@@ -104,7 +128,7 @@ All shared state is guarded by component-level locks: ContainerManager.lock for 
 
 ## Context health
 
-Contexts get marked unhealthy when the connectivity test fails (SSH tunnel, docker daemon ping, or missing image) or when container creation fails. Unhealthy contexts stay out of scheduling rotation. Unlike the old SSH-based system you can hit the Reload button in the admin UI to reconnect everything without restarting CTFd
+Contexts get marked unhealthy when the connectivity test fails (SSH tunnel, docker daemon ping, or missing image) or when container creation fails. Unhealthy contexts stay out of scheduling rotation. You can hit the Reload button in the admin UI to reconnect everything without restarting CTFd
 
 ## Cleanup
 
