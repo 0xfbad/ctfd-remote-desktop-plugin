@@ -44,7 +44,7 @@ Manages aiodocker.Docker clients for each configured docker context, one persist
 
 ### Orchestrator
 
-Tracks per-context container counts, health status, and weights, picks the next context via weighted least-connections (container count divided by weight, lowest score wins). On `load_from_db()` it queries enabled contexts, tells DockerHostManager to connect, then pings each context and checks for the configured docker image. Contexts that fail either step get marked unhealthy and pulled from rotation. Results show up in the admin event feed
+Tracks per-context container counts, health status, and weights, picks the next context via weighted least-connections (`weight / (count + 1)`, highest score wins, ties broken alphabetically). Context selection and slot reservation happen atomically so two concurrent requests can't race for the same slot. On `load_from_db()` it queries enabled contexts, tells DockerHostManager to connect, then pings each context and checks for the configured docker image outside the lock so network I/O doesn't block scheduling. Contexts that fail either step get marked unhealthy and pulled from rotation. Results show up in the admin event feed
 
 ### ContainerManager
 
@@ -128,8 +128,12 @@ All shared state is guarded by component-level locks: ContainerManager.lock for 
 
 ## Context health
 
-Contexts get marked unhealthy when the connectivity test fails (SSH tunnel, docker daemon ping, or missing image) or when container creation fails. Unhealthy contexts stay out of scheduling rotation. You can hit the Reload button in the admin UI to reconnect everything without restarting CTFd
+Contexts get marked unhealthy when the connectivity test fails (SSH tunnel, docker daemon ping, or missing image). During container creation, a context only gets marked unhealthy if the host is actually unreachable, transient errors like VNC startup timeouts don't affect health status. Unhealthy contexts stay out of scheduling rotation
+
+A background health check runs every 6th cleanup cycle (every 30 minutes at default settings), pinging each context and automatically recovering ones that come back online. You can also hit the Reload button in the admin UI to reconnect everything without restarting CTFd
 
 ## Cleanup
+
+On startup, the plugin scans all connected contexts for containers matching the `kali-desktop-` prefix and stops any that aren't tracked in memory, catching orphans from a CTFd crash or restart
 
 A background thread scans session timers on a configurable interval (default 300s) and auto-destroys expired containers. On shutdown, signal handlers (SIGTERM, SIGINT) spawn `cleanup_all_containers` via gevent with a 2s grace period, and there's an atexit handler as a fallback. All cleanup operations iterate over a snapshot of `active_containers` to avoid dict mutation during iteration, and container stops go through the Docker API which handles the case where a container is already gone (auto-removed) gracefully
