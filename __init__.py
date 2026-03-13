@@ -17,6 +17,23 @@ cleanup_stop_event = None
 cleanup_thread = None
 container_manager = None
 
+HEALTH_CHECK_EVERY_N_CYCLES = 6
+
+
+def _cleanup_orphans(host_manager, orchestrator):
+    contexts = host_manager.get_connected_contexts()
+    for ctx in contexts:
+        try:
+            container_ids = host_manager.list_containers(ctx, "kali-desktop-")
+            for cid in container_ids:
+                try:
+                    host_manager.stop_container(ctx, cid)
+                    logger.info(f"cleaned up orphaned container {cid[:12]} on {ctx}")
+                except Exception as e:
+                    logger.warning(f"failed to stop orphan {cid[:12]} on {ctx}: {e}")
+        except Exception as e:
+            logger.warning(f"could not list containers on {ctx}: {e}")
+
 
 def load(app):
     global cleanup_stop_event, cleanup_thread, container_manager
@@ -28,6 +45,8 @@ def load(app):
 
     with app.app_context():
         orchestrator.load_from_db()
+
+    _cleanup_orphans(host_manager, orchestrator)
 
     container_manager = ContainerManager(host_manager, orchestrator)
 
@@ -44,12 +63,21 @@ def load(app):
     def cleanup_worker():
         from .models import get_setting
 
+        cycle = 0
         while not cleanup_stop_event.is_set():
             try:
                 with app.app_context():
                     container_manager.periodic_cleanup()
             except Exception as e:
                 logger.error(f"periodic cleanup error: {e}")
+
+            cycle += 1
+            if cycle % HEALTH_CHECK_EVERY_N_CYCLES == 0:
+                try:
+                    orchestrator.health_check()
+                except Exception as e:
+                    logger.error(f"periodic health check error: {e}")
+
             interval = int(get_setting("cleanup_interval", "300"))
             cleanup_stop_event.wait(interval)
 
