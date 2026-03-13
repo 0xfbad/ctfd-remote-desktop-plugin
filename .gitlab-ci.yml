@@ -1,8 +1,9 @@
 check-python:
   image: python:3.13-slim
   before_script:
-    - pip install ruff mypy
+    - pip install ruff mypy pytest
   script:
     - ruff format --check .
     - ruff check .
     - mypy .
+    - pytest tests/ -v
