@@ -1,9 +1,11 @@
 import os
 import json
-import asyncio
+import time
+import threading
 import logging
 
-import aiodocker
+import docker
+import paramiko
 
 logger = logging.getLogger(__name__)
 
@@ -18,154 +20,169 @@ def parse_size(s):
     return int(s)
 
 
-class AsyncBridge:
-    def __init__(self):
-        self._loop = asyncio.new_event_loop()
-
-        # gevent monkey-patches threading.Thread into greenlets, need the real one
-        # so the asyncio loop gets its own OS thread
+def _resolve_endpoint(context_name, hostname):
+    context_file = os.path.expanduser(f"~/.docker/contexts/meta/{context_name}/meta.json")
+    if os.path.exists(context_file):
         try:
-            import gevent.monkey
+            with open(context_file, "r") as f:
+                meta = json.load(f)
+                endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
+                if endpoint:
+                    return endpoint
+        except Exception as e:
+            logger.warning(f"could not read context meta for '{context_name}': {e}")
 
-            RealThread = gevent.monkey.get_original("threading", "Thread")
-        except Exception:
-            from threading import Thread as RealThread
+    if hostname:
+        if "@" in hostname:
+            return f"ssh://{hostname}"
+        return f"ssh://root@{hostname}"
 
-        self._thread = RealThread(target=self._run_loop, daemon=True)
-        self._thread.start()
+    return None
 
-    def _run_loop(self):
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_forever()
 
-    def run(self, coro):
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
-
-    def shutdown(self):
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5)
+class _ThreadLocalClients(threading.local):
+    def __init__(self):
+        super().__init__()
+        self.clients = {}
+        self.generation = -1
 
 
 class DockerHostManager:
     def __init__(self):
-        self._bridge = AsyncBridge()
-        self._clients = {}  # context_name -> aiodocker.Docker
+        self._context_configs = {}  # context_name -> endpoint URL
         self._pub_hostnames = {}  # context_name -> pub_hostname
+        self._thread_local = _ThreadLocalClients()
+        self._config_generation = 0
+        self._lock = threading.Lock()
+        self._semaphores = {}
 
-    def _resolve_endpoint(self, context_name, hostname):
-        context_file = os.path.expanduser(f"~/.docker/contexts/meta/{context_name}/meta.json")
-        if os.path.exists(context_file):
-            try:
-                with open(context_file, "r") as f:
-                    meta = json.load(f)
-                    endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
-                    if endpoint:
-                        return endpoint
-            except Exception as e:
-                logger.warning(f"could not read context meta for '{context_name}': {e}")
+    def _get_client(self, context_name):
+        tl = self._thread_local
 
-        if hostname:
-            if "@" in hostname:
-                return f"ssh://{hostname}"
-            return f"ssh://root@{hostname}"
+        if tl.generation != self._config_generation:
+            tl.clients = {}
+            tl.generation = self._config_generation
 
-        return None
+        clients = tl.clients
+        if context_name in clients:
+            return clients[context_name]
 
-    async def _connect_context(self, context_name, endpoint):
-        client = aiodocker.Docker(url=endpoint)
-        await client.ping()
+        url = self._context_configs.get(context_name)
+        if not url:
+            raise Exception(f"no client for context '{context_name}'")
+
+        client = docker.DockerClient(base_url=url)
+        clients[context_name] = client
         return client
+
+    def _clear_thread_local_client(self, context_name):
+        self._thread_local.clients.pop(context_name, None)
+
+    def _init_semaphores(self):
+        from .models import get_setting
+
+        limit = get_setting("max_concurrent_creates")
+
+        new_semaphores = {}
+        for ctx_name in self._context_configs:
+            new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
+
+        self._semaphores = new_semaphores
+
+    def acquire_semaphore(self, context_name, timeout=30):
+        sem = self._semaphores.get(context_name)
+        if sem is None:
+            return True
+
+        acquired = sem.acquire(blocking=True, timeout=timeout)
+        if not acquired:
+            raise Exception("server busy, please try again shortly")
+        return True
+
+    def release_semaphore(self, context_name):
+        sem = self._semaphores.get(context_name)
+        if sem is not None:
+            try:
+                sem.release()
+            except ValueError:
+                pass
 
     def load_contexts(self, contexts):
         """(re)connect all enabled contexts. contexts is a list of
         DesktopDockerContextModel rows."""
-        self._bridge.run(self._load_contexts_async(contexts))
-
-    async def _load_contexts_async(self, contexts):
-        # close old clients first
-        for name, client in self._clients.items():
-            try:
-                await client.close()
-            except Exception:
-                pass
-        self._clients.clear()
-        self._pub_hostnames.clear()
+        new_configs = {}
+        new_pub_hostnames = {}
 
         for ctx in contexts:
-            endpoint = self._resolve_endpoint(ctx.context_name, ctx.hostname)
+            endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
             if not endpoint:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
 
             try:
-                client = await self._connect_context(ctx.context_name, endpoint)
-                self._clients[ctx.context_name] = client
-                self._pub_hostnames[ctx.context_name] = ctx.pub_hostname
+                client = docker.DockerClient(base_url=endpoint)
+                client.ping()
+                client.close()
+                new_configs[ctx.context_name] = endpoint
+                new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
-            except Exception as e:
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
                 logger.error(f"could not connect to context '{ctx.context_name}': {e}")
+
+        with self._lock:
+            self._context_configs = new_configs
+            self._pub_hostnames = new_pub_hostnames
+            self._config_generation += 1
+
+        self._init_semaphores()
 
     def get_pub_hostname(self, context_name):
         return self._pub_hostnames.get(context_name)
 
     def get_connected_contexts(self):
-        return list(self._clients.keys())
+        return list(self._context_configs.keys())
 
     def ping(self, context_name):
         try:
-            self._bridge.run(self._ping_async(context_name))
+            client = self._get_client(context_name)
+            client.ping()
             return True
         except Exception:
+            self._clear_thread_local_client(context_name)
             return False
 
-    async def _ping_async(self, context_name):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
-        await client.ping()
-
     def run_container(self, context_name, image, name, env, ports, shm_size=None, memory=None, nano_cpus=None):
-        return self._bridge.run(
-            self._run_container_async(context_name, image, name, env, ports, shm_size, memory, nano_cpus)
-        )
+        from .models import get_setting
 
-    async def _run_container_async(self, context_name, image, name, env, ports, shm_size, memory, nano_cpus):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
+        client = self._get_client(context_name)
+        pids_limit = get_setting("pids_limit")
 
-        exposed_ports = {p: {} for p in ports}
-        port_bindings = {p: [{"HostPort": ""}] for p in ports}
+        port_bindings = {p: None for p in ports}
 
-        env_list = [f"{k}={v}" for k, v in env.items()]
-
-        host_config = {
-            "PortBindings": port_bindings,
-            "AutoRemove": True,
-        }
-        if shm_size:
-            host_config["ShmSize"] = shm_size
-        if memory:
-            host_config["Memory"] = memory
-        if nano_cpus:
-            host_config["NanoCpus"] = nano_cpus
-
-        config = {
-            "Image": image,
-            "Env": env_list,
-            "ExposedPorts": exposed_ports,
-            "HostConfig": host_config,
-        }
-
-        container = await client.containers.create_or_replace(name=name, config=config)
-        await container.start()
+        try:
+            container = client.containers.run(
+                image,
+                name=name,
+                detach=True,
+                auto_remove=True,
+                environment=env,
+                ports=port_bindings,
+                shm_size=shm_size,
+                mem_limit=memory,
+                nano_cpus=nano_cpus,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                pids_limit=pids_limit,
+            )
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
 
         # poll for port mappings (container might take a moment to bind)
         port_map = {}
         for attempt in range(5):
-            info = await container.show()
-            network_ports = info.get("NetworkSettings", {}).get("Ports", {})
+            container.reload()
+            network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
 
             all_mapped = True
             for p in ports:
@@ -179,7 +196,7 @@ class DockerHostManager:
                 break
 
             if attempt < 4:
-                await asyncio.sleep(0.3)
+                time.sleep(0.3)
 
         if not port_map:
             raise Exception(f"could not get port mappings for {name}")
@@ -191,90 +208,62 @@ class DockerHostManager:
         }
 
     def get_ports(self, context_name, container_id_or_name):
-        return self._bridge.run(self._get_ports_async(context_name, container_id_or_name))
+        client = self._get_client(context_name)
+        try:
+            container = client.containers.get(container_id_or_name)
+            network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
 
-    async def _get_ports_async(self, context_name, container_id_or_name):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
-
-        container = await client.containers.get(container_id_or_name)
-        info = await container.show()
-        network_ports = info.get("NetworkSettings", {}).get("Ports", {})
-
-        port_map = {}
-        for port_key, bindings in network_ports.items():
-            if bindings and len(bindings) > 0:
-                port_map[port_key] = int(bindings[0]["HostPort"])
-        return port_map
+            port_map = {}
+            for port_key, bindings in network_ports.items():
+                if bindings and len(bindings) > 0:
+                    port_map[port_key] = int(bindings[0]["HostPort"])
+            return port_map
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
 
     def stop_container(self, context_name, container_name, timeout=10):
         try:
-            self._bridge.run(self._stop_container_async(context_name, container_name, timeout))
+            client = self._get_client(context_name)
+            try:
+                container = client.containers.get(container_name)
+                container.stop(timeout=timeout)
+            except docker.errors.NotFound:
+                # container already gone (auto-removed)
+                logger.debug(f"container {container_name} already removed")
+            except docker.errors.DockerException:
+                self._clear_thread_local_client(context_name)
+                raise
         except Exception as e:
             logger.error(f"error stopping container {container_name}: {e}")
 
-    async def _stop_container_async(self, context_name, container_name, timeout):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
-
-        try:
-            container = await client.containers.get(container_name)
-            await container.stop(t=timeout)
-        except aiodocker.exceptions.DockerError as e:
-            # 404 means container already gone (auto-removed), not an error
-            if e.status == 404:
-                logger.debug(f"container {container_name} already removed")
-            else:
-                raise
-
     def check_image(self, context_name, image):
         try:
-            self._bridge.run(self._check_image_async(context_name, image))
+            client = self._get_client(context_name)
+            client.images.get(image)
             return True
         except Exception:
             return False
 
-    async def _check_image_async(self, context_name, image):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
-        await client.images.inspect(image)
-
-    def list_images(self, context_name):
-        return self._bridge.run(self._list_images_async(context_name))
-
-    async def _list_images_async(self, context_name):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
-        images = await client.images.list()
-        return images
-
     def list_containers(self, context_name, name_prefix):
-        return self._bridge.run(self._list_containers_async(context_name, name_prefix))
+        client = self._get_client(context_name)
+        try:
+            containers = client.containers.list(all=True, filters={"name": [name_prefix]})
+            return [c.id for c in containers]
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
 
-    async def _list_containers_async(self, context_name, name_prefix):
-        client = self._clients.get(context_name)
-        if not client:
-            raise Exception(f"no client for context '{context_name}'")
-
-        filters = {"name": [name_prefix]}
-        containers = await client.containers.list(all=True, filters=filters)
-        return [c["Id"] for c in containers]
+    def is_container_running(self, context_name, container_id):
+        try:
+            client = self._get_client(context_name)
+            container = client.containers.get(container_id)
+            return container.status == "running"
+        except docker.errors.NotFound:
+            return False
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            raise
 
     def close(self):
-        try:
-            self._bridge.run(self._close_async())
-        except Exception:
-            pass
-        self._bridge.shutdown()
-
-    async def _close_async(self):
-        for name, client in self._clients.items():
-            try:
-                await client.close()
-            except Exception:
-                pass
-        self._clients.clear()
+        pass
