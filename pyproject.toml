@@ -6,6 +6,7 @@ testpaths = ["tests"]
 
 [tool.mypy]
 ignore_missing_imports = true
+disable_error_code = ["import-untyped"]
 explicit_package_bases = true
 namespace_packages = true
 
