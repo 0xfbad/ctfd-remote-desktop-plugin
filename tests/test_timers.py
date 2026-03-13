@@ -7,80 +7,111 @@ def make_manager():
     return cm
 
 
-def setup_timer(cm, user_id=1, max_extensions=3):
-    cm.session_timers[user_id] = {
-        "started": False,
-        "start_time": None,
-        "duration": 0,
-        "extensions_used": 0,
-        "max_extensions": max_extensions,
-    }
+class FakeRow:
+    """Mutable stand-in for DesktopContainerInfoModel row."""
+
+    def __init__(self, user_id=1, max_extensions=3):
+        self.user_id = user_id
+        self.timer_started = False
+        self.timer_start_time = None
+        self.timer_duration = 0
+        self.extensions_used = 0
+        self.max_extensions = max_extensions
+
+
+def _patch_db(row):
+    """Returns a patch context that makes the DB query return `row`."""
+    mock_query = MagicMock()
+    mock_query.filter_by.return_value.first.return_value = row
+    mock_model = MagicMock()
+    mock_model.query = mock_query
+    return patch("container_manager.DesktopContainerInfoModel", mock_model)
 
 
 def test_start_timer():
     cm = make_manager()
-    setup_timer(cm)
-    result = cm.start_session_timer(1, duration=600)
+    row = FakeRow()
+
+    with _patch_db(row), patch("container_manager.db"):
+        result = cm.start_session_timer(1, duration=600)
+
     assert result["success"]
     assert result["duration"] == 600
-    assert cm.session_timers[1]["started"]
+    assert row.timer_started
 
 
 def test_start_timer_no_session():
     cm = make_manager()
-    result = cm.start_session_timer(1, duration=600)
+
+    with _patch_db(None):
+        result = cm.start_session_timer(1, duration=600)
+
     assert not result["success"]
 
 
 def test_start_timer_already_started():
     cm = make_manager()
-    setup_timer(cm)
-    cm.start_session_timer(1, duration=600)
-    result = cm.start_session_timer(1, duration=600)
+    row = FakeRow()
+    row.timer_started = True
+
+    with _patch_db(row):
+        result = cm.start_session_timer(1, duration=600)
+
     assert not result["success"]
     assert "already started" in result["error"]
 
 
 def test_stop_timer():
     cm = make_manager()
-    setup_timer(cm)
-    cm.start_session_timer(1, duration=600)
-    result = cm.stop_session_timer(1)
+    row = FakeRow()
+    row.timer_started = True
+    row.timer_start_time = 1000.0
+    row.timer_duration = 600
+
+    with _patch_db(row), patch("container_manager.db"):
+        result = cm.stop_session_timer(1)
+
     assert result["success"]
-    assert not cm.session_timers[1]["started"]
+    assert not row.timer_started
 
 
 def test_stop_timer_not_started():
     cm = make_manager()
-    setup_timer(cm)
-    result = cm.stop_session_timer(1)
+    row = FakeRow()
+
+    with _patch_db(row):
+        result = cm.stop_session_timer(1)
+
     assert not result["success"]
 
 
 def test_extend_timer():
     cm = make_manager()
-    setup_timer(cm, max_extensions=3)
-    cm.start_session_timer(1, duration=600)
+    row = FakeRow(max_extensions=3)
+    row.timer_started = True
+    row.timer_start_time = 1000.0
+    row.timer_duration = 600
 
-    with patch("container_manager.time") as mock_time:
+    with _patch_db(row), patch("container_manager.db"), patch("container_manager.time") as mock_time:
         # 100 seconds have elapsed
-        mock_time.time.return_value = cm.session_timers[1]["start_time"] + 100
+        mock_time.time.return_value = 1100.0
         result = cm.extend_session_timer(1, new_duration=300)
 
     assert result["success"]
     assert result["extensions_used"] == 1
     # remaining was 500, plus 300 extension
-    assert cm.session_timers[1]["duration"] == 800
+    assert row.timer_duration == 800
 
 
 def test_extend_max_reached():
     cm = make_manager()
-    setup_timer(cm, max_extensions=1)
-    cm.start_session_timer(1, duration=600)
+    row = FakeRow(max_extensions=1)
+    row.timer_started = True
+    row.timer_start_time = 1000.0
+    row.timer_duration = 600
+    row.extensions_used = 1
 
-    with patch("container_manager.time") as mock_time:
-        mock_time.time.return_value = cm.session_timers[1]["start_time"]
-        cm.extend_session_timer(1, new_duration=300)
+    with _patch_db(row):
         result = cm.extend_session_timer(1, new_duration=300)
 
     assert not result["success"]
@@ -89,11 +120,13 @@ def test_extend_max_reached():
 
 def test_timer_status_running():
     cm = make_manager()
-    setup_timer(cm)
-    cm.start_session_timer(1, duration=600)
+    row = FakeRow()
+    row.timer_started = True
+    row.timer_start_time = 1000.0
+    row.timer_duration = 600
 
-    with patch("container_manager.time") as mock_time:
-        mock_time.time.return_value = cm.session_timers[1]["start_time"] + 100
+    with _patch_db(row), patch("container_manager.time") as mock_time:
+        mock_time.time.return_value = 1100.0
         status = cm.get_session_timer_status(1)
 
     assert status["success"]
@@ -103,11 +136,13 @@ def test_timer_status_running():
 
 def test_timer_status_expired():
     cm = make_manager()
-    setup_timer(cm)
-    cm.start_session_timer(1, duration=600)
+    row = FakeRow()
+    row.timer_started = True
+    row.timer_start_time = 1000.0
+    row.timer_duration = 600
 
-    with patch("container_manager.time") as mock_time:
-        mock_time.time.return_value = cm.session_timers[1]["start_time"] + 700
+    with _patch_db(row), patch("container_manager.time") as mock_time:
+        mock_time.time.return_value = 1700.0
         status = cm.get_session_timer_status(1)
 
     assert status["expired"]
@@ -116,8 +151,11 @@ def test_timer_status_expired():
 
 def test_timer_status_not_started():
     cm = make_manager()
-    setup_timer(cm)
-    status = cm.get_session_timer_status(1)
+    row = FakeRow()
+
+    with _patch_db(row):
+        status = cm.get_session_timer_status(1)
+
     assert status["success"]
     assert not status["started"]
     assert status["time_remaining"] == 0
@@ -128,16 +166,22 @@ def test_concurrent_extend():
 
     num_threads = 20
     max_ext = 5
+
+    # shared row visible to all threads, simulates single DB row
+    row = FakeRow(max_extensions=max_ext)
+    row.timer_started = True
+    row.timer_start_time = 1000.0
+    row.timer_duration = 60000
+
     cm = make_manager()
-    setup_timer(cm, user_id=1, max_extensions=max_ext)
-    cm.start_session_timer(1, duration=60000)
     barrier = threading.Barrier(num_threads + 1)
     results = []
     results_lock = threading.Lock()
 
     def worker():
         barrier.wait()
-        result = cm.extend_session_timer(1, new_duration=10)
+        with _patch_db(row), patch("container_manager.db"):
+            result = cm.extend_session_timer(1, new_duration=10)
         with results_lock:
             results.append(result)
 
@@ -150,4 +194,4 @@ def test_concurrent_extend():
 
     successes = [r for r in results if r["success"]]
     assert len(successes) == max_ext
-    assert cm.session_timers[1]["extensions_used"] == max_ext
+    assert row.extensions_used == max_ext
