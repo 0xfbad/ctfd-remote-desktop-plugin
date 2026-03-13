@@ -2,7 +2,6 @@ import sys
 import signal
 import atexit
 import logging
-from threading import Thread, Event
 from CTFd.plugins import register_plugin_assets_directory, register_user_page_menu_bar, register_admin_plugin_menu_bar
 
 from .docker_host_manager import DockerHostManager
@@ -13,40 +12,56 @@ from .routes import create_routes
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-cleanup_stop_event = None
-cleanup_thread = None
-container_manager = None
 
-HEALTH_CHECK_EVERY_N_CYCLES = 6
+def _seed_defaults(app):
+    from CTFd.models import db
+    from .models import DesktopSettingsModel, SETTING_DEFAULTS
+
+    existing = {s.key for s in DesktopSettingsModel.query.all()}
+    for key, value in SETTING_DEFAULTS.items():
+        if key not in existing:
+            db.session.add(DesktopSettingsModel(key=key, value=str(value)))
+    db.session.commit()
 
 
-def _cleanup_orphans(host_manager, orchestrator):
-    contexts = host_manager.get_connected_contexts()
-    for ctx in contexts:
+def _reconcile_containers(app, host_manager, orchestrator):
+    from CTFd.models import db
+    from .models import DesktopContainerInfoModel
+
+    rows = DesktopContainerInfoModel.query.all()
+    removed = 0
+    kept = 0
+
+    for row in rows:
         try:
-            container_ids = host_manager.list_containers(ctx, "kali-desktop-")
-            for cid in container_ids:
-                try:
-                    host_manager.stop_container(ctx, cid)
-                    logger.info(f"cleaned up orphaned container {cid[:12]} on {ctx}")
-                except Exception as e:
-                    logger.warning(f"failed to stop orphan {cid[:12]} on {ctx}: {e}")
-        except Exception as e:
-            logger.warning(f"could not list containers on {ctx}: {e}")
+            if host_manager.is_container_running(row.docker_context, row.container_id):
+                # container still alive, count it in the orchestrator
+                orchestrator.reserve_slot(row.docker_context)
+                kept += 1
+            else:
+                db.session.delete(row)
+                removed += 1
+        except Exception:
+            db.session.delete(row)
+            removed += 1
+
+    if removed:
+        db.session.commit()
+
+    if removed or kept:
+        logger.info(f"reconciled containers on startup: {kept} recovered, {removed} stale records removed")
 
 
 def load(app):
-    global cleanup_stop_event, cleanup_thread, container_manager
-
     app.db.create_all()
 
     host_manager = DockerHostManager()
     orchestrator = Orchestrator(host_manager)
 
     with app.app_context():
+        _seed_defaults(app)
         orchestrator.load_from_db()
-
-    _cleanup_orphans(host_manager, orchestrator)
+        _reconcile_containers(app, host_manager, orchestrator)
 
     container_manager = ContainerManager(host_manager, orchestrator)
 
@@ -60,46 +75,64 @@ def load(app):
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
     register_admin_plugin_menu_bar("Remote Desktop", "/remote-desktop/admin")
 
-    def cleanup_worker():
-        from .models import get_setting
+    # scheduler setup
+    from .models import get_setting
 
-        cycle = 0
-        while not cleanup_stop_event.is_set():
-            try:
-                with app.app_context():
-                    container_manager.periodic_cleanup()
-            except Exception as e:
-                logger.error(f"periodic cleanup error: {e}")
+    try:
+        from apscheduler.schedulers.gevent import GeventScheduler
 
-            cycle += 1
-            if cycle % HEALTH_CHECK_EVERY_N_CYCLES == 0:
-                try:
-                    orchestrator.health_check()
-                except Exception as e:
-                    logger.error(f"periodic health check error: {e}")
+        scheduler = GeventScheduler()
+    except ImportError:
+        from apscheduler.schedulers.background import BackgroundScheduler
 
-            interval = int(get_setting("cleanup_interval", "300"))
-            cleanup_stop_event.wait(interval)
+        scheduler = BackgroundScheduler()
+
+    cleanup_interval = get_setting("cleanup_interval")
+
+    scheduler.add_job(
+        func=container_manager.periodic_cleanup,
+        trigger="interval",
+        seconds=cleanup_interval,
+        misfire_grace_time=30,
+        coalesce=True,
+        id="expiry_check",
+    )
+
+    scheduler.add_job(
+        func=orchestrator.health_check,
+        trigger="interval",
+        seconds=30,
+        misfire_grace_time=30,
+        coalesce=True,
+        id="health_check",
+    )
+
+    # wrap periodic_cleanup so it runs within app context
+    _original_cleanup = container_manager.periodic_cleanup
+
+    def _cleanup_with_context():
+        with app.app_context():
+            _original_cleanup()
+
+    container_manager.periodic_cleanup = _cleanup_with_context
+
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown(wait=False))
 
     def signal_handler(signum, frame):
         logger.info(f"received signal {signum}, cleaning up containers...")
-        cleanup_stop_event.set()
         try:
-            import gevent
-
-            gevent.spawn(container_manager.cleanup_all_containers)
-            gevent.sleep(2)
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+        try:
+            with app.app_context():
+                container_manager.cleanup_all_containers()
         except Exception:
             pass
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-
-    atexit.register(container_manager.cleanup_all_containers)
-
-    cleanup_stop_event = Event()
-    cleanup_thread = Thread(target=cleanup_worker, daemon=True)
-    cleanup_thread.start()
 
     logger.info("remote desktop plugin loaded")
