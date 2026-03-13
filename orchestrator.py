@@ -27,64 +27,82 @@ class Orchestrator:
         connected = set(self.host_manager.get_connected_contexts())
         docker_image = get_setting("docker_image")
 
-        with self.lock:
-            self.health.clear()
-            self.weights.clear()
+        # health-check each context outside the lock (network I/O)
+        new_health = {}
+        new_weights = {}
+        events = []
+        for ctx in contexts:
+            name = ctx.context_name
+            is_connected = name in connected
 
-            for ctx in contexts:
-                name = ctx.context_name
-                is_connected = name in connected
+            if is_connected:
+                has_image = self.host_manager.check_image(name, docker_image)
+            else:
+                has_image = False
 
-                if is_connected:
-                    has_image = self.host_manager.check_image(name, docker_image)
-                else:
-                    has_image = False
+            healthy = is_connected and has_image
+            new_health[name] = healthy
+            new_weights[name] = ctx.weight
 
-                healthy = is_connected and has_image
-                self.health[name] = healthy
-                self.weights[name] = ctx.weight
-
-                if name not in self.container_counts:
-                    self.container_counts[name] = 0
-
-                if healthy:
-                    event_logger.log_event(
-                        "host_healthy", f"context {name} is healthy", level="info", metadata={"context_name": name}
-                    )
-                else:
-                    reason = "connection failed" if not is_connected else "image not found"
-                    event_logger.log_event(
+            if healthy:
+                events.append(("host_healthy", f"context {name} is healthy", "info", {"context_name": name}))
+            else:
+                reason = "connection failed" if not is_connected else "image not found"
+                events.append(
+                    (
                         "host_unhealthy",
                         f"context {name} marked unhealthy: {reason}",
-                        level="warning",
-                        metadata={"context_name": name, "reason": reason},
+                        "warning",
+                        {"context_name": name, "reason": reason},
                     )
+                )
 
-            # prune counts for contexts that no longer exist
-            known = {ctx.context_name for ctx in contexts}
+        known = {ctx.context_name for ctx in contexts}
+
+        with self.lock:
+            self.health = new_health
+            self.weights = new_weights
             for name in list(self.container_counts.keys()):
                 if name not in known:
                     del self.container_counts[name]
+            for name in known:
+                if name not in self.container_counts:
+                    self.container_counts[name] = 0
 
-        healthy_count = sum(1 for h in self.health.values() if h)
+        for event_type, message, level, metadata in events:
+            event_logger.log_event(event_type, message, level=level, metadata=metadata)
+
+        healthy_count = sum(1 for h in new_health.values() if h)
         logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
 
     def get_next_context(self):
         with self.lock:
-            candidates = []
-            for name, healthy in self.health.items():
-                if not healthy:
-                    continue
-                count = self.container_counts[name]
-                weight = self.weights.get(name, 1)
-                score = weight / (count + 1)
-                candidates.append((score, name))
+            return self._pick_best_context()
 
-            if not candidates:
-                raise Exception("no healthy contexts available")
+    def _pick_best_context(self):
+        """Must be called with self.lock held."""
+        candidates = []
+        for name, healthy in self.health.items():
+            if not healthy:
+                continue
+            count = self.container_counts[name]
+            weight = self.weights.get(name, 1)
+            score = weight / (count + 1)
+            candidates.append((score, name))
 
-            candidates.sort(key=lambda x: (-x[0], x[1]))
-            return candidates[0][1]
+        if not candidates:
+            raise Exception("no healthy contexts available")
+
+        candidates.sort(key=lambda x: (-x[0], x[1]))
+        return candidates[0][1]
+
+    def select_and_reserve(self):
+        """Pick the best context and increment its count atomically."""
+        with self.lock:
+            name = self._pick_best_context()
+            self.container_counts[name] += 1
+            logger.debug(f"select_and_reserve: {name}, now {self.container_counts[name]}")
+            return name
 
     def reserve_slot(self, context_name):
         with self.lock:
@@ -133,6 +151,23 @@ class Orchestrator:
                     }
                 )
             return status
+
+    def health_check(self):
+        """Ping each context and update health status. Runs outside app context."""
+        with self.lock:
+            names = list(self.health.keys())
+
+        for name in names:
+            reachable = self.host_manager.ping(name)
+            with self.lock:
+                was_healthy = self.health.get(name)
+
+            if reachable and not was_healthy:
+                self.mark_healthy(name)
+                logger.info(f"health_check: context {name} recovered")
+            elif not reachable and was_healthy:
+                self.mark_unhealthy(name)
+                logger.warning(f"health_check: context {name} unreachable")
 
     def cleanup(self):
         self.host_manager.close()
