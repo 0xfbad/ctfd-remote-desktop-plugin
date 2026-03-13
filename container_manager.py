@@ -26,7 +26,7 @@ class ContainerManager:
             return cast(val)
         return val
 
-    def wait_for_vnc_ready(self, hostname, novnc_port, max_attempts=None):
+    def wait_for_vnc_ready(self, hostname, novnc_port, max_attempts=None, progress_callback=None):
         if max_attempts is None:
             max_attempts = self._get_setting("vnc_ready_attempts", cast=int)
         http_timeout = self._get_setting("http_request_timeout", cast=int)
@@ -35,6 +35,9 @@ class ContainerManager:
         import urllib.error
 
         for attempt in range(max_attempts):
+            if progress_callback and attempt % 5 == 0:
+                progress_callback(attempt, max_attempts)
+
             try:
                 req = urllib.request.Request(f"http://{hostname}:{novnc_port}/", method="GET")
                 req.add_header("User-Agent", "CTFd-VNC-Check")
@@ -75,13 +78,11 @@ class ContainerManager:
             with self.lock:
                 self.creation_status[user_id] = {"status": "selecting_host", "message": "Requesting a server..."}
 
-            context_name = self.orchestrator.get_next_context()
+            context_name = self.orchestrator.select_and_reserve()
             pub_hostname = self.host_manager.get_pub_hostname(context_name)
             display_hostname = context_name
 
             logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
-
-            self.orchestrator.reserve_slot(context_name)
 
             with self.lock:
                 self.creation_status[user_id] = {
@@ -126,8 +127,15 @@ class ContainerManager:
                     "message": f"Waiting for {display_hostname} display server...",
                 }
 
+            def _vnc_progress(attempt, max_attempts):
+                with self.lock:
+                    self.creation_status[user_id] = {
+                        "status": "waiting_vnc",
+                        "message": f"Waiting for {display_hostname} display server... ({attempt}/{max_attempts})",
+                    }
+
             # vnc readiness check hits the novnc http endpoint on the pub_hostname
-            vnc_ready = self.wait_for_vnc_ready(pub_hostname, novnc_port)
+            vnc_ready = self.wait_for_vnc_ready(pub_hostname, novnc_port, progress_callback=_vnc_progress)
 
             if not vnc_ready:
                 raise Exception(f"VNC server on {pub_hostname}:{novnc_port} did not become ready in time")
@@ -183,10 +191,15 @@ class ContainerManager:
                 except Exception as release_error:
                     logger.error(f"failed to release slot during cleanup: {release_error}")
 
+                # only mark unhealthy if the host is actually unreachable,
+                # not for transient errors like VNC timeout
                 try:
-                    self.orchestrator.mark_unhealthy(context_name)
+                    if not self.host_manager.ping(context_name):
+                        self.orchestrator.mark_unhealthy(context_name)
+                    else:
+                        logger.info(f"context {context_name} still reachable, not marking unhealthy")
                 except Exception as health_error:
-                    logger.error(f"failed to mark context unhealthy during cleanup: {health_error}")
+                    logger.error(f"failed to check context health during cleanup: {health_error}")
 
             logger.error(f"error creating container for user {user_id}: {e}")
             logger.error(traceback.format_exc())
@@ -216,12 +229,19 @@ class ContainerManager:
 
         logger.info(f"create_container called for user {user_id} ({username})")
 
+        with self.lock:
+            existing = self.creation_status.get(user_id)
+            if existing and existing.get("status") not in (None, "failed", "ready"):
+                return {"success": False, "error": "Creation already in progress"}
+
+            if user_id in self.active_containers:
+                return {"success": False, "error": "Session already exists"}
+
+            self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
+
         event_logger.log_event(
             "session_requested", "requested remote desktop session", user_id=user_id, username=username, level="info"
         )
-
-        with self.lock:
-            self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
 
         app = current_app._get_current_object()
 
@@ -251,26 +271,20 @@ class ContainerManager:
         user = Users.query.filter_by(id=user_id).first()
         username = user.name if user else f"User {user_id}"
 
-        container_info = None
+        # atomically pop all state so a second concurrent caller gets None and bails
         with self.lock:
-            if user_id not in self.active_containers:
-                return {"success": False, "error": "No active container found"}
-            container_info = self.active_containers[user_id].copy()
+            container_info = self.active_containers.pop(user_id, None)
+            self.session_timers.pop(user_id, None)
+            self.creation_status.pop(user_id, None)
+
+        if container_info is None:
+            return {"success": False, "error": "No active container found"}
 
         context_name = container_info["docker_context"]
         container_name = container_info["container_name"]
 
         self.host_manager.stop_container(context_name, container_name)
-
         self.orchestrator.release_slot(context_name)
-
-        with self.lock:
-            if user_id in self.active_containers:
-                del self.active_containers[user_id]
-            if user_id in self.session_timers:
-                del self.session_timers[user_id]
-            if user_id in self.creation_status:
-                del self.creation_status[user_id]
 
         if log_destruction:
             event_logger.log_event(
