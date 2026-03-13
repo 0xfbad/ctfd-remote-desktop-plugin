@@ -29,8 +29,13 @@ _stub_modules = [
     "CTFd.utils.decorators",
     "CTFd.utils.user",
     "flask",
-    "aiodocker",
-    "aiodocker.exceptions",
+    "docker",
+    "docker.errors",
+    "paramiko",
+    "paramiko.ssh_exception",
+    "apscheduler",
+    "apscheduler.schedulers",
+    "apscheduler.schedulers.background",
     "gevent",
     "gevent.monkey",
 ]
@@ -59,12 +64,27 @@ _plugins.register_plugin_assets_directory = MagicMock()
 _plugins.register_user_page_menu_bar = MagicMock()
 _plugins.register_admin_plugin_menu_bar = MagicMock()
 
-# aiodocker stubs
-_aio_exc = sys.modules["aiodocker.exceptions"]
-_aio_exc.DockerError = type("DockerError", (Exception,), {"status": 0})
-_aio = sys.modules["aiodocker"]
-_aio.Docker = object
-_aio.exceptions = _aio_exc
+# docker stubs
+_docker = sys.modules["docker"]
+_docker.from_env = MagicMock()
+_docker.DockerClient = MagicMock()
+_docker_errors = sys.modules["docker.errors"]
+_docker_errors.DockerException = type("DockerException", (Exception,), {})
+_docker_errors.NotFound = type("NotFound", (Exception,), {})
+_docker_errors.ImageNotFound = type("ImageNotFound", (Exception,), {})
+_docker.errors = _docker_errors
+
+# paramiko stubs
+_paramiko = sys.modules["paramiko"]
+_paramiko_ssh = sys.modules["paramiko.ssh_exception"]
+_paramiko_ssh.SSHException = type("SSHException", (Exception,), {})
+_paramiko.ssh_exception = _paramiko_ssh
+
+# apscheduler stubs
+_apscheduler_sched = sys.modules["apscheduler.schedulers"]
+_apscheduler_sched.SchedulerNotRunningError = type("SchedulerNotRunningError", (Exception,), {})
+_apscheduler_bg = sys.modules["apscheduler.schedulers.background"]
+_apscheduler_bg.BackgroundScheduler = MagicMock()
 
 # gevent stubs
 sys.modules["gevent.monkey"].get_original = lambda mod, attr: __import__(mod).__dict__[attr]
