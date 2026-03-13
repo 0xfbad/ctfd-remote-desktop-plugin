@@ -1,7 +1,14 @@
 [tool.ruff]
 line-length = 120
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.mypy]
 ignore_missing_imports = true
 explicit_package_bases = true
 namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
