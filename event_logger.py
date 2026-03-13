@@ -27,13 +27,21 @@ class EventLogger:
 
         with self.lock:
             self.events.append(event)
+            listeners = self.listeners[:]
 
-            for listener in self.listeners[:]:
-                try:
-                    listener(event)
-                except Exception as e:
-                    logger.warning(f"event listener failed and was removed: {str(e)}")
-                    self.listeners.remove(listener)
+        failed = []
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception as e:
+                logger.warning(f"event listener failed and was removed: {str(e)}")
+                failed.append(listener)
+
+        if failed:
+            with self.lock:
+                for listener in failed:
+                    if listener in self.listeners:
+                        self.listeners.remove(listener)
 
         log_msg = f"[{event_type}] {message}"
         if username:
