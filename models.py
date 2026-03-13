@@ -11,6 +11,25 @@ class DesktopDockerContextModel(db.Model):
     enabled = db.Column(db.Boolean, default=True)
 
 
+class DesktopContainerInfoModel(db.Model):
+    __tablename__ = "desktop_container_info"
+    container_id = db.Column(db.String(512), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    container_name = db.Column(db.String(512), nullable=False)
+    vnc_port = db.Column(db.Integer, nullable=False)
+    novnc_port = db.Column(db.Integer, nullable=False)
+    vnc_password = db.Column(db.String(256), nullable=False)
+    vnc_url = db.Column(db.Text, nullable=False)
+    docker_context = db.Column(db.String(512), nullable=False)
+    pub_hostname = db.Column(db.String(512), nullable=False)
+    created_at = db.Column(db.Float, nullable=False)
+    timer_started = db.Column(db.Boolean, default=False)
+    timer_start_time = db.Column(db.Float, nullable=True)
+    timer_duration = db.Column(db.Float, default=0)
+    extensions_used = db.Column(db.Integer, default=0)
+    max_extensions = db.Column(db.Integer, default=3)
+
+
 class DesktopSettingsModel(db.Model):
     __tablename__ = "desktop_settings"
     key = db.Column(db.String(512), primary_key=True)
@@ -22,14 +41,30 @@ SETTING_DEFAULTS = {
     "memory_limit": "4g",
     "shm_size": "512m",
     "resolution": "1920x1080",
-    "cpu_limit": "2",
-    "initial_duration": "3600",
-    "extension_duration": "1800",
-    "max_extensions": "3",
-    "vnc_ready_attempts": "180",
-    "http_request_timeout": "3",
-    "cleanup_interval": "300",
+    "cpu_limit": 2,
+    "initial_duration": 3600,
+    "extension_duration": 1800,
+    "max_extensions": 3,
+    "vnc_ready_attempts": 180,
+    "http_request_timeout": 3,
+    "cleanup_interval": 300,
+    "pids_limit": 512,
+    "max_concurrent_creates": 2,
 }
+
+
+def _coerce(raw, default):
+    if default is None:
+        return raw
+
+    target = type(default)
+    if target is bool:
+        return raw.lower() in ("true", "1", "yes") if isinstance(raw, str) else bool(raw)
+    if target is int:
+        return int(float(raw))
+    if target is float:
+        return float(raw)
+    return raw
 
 
 def get_setting(key, default=None):
@@ -38,7 +73,7 @@ def get_setting(key, default=None):
     try:
         row = DesktopSettingsModel.query.filter_by(key=key).first()
         if row and row.value is not None:
-            return row.value
+            return _coerce(row.value, default)
     except Exception:
         pass
     return default
@@ -59,7 +94,8 @@ def get_all_settings():
     try:
         rows = DesktopSettingsModel.query.all()
         for row in rows:
-            settings[row.key] = row.value
+            default = SETTING_DEFAULTS.get(row.key)
+            settings[row.key] = _coerce(row.value, default)
     except Exception:
         pass
     return settings
