@@ -252,6 +252,18 @@ class DockerHostManager:
         images = await client.images.list()
         return images
 
+    def list_containers(self, context_name, name_prefix):
+        return self._bridge.run(self._list_containers_async(context_name, name_prefix))
+
+    async def _list_containers_async(self, context_name, name_prefix):
+        client = self._clients.get(context_name)
+        if not client:
+            raise Exception(f"no client for context '{context_name}'")
+
+        filters = {"name": [name_prefix]}
+        containers = await client.containers.list(all=True, filters=filters)
+        return [c["Id"] for c in containers]
+
     def close(self):
         try:
             self._bridge.run(self._close_async())
