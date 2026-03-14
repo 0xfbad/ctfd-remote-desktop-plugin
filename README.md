@@ -42,7 +42,9 @@ For remote contexts to work from inside the CTFd container you'll also want `net
 
 ### Docker contexts
 
-Set up contexts on the machine running CTFd (or inside the container if you mounted the config)
+For single-server deployments you don't need to configure anything. On first boot with an empty contexts table the plugin checks if the local Docker socket is reachable, and if so creates a `local` context automatically using the machine's hostname as the public address. If you delete it and restart CTFd it comes back
+
+For multi-host setups, create docker contexts on the machine running CTFd (or inside the container if you mounted the config)
 
 ```bash
 docker context create server1 --docker "host=ssh://user@server1.example.com"
@@ -59,7 +61,7 @@ The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_
 
 ### Database
 
-The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, and `desktop_settings` for configuration. On first startup it seeds all settings with defaults so the admin UI is immediately usable
+The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, and `desktop_settings` for configuration. On first startup it seeds all settings with defaults and creates a `local` Docker context if the socket is available, so the admin UI is immediately usable without any manual context setup
 
 ## Container lifecycle
 
@@ -109,7 +111,7 @@ VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:
 
 ### DockerHostManager
 
-Manages docker SDK clients for each configured docker context, uses thread-local client caching with a generation counter so each thread gets its own `DockerClient` instance and stale clients from old configs get dropped transparently when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, tries resolving the endpoint from the docker context meta file at `~/.docker/contexts/meta/{name}/meta.json` first, falls back to `ssh://{hostname}` from the DB record. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of students hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
+Manages docker SDK clients for each configured docker context, uses thread-local client caching with a generation counter so each thread gets its own `DockerClient` instance and stale clients from old configs get dropped transparently when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, tries resolving the endpoint from the docker context meta file at `~/.docker/contexts/meta/{name}/meta.json` first, falls back to `ssh://{hostname}` from the DB record, and as a final fallback connects via the local Docker socket at `/var/run/docker.sock` if it exists. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of students hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
 
 ### Orchestrator
 
@@ -129,7 +131,7 @@ All configuration is stored in the database via `DesktopSettingsModel` and manag
 
 ### Docker contexts
 
-Managed through the admin dashboard, each context has a name (matching a docker context on the host or just a label), an optional SSH hostname, a public hostname (what students see in VNC URLs), a weight for load balancing, and an enabled flag. Add, edit, delete, test connectivity, and reload connections all from the UI without restarting CTFd
+Managed through the admin dashboard, each context has a name (matching a docker context on the host or just a label), an optional SSH hostname, a public hostname (what students see in VNC URLs), a weight for load balancing, and an enabled flag. A `local` context is auto-seeded on first boot when the Docker socket is available. Add, edit, delete, test connectivity, and reload connections all from the UI without restarting CTFd
 
 ### Default settings
 
@@ -173,7 +175,7 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 
 **Contexts**
 
-- `GET /admin/api/contexts` list with live status
+- `GET /admin/api/contexts` list with live status and `is_local` flag
 - `POST /admin/api/contexts` add
 - `PUT /admin/api/contexts/<id>` update
 - `DELETE /admin/api/contexts/<id>` delete
