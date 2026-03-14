@@ -11,8 +11,9 @@
     <div class="row">
         <div class="col-md-12">
             <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Sessions</h3>
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h3 class="card-title mb-0">Sessions</h3>
+                    <button class="btn btn-sm btn-outline-danger" id="kill-all-btn" style="display: none;" onclick="killAllSessions()">Kill All</button>
                 </div>
                 <div class="card-body">
                     <div class="table-responsive">
@@ -45,6 +46,59 @@
                 </div>
                 <div class="card-body p-0">
                     <div id="event-feed" class="event-feed">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row mt-3">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h3 class="card-title mb-0">Usage Stats</h3>
+                    <select class="form-control form-control-sm" id="stats-period" style="width: auto;" onchange="refreshStats()">
+                        <option value="week">Past Week</option>
+                        <option value="month">Past Month</option>
+                        <option value="all">All Time</option>
+                    </select>
+                </div>
+                <div class="card-body">
+                    <div class="row mb-3">
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center py-3">
+                                    <h4 id="stat-total-sessions" class="mb-0">0</h4>
+                                    <small class="text-muted">Total Sessions</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center py-3">
+                                    <h4 id="stat-avg-duration" class="mb-0">0m</h4>
+                                    <small class="text-muted">Avg Duration</small>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center py-3">
+                                    <h4 id="stat-peak-concurrent" class="mb-0">0</h4>
+                                    <small class="text-muted">Peak Concurrent</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h5>Top Users</h5>
+                            <div id="chart-top-users" style="height: 300px;"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <h5>Daily Usage</h5>
+                            <div id="chart-daily-usage" style="height: 300px;"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -343,6 +397,7 @@
     }
 </style>
 
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script>
     let autoRefreshInterval = null;
     let eventSource = null;
@@ -442,7 +497,7 @@
         return `${minutes}m ${secs}s`;
     }
 
-    // ── settings ────────────────────────────────────────────────
+    // settings
 
     function loadSettings() {
         fetch('/remote-desktop/admin/api/settings', {
@@ -492,7 +547,7 @@
         .catch(error => console.error('Error saving settings:', error));
     }
 
-    // ── contexts ────────────────────────────────────────────────
+    // contexts
 
     let hostsData = [];
 
@@ -734,7 +789,7 @@
         .catch(error => console.error('Error reloading contexts:', error));
     }
 
-    // ── containers ──────────────────────────────────────────────
+    // containers
 
     function refreshContainers() {
         fetch('/remote-desktop/admin/api/containers', {
@@ -753,11 +808,15 @@
 
     function updateContainersTable(containers) {
         const tbody = document.getElementById('containers-table');
+        const killAllBtn = document.getElementById('kill-all-btn');
 
         if (!containers || containers.length === 0) {
             tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sessions</td></tr>';
+            killAllBtn.style.display = 'none';
             return;
         }
+
+        killAllBtn.style.display = '';
 
         tbody.innerHTML = '';
         containers.forEach(container => {
@@ -908,10 +967,133 @@
         }
     }
 
+    // kill all
+
+    function killAllSessions() {
+        if (!confirm('Kill ALL active sessions? This cannot be undone.')) return;
+
+        fetch('/remote-desktop/admin/api/kill-all', {
+            method: 'POST',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'CSRF-Token': window.init.csrfNonce
+            },
+            credentials: 'same-origin'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                CTFd.ui.ezal.ezAlert({ title: 'Success', body: `Killed ${data.killed} session(s)`, button: 'OK' });
+                refreshAll();
+            } else {
+                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Kill all failed', button: 'OK' });
+            }
+        })
+        .catch(error => console.error('Error killing all sessions:', error));
+    }
+
+    // usage stats
+
+    let topUsersChart = null;
+    let dailyUsageChart = null;
+
+    function initCharts() {
+        const topUsersEl = document.getElementById('chart-top-users');
+        const dailyUsageEl = document.getElementById('chart-daily-usage');
+        if (topUsersEl) topUsersChart = echarts.init(topUsersEl);
+        if (dailyUsageEl) dailyUsageChart = echarts.init(dailyUsageEl);
+    }
+
+    function formatDurationShort(seconds) {
+        if (seconds < 60) return Math.round(seconds) + 's';
+        if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+        const h = Math.floor(seconds / 3600);
+        const m = Math.round((seconds % 3600) / 60);
+        return h + 'h ' + m + 'm';
+    }
+
+    function refreshStats() {
+        const period = document.getElementById('stats-period').value;
+
+        fetch('/remote-desktop/admin/api/stats/summary', {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('stat-total-sessions').textContent = data.total_sessions;
+            document.getElementById('stat-avg-duration').textContent = formatDurationShort(data.avg_duration);
+            document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent;
+        })
+        .catch(error => console.error('Error fetching summary:', error));
+
+        fetch(`/remote-desktop/admin/api/stats/top-users?period=${period}`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (!topUsersChart) return;
+            const users = (data.users || []).reverse();
+            topUsersChart.setOption({
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'shadow' },
+                    formatter: function(params) {
+                        const p = params[0];
+                        return echarts.format.encodeHTML(p.name) + '<br/>' +
+                               formatDurationShort(p.value) + ' (' + (data.users.find(u => u.username === p.name) || {}).session_count + ' sessions)';
+                    }
+                },
+                grid: { left: 100, right: 20, top: 10, bottom: 20 },
+                xAxis: { type: 'value', axisLabel: { formatter: v => formatDurationShort(v) } },
+                yAxis: { type: 'category', data: users.map(u => u.username) },
+                series: [{
+                    type: 'bar',
+                    data: users.map(u => u.total_duration),
+                    itemStyle: { color: '#1f76b4' }
+                }]
+            });
+        })
+        .catch(error => console.error('Error fetching top users:', error));
+
+        fetch(`/remote-desktop/admin/api/stats/usage?period=${period}`, {
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin'
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (!dailyUsageChart) return;
+            const days = data.days || [];
+            dailyUsageChart.setOption({
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function(params) {
+                        const p = params[0];
+                        return echarts.format.encodeHTML(p.name) + '<br/>' + p.value + ' sessions';
+                    }
+                },
+                grid: { left: 50, right: 20, top: 10, bottom: 30 },
+                xAxis: { type: 'category', data: days.map(d => d.date), axisLabel: { rotate: 45 } },
+                yAxis: { type: 'value', minInterval: 1 },
+                series: [{
+                    type: 'line',
+                    data: days.map(d => d.sessions),
+                    itemStyle: { color: '#28a745' },
+                    lineStyle: { color: '#28a745' },
+                    areaStyle: { color: 'rgba(40, 167, 69, 0.1)' }
+                }]
+            });
+        })
+        .catch(error => console.error('Error fetching usage:', error));
+    }
+
     document.addEventListener('DOMContentLoaded', function() {
         connectEventStream();
         loadSettings();
         refreshAll();
+        initCharts();
+        refreshStats();
         startAutoRefresh();
     });
 
