@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 class Orchestrator:
     def __init__(self, host_manager):
         self.host_manager = host_manager
-        self.container_counts = defaultdict(int)  # context_name -> count
-        self.health = {}  # context_name -> bool
-        self.weights = {}  # context_name -> int
+        self.container_counts = defaultdict(int)  # {context_name: count}
+        self.health = {}  # {context_name: healthy}
+        self.weights = {}  # {context_name: weight}
         self.lock = Lock()
 
     def load_from_db(self):
@@ -168,7 +168,3 @@ class Orchestrator:
             elif not reachable and was_healthy:
                 self.mark_unhealthy(name)
                 logger.warning(f"health_check: context {name} unreachable")
-
-    def cleanup(self):
-        self.host_manager.close()
-        logger.info("orchestrator cleanup completed")
