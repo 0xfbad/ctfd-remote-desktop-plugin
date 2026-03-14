@@ -163,11 +163,13 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 - `GET /api/status` current session
 - `POST /api/destroy` destroy session
 - `POST /api/extend` extend timer
+- `POST /api/cleanup` trigger cleanup (admin only)
 
 **Admin**
 
 - `GET /admin` dashboard
 - `GET /admin/api/containers` list sessions
+- `GET /admin/api/hosts` orchestrator status
 - `POST /admin/api/kill` force kill
 - `POST /admin/api/extend` extend any session
 - `GET /admin/api/events/stream` SSE
