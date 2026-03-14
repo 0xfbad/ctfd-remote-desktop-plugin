@@ -61,7 +61,7 @@ The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_
 
 ### Database
 
-The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, and `desktop_settings` for configuration. On first startup it seeds all settings with defaults and creates a `local` Docker context if the socket is available, so the admin UI is immediately usable without any manual context setup
+The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, `desktop_session_history` for completed session records, and `desktop_settings` for configuration. On first startup it seeds all settings with defaults and creates a `local` Docker context if the socket is available, so the admin UI is immediately usable without any manual context setup
 
 ## Container lifecycle
 
@@ -80,7 +80,7 @@ The plugin creates its tables automatically on first load, no manual migration n
 
 ### Destruction
 
-User or periodic cleanup triggers it, plugin deletes the DB row, calls `DockerHostManager.stop_container()` which hits the Docker API to stop the container, and releases the context slot in the orchestrator
+User or periodic cleanup triggers it. Before deleting the DB row the plugin writes a `DesktopSessionHistoryModel` entry capturing who used it, which host, start/end times, duration, how many extensions were used, and why the session ended (`user_destroyed`, `expired`, `admin_killed`, or `reconciliation`). Then it deletes the row, calls `DockerHostManager.stop_container()` to hit the Docker API, and releases the context slot in the orchestrator
 
 ### Session timers
 
@@ -90,7 +90,15 @@ Timers start on first status poll after the container is ready. Default is 3600s
 
 All container and timer state lives in the database via `DesktopContainerInfoModel`, so if CTFd restarts your sessions survive. The model stores the container ID, user ID, container name, VNC ports, VNC password, the full noVNC URL, which Docker context it's on, the public hostname, creation timestamp, and all timer fields (started flag, start time, duration, extensions used, max extensions)
 
-On startup the plugin runs a reconciliation pass that checks every DB record against Docker to see if the container is still running. Records where the container is gone get deleted, records where it's still alive get their orchestrator slots reserved so the load balancer counts them correctly. This replaces the old approach of blanket-killing any `kali-desktop-*` container on startup, which was destructive if you had a rolling restart
+On startup the plugin runs a reconciliation pass that checks every DB record against Docker to see if the container is still running. Records where the container is gone get a history entry written with reason `reconciliation` before being deleted. Records where it's still alive get their orchestrator slots reserved so the load balancer counts them correctly. This replaces the old approach of blanket-killing any `kali-desktop-*` container on startup, which was destructive if you had a rolling restart
+
+## Session history
+
+Every session that ends gets a row in `desktop_session_history` recording user_id, username, docker_context, started_at, ended_at, duration, end_reason, and extensions_used. The end_reason field tracks how the session ended: `user_destroyed` when the student clicks destroy, `expired` when the timer runs out, `admin_killed` when an admin kills it from the dashboard, or `reconciliation` when the startup check finds a stale record
+
+The admin dashboard has a Usage Stats section that queries this history. Summary cards show total sessions, average duration, and peak concurrent sessions (calculated with a sweep-line algorithm over all start/end intervals). A top users chart shows the 15 heaviest users by total duration, and a daily usage chart shows session counts over time. Both charts filter by a shared period dropdown (past week, past month, all time)
+
+Admins can also kill all active sessions at once with the Kill All button in the sessions card header. It iterates every active session and destroys them with reason `admin_killed`, logging a single admin event
 
 ## Container security
 
@@ -177,9 +185,16 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 - `GET /admin/api/containers` list sessions
 - `GET /admin/api/hosts` orchestrator status
 - `POST /admin/api/kill` force kill
+- `POST /admin/api/kill-all` kill all sessions
 - `POST /admin/api/extend` extend any session
 - `GET /admin/api/events/stream` SSE
 - `GET /admin/api/events/recent` event log
+
+**Stats**
+
+- `GET /admin/api/stats/summary` total sessions, avg duration, peak concurrent
+- `GET /admin/api/stats/top-users?period=week|month|all` top 15 users by duration
+- `GET /admin/api/stats/usage?period=week|month|all` daily session counts
 
 **Contexts**
 
@@ -220,7 +235,7 @@ The health check job runs every 30 seconds, pinging each context and automatical
 
 ## Startup reconciliation
 
-On startup the plugin queries all `DesktopContainerInfoModel` rows and checks each against Docker to see if the container is still running. Containers that are gone get their DB records deleted. Containers that are still alive get their orchestrator slots reserved so the load balancer has accurate counts from the start. If the Docker host is unreachable the record gets treated as stale and removed
+On startup the plugin queries all `DesktopContainerInfoModel` rows and checks each against Docker to see if the container is still running. Containers that are gone get a history entry written and their DB records deleted. Containers that are still alive get their orchestrator slots reserved so the load balancer has accurate counts from the start. If the Docker host is unreachable the record gets treated as stale and removed
 
 This means a CTFd restart doesn't kill active student sessions, they survive and get picked back up automatically
 
