@@ -769,19 +769,19 @@
 
             const row = `
                 <tr>
-                    <td><strong>${container.username}</strong></td>
+                    <td><strong>${escapeHtml(container.username)}</strong></td>
                     <td>
-                        <code>${container.container_name}</code>
+                        <code>${escapeHtml(container.container_name)}</code>
                     </td>
                     <td>${escapeHtml(container.docker_context || '')}</td>
                     <td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
                     <td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
                     <td><span class="${statusClass}">${status}</span></td>
                     <td class="action-buttons">
-                        <button class="btn btn-sm" onclick="peekVNC('${container.vnc_url}', '${container.username}')" title="Monitor">
+                        <button class="btn btn-sm" onclick="peekVNC('${escapeHtml(container.vnc_url)}', '${escapeHtml(container.username)}')" title="Monitor">
                             <i class="fas fa-eye icon-monitor"></i>
                         </button>
-                        <button class="btn btn-sm" onclick="killContainer(${container.user_id}, '${container.username}')" title="Kill">
+                        <button class="btn btn-sm" onclick="killContainer(${container.user_id}, '${escapeHtml(container.username)}')" title="Kill">
                             <i class="fas fa-times icon-kill"></i>
                         </button>
                         ${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
@@ -815,7 +815,7 @@
                         <div style="position: fixed; top: 10px; right: 10px; background: #dc3545; color: white;
                                    padding: 5px 10px; border-radius: 3px; font-family: Arial; font-size: 12px;
                                    z-index: 9999; opacity: 0.9;">
-                            ADMIN MONITORING: ${username}
+                            ADMIN MONITORING: ${escapeHtml(username)}
                         </div>
                     `;
                     vncWindow.document.body.appendChild(adminIndicator);
