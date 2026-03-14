@@ -9,6 +9,9 @@ import paramiko
 
 logger = logging.getLogger(__name__)
 
+LOCAL_CONTEXT_NAME = "local"
+LOCAL_SOCKET_PATH = "/var/run/docker.sock"
+
 
 def parse_size(s):
     # human-readable size string to bytes, e.g. '4g' becomes 4294967296
@@ -36,6 +39,9 @@ def _resolve_endpoint(context_name, hostname):
         if "@" in hostname:
             return f"ssh://{hostname}"
         return f"ssh://root@{hostname}"
+
+    if os.path.exists(LOCAL_SOCKET_PATH):
+        return f"unix://{LOCAL_SOCKET_PATH}"
 
     return None
 
