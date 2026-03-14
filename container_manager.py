@@ -483,5 +483,4 @@ class ContainerManager:
             except Exception as e:
                 logger.error(f"failed to cleanup container for user {row.user_id}: {e}")
 
-        self.orchestrator.cleanup()
         logger.info("cleanup completed")
