@@ -1,7 +1,9 @@
+import time
 import datetime
 import logging
 import traceback
 import json
+from collections import defaultdict
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
@@ -69,7 +71,7 @@ def create_routes(container_manager, orchestrator):
             timer_status = container_manager.get_session_timer_status(user.id)
 
             if timer_status.get("expired"):
-                container_manager.destroy_container(user.id)
+                container_manager.destroy_container(user.id, reason="expired")
                 return jsonify({"session": None})
 
             if timer_status.get("success") and not timer_status.get("started"):
@@ -323,7 +325,7 @@ def create_routes(container_manager, orchestrator):
                 metadata={"admin_id": admin_user.id, "admin_name": admin_user.name},
             )
 
-            result = container_manager.destroy_container(user_id)
+            result = container_manager.destroy_container(user_id, reason="admin_killed")
 
             if result.get("success"):
                 return jsonify({"success": True})
@@ -372,6 +374,125 @@ def create_routes(container_manager, orchestrator):
 
         except Exception as e:
             logger.error(f"admin API error extending session: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # kill-all
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/kill-all", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_kill_all():
+        try:
+            admin_user = get_current_user()
+            killed = container_manager.destroy_all_containers_admin(admin_user)
+            return jsonify({"success": True, "killed": killed})
+        except Exception as e:
+            logger.error(f"admin API error killing all containers: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # stats
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/top-users", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_top_users():
+        from .models import DesktopSessionHistoryModel
+
+        try:
+            period = request.args.get("period", "all")
+            query = DesktopSessionHistoryModel.query
+
+            if period == "week":
+                cutoff = time.time() - 7 * 86400
+                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
+            elif period == "month":
+                cutoff = time.time() - 30 * 86400
+                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
+
+            rows = query.all()
+
+            user_stats = defaultdict(lambda: {"total_duration": 0.0, "session_count": 0, "username": ""})
+            for row in rows:
+                entry = user_stats[row.user_id]
+                entry["total_duration"] += row.duration
+                entry["session_count"] += 1
+                entry["username"] = row.username
+
+            users = sorted(user_stats.values(), key=lambda u: u["total_duration"], reverse=True)[:15]
+            return jsonify({"users": users})
+        except Exception as e:
+            logger.error(f"admin API error getting top users: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/usage", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_usage():
+        from .models import DesktopSessionHistoryModel
+
+        try:
+            period = request.args.get("period", "all")
+            query = DesktopSessionHistoryModel.query
+
+            if period == "week":
+                cutoff = time.time() - 7 * 86400
+                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
+            elif period == "month":
+                cutoff = time.time() - 30 * 86400
+                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
+
+            rows = query.all()
+
+            daily = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0})
+            for row in rows:
+                date_str = datetime.datetime.fromtimestamp(row.started_at).strftime("%Y-%m-%d")
+                daily[date_str]["sessions"] += 1
+                daily[date_str]["total_duration"] += row.duration
+
+            days = [{"date": d, **daily[d]} for d in sorted(daily.keys())]
+            return jsonify({"days": days})
+        except Exception as e:
+            logger.error(f"admin API error getting usage stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/summary", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_summary():
+        from .models import DesktopSessionHistoryModel
+
+        try:
+            rows = DesktopSessionHistoryModel.query.all()
+            total_sessions = len(rows)
+
+            if total_sessions == 0:
+                return jsonify({"total_sessions": 0, "avg_duration": 0, "peak_concurrent": 0})
+
+            avg_duration = sum(r.duration for r in rows) / total_sessions
+
+            # sweep-line algorithm for peak concurrent sessions
+            events = []
+            for r in rows:
+                events.append((r.started_at, 1))
+                events.append((r.ended_at, -1))
+            events.sort(key=lambda e: (e[0], e[1]))
+
+            peak = 0
+            current = 0
+            for _, delta in events:
+                current += delta
+                if current > peak:
+                    peak = current
+
+            return jsonify(
+                {
+                    "total_sessions": total_sessions,
+                    "avg_duration": avg_duration,
+                    "peak_concurrent": peak,
+                }
+            )
+        except Exception as e:
+            logger.error(f"admin API error getting summary stats: {e}")
             return jsonify({"error": str(e)}), 500
 
     # context crud
