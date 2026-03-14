@@ -43,12 +43,12 @@ def test_higher_weight_preferred():
 
 
 def test_weight_balanced_by_load():
-    # weight 2 vs weight 1, both at 0 containers -> "a" wins (score 2 vs 1)
+    # weight 2 vs weight 1, both at 0 containers so "a" wins (score 2 vs 1)
     o = make_orchestrator([("a", 2, True), ("b", 1, True)])
     assert o.get_next_context() == "a"
 
     # after reserving a slot on "a": score_a = 2/2 = 1, score_b = 1/1 = 1
-    # tie broken alphabetically -> "a" still wins
+    # tie broken alphabetically, "a" still wins
     o.reserve_slot("a")
     assert o.get_next_context() == "a"
 
@@ -78,7 +78,7 @@ def test_release_does_not_go_negative():
 
 
 def test_alphabetical_tiebreak():
-    # equal weight, equal load -> alphabetical wins
+    # equal weight, equal load, alphabetical wins
     o = make_orchestrator([("zebra", 1, True), ("alpha", 1, True)])
     assert o.get_next_context() == "alpha"
 
