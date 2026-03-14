@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def create_routes(container_manager, orchestrator):
-    remote_desktop_bp = Blueprint("remote_desktop", __name__, template_folder="templates", static_folder="assets")
+    remote_desktop_bp = Blueprint("remote_desktop", __name__, template_folder="templates")
 
     # user endpoints
 
