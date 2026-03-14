@@ -3,7 +3,7 @@ import socket
 import signal
 import atexit
 import logging
-from CTFd.plugins import register_plugin_assets_directory, register_user_page_menu_bar, register_admin_plugin_menu_bar
+from CTFd.plugins import register_user_page_menu_bar, register_admin_plugin_menu_bar
 
 from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH
 from .orchestrator import Orchestrator
@@ -102,7 +102,6 @@ def load(app):
     remote_desktop_bp = create_routes(container_manager, orchestrator)
 
     app.register_blueprint(remote_desktop_bp)
-    register_plugin_assets_directory(app, base_path="/plugins/remote_desktop/assets/")
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
     register_admin_plugin_menu_bar("Remote Desktop", "/remote-desktop/admin")
 
