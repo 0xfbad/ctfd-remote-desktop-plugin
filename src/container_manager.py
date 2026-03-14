@@ -5,7 +5,7 @@ import traceback
 from threading import Lock
 
 from CTFd.models import db, Users
-from .models import DesktopContainerInfoModel
+from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel
 from .event_logger import event_logger
 from .docker_host_manager import parse_size
 
@@ -265,7 +265,7 @@ class ContainerManager:
         with self.lock:
             return self.creation_status.get(user_id)
 
-    def destroy_container(self, user_id, log_destruction=True):
+    def destroy_container(self, user_id, reason="user_destroyed", log_destruction=True):
         user = Users.query.filter_by(id=user_id).first()
         username = user.name if user else f"User {user_id}"
 
@@ -279,6 +279,19 @@ class ContainerManager:
 
         context_name = row.docker_context
         container_name = row.container_name
+
+        ended_at = time.time()
+        history = DesktopSessionHistoryModel(
+            user_id=row.user_id,
+            username=username,
+            docker_context=context_name,
+            started_at=row.created_at,
+            ended_at=ended_at,
+            duration=ended_at - row.created_at,
+            end_reason=reason,
+            extensions_used=row.extensions_used,
+        )
+        db.session.add(history)
 
         db.session.delete(row)
         db.session.commit()
@@ -467,9 +480,32 @@ class ContainerManager:
             )
 
             try:
-                self.destroy_container(user_id, log_destruction=False)
+                self.destroy_container(user_id, reason="expired", log_destruction=False)
             except Exception as e:
                 logger.error(f"failed to destroy expired session for user {user_id}: {e}")
+
+    def destroy_all_containers_admin(self, admin_user):
+        rows = DesktopContainerInfoModel.query.all()
+        killed = 0
+
+        for row in rows:
+            try:
+                self.destroy_container(row.user_id, reason="admin_killed", log_destruction=False)
+                killed += 1
+            except Exception as e:
+                logger.error(f"failed to kill session for user {row.user_id}: {e}")
+
+        if killed:
+            event_logger.log_event(
+                "admin_action",
+                f"admin {admin_user.name} killed all sessions ({killed} total)",
+                user_id=admin_user.id,
+                username=admin_user.name,
+                level="warning",
+                metadata={"killed_count": killed},
+            )
+
+        return killed
 
     def cleanup_all_containers(self):
         logger.info("cleaning up all containers on shutdown")

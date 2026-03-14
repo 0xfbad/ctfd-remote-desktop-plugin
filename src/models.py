@@ -30,6 +30,19 @@ class DesktopContainerInfoModel(db.Model):
     max_extensions = db.Column(db.Integer, default=3)
 
 
+class DesktopSessionHistoryModel(db.Model):
+    __tablename__ = "desktop_session_history"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    username = db.Column(db.String(512), nullable=False)
+    docker_context = db.Column(db.String(512), nullable=False)
+    started_at = db.Column(db.Float, nullable=False)
+    ended_at = db.Column(db.Float, nullable=False)
+    duration = db.Column(db.Float, nullable=False)
+    end_reason = db.Column(db.String(128), nullable=False)
+    extensions_used = db.Column(db.Integer, default=0)
+
+
 class DesktopSettingsModel(db.Model):
     __tablename__ = "desktop_settings"
     key = db.Column(db.String(512), primary_key=True)

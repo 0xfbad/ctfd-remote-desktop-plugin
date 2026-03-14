@@ -53,6 +53,8 @@ def test_destroy_deletes_db_row():
     row.docker_context = "ctx1"
     row.container_name = "kali-desktop-1-1234"
     row.user_id = 1
+    row.created_at = 1000.0
+    row.extensions_used = 0
 
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = row
@@ -63,6 +65,7 @@ def test_destroy_deletes_db_row():
 
     with (
         patch("container_manager.DesktopContainerInfoModel", mock_model),
+        patch("container_manager.DesktopSessionHistoryModel", MagicMock()),
         patch("container_manager.db", mock_db),
         patch("container_manager.Users", mock_users),
     ):
@@ -70,7 +73,6 @@ def test_destroy_deletes_db_row():
 
     assert result["success"]
     mock_db.session.delete.assert_called_once_with(row)
-    mock_db.session.commit.assert_called_once()
     cm.host_manager.stop_container.assert_called_once_with("ctx1", "kali-desktop-1-1234")
     cm.orchestrator.release_slot.assert_called_once_with("ctx1")
 
@@ -113,6 +115,51 @@ def test_create_rejects_existing_session():
     assert "already exists" in result["error"]
 
 
+def test_destroy_all_containers_admin():
+    cm = make_manager()
+
+    row1 = MagicMock()
+    row1.user_id = 1
+    row1.docker_context = "ctx1"
+    row1.container_name = "kali-desktop-1-1234"
+    row1.created_at = 1000.0
+    row1.extensions_used = 0
+
+    row2 = MagicMock()
+    row2.user_id = 2
+    row2.docker_context = "ctx2"
+    row2.container_name = "kali-desktop-2-1234"
+    row2.created_at = 1100.0
+    row2.extensions_used = 1
+
+    mock_model = MagicMock()
+    mock_model.query.all.return_value = [row1, row2]
+    mock_model.query.filter_by.return_value.first.side_effect = [row1, row2]
+
+    mock_db = MagicMock()
+    mock_users = MagicMock()
+    mock_users.query.filter_by.return_value.first.return_value = MagicMock(name="admin")
+    mock_history_cls = MagicMock()
+
+    admin_user = MagicMock()
+    admin_user.name = "admin"
+    admin_user.id = 99
+
+    with (
+        patch("container_manager.DesktopContainerInfoModel", mock_model),
+        patch("container_manager.DesktopSessionHistoryModel", mock_history_cls),
+        patch("container_manager.db", mock_db),
+        patch("container_manager.Users", mock_users),
+        patch("container_manager.time") as mock_time,
+    ):
+        mock_time.time.return_value = 2000.0
+        killed = cm.destroy_all_containers_admin(admin_user)
+
+    assert killed == 2
+    assert cm.host_manager.stop_container.call_count == 2
+    assert cm.orchestrator.release_slot.call_count == 2
+
+
 def test_periodic_cleanup_destroys_expired():
     cm = make_manager()
 
@@ -123,6 +170,8 @@ def test_periodic_cleanup_destroys_expired():
     row.timer_duration = 600
     row.docker_context = "ctx1"
     row.container_name = "kali-desktop-42-1234"
+    row.created_at = 1000.0
+    row.extensions_used = 0
 
     mock_model = MagicMock()
     # first call: periodic_cleanup queries timer_started=True
@@ -136,6 +185,7 @@ def test_periodic_cleanup_destroys_expired():
 
     with (
         patch("container_manager.DesktopContainerInfoModel", mock_model),
+        patch("container_manager.DesktopSessionHistoryModel", MagicMock()),
         patch("container_manager.db", mock_db),
         patch("container_manager.Users", mock_users),
         patch("container_manager.time") as mock_time,

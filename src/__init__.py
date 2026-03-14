@@ -55,8 +55,10 @@ def _seed_local_context(app):
 
 
 def _reconcile_containers(app, host_manager, orchestrator):
-    from CTFd.models import db
-    from .models import DesktopContainerInfoModel
+    import time as _time
+
+    from CTFd.models import db, Users
+    from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel
 
     rows = DesktopContainerInfoModel.query.all()
     removed = 0
@@ -65,10 +67,23 @@ def _reconcile_containers(app, host_manager, orchestrator):
     for row in rows:
         try:
             if host_manager.is_container_running(row.docker_context, row.container_id):
-                # container still alive, count it in the orchestrator
                 orchestrator.reserve_slot(row.docker_context)
                 kept += 1
             else:
+                ended_at = _time.time()
+                user = Users.query.filter_by(id=row.user_id).first()
+                username = user.name if user else f"User {row.user_id}"
+                history = DesktopSessionHistoryModel(
+                    user_id=row.user_id,
+                    username=username,
+                    docker_context=row.docker_context,
+                    started_at=row.created_at,
+                    ended_at=ended_at,
+                    duration=ended_at - row.created_at,
+                    end_reason="reconciliation",
+                    extensions_used=row.extensions_used,
+                )
+                db.session.add(history)
                 db.session.delete(row)
                 removed += 1
         except Exception:
