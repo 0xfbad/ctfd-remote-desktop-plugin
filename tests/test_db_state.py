@@ -140,7 +140,7 @@ def test_periodic_cleanup_destroys_expired():
         patch("container_manager.Users", mock_users),
         patch("container_manager.time") as mock_time,
     ):
-        mock_time.time.return_value = 1700.0  # 700s elapsed, 600s duration -> expired
+        mock_time.time.return_value = 1700.0  # 700s elapsed, 600s duration, expired
         cm.periodic_cleanup()
 
     cm.host_manager.stop_container.assert_called_once()
