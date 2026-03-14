@@ -1,10 +1,11 @@
 import sys
+import socket
 import signal
 import atexit
 import logging
 from CTFd.plugins import register_plugin_assets_directory, register_user_page_menu_bar, register_admin_plugin_menu_bar
 
-from .docker_host_manager import DockerHostManager
+from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH
 from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
@@ -22,6 +23,35 @@ def _seed_defaults(app):
         if key not in existing:
             db.session.add(DesktopSettingsModel(key=key, value=str(value)))
     db.session.commit()
+
+
+def _seed_local_context(app):
+    from CTFd.models import db
+    from .models import DesktopDockerContextModel
+
+    if DesktopDockerContextModel.query.count() > 0:
+        return
+
+    import docker as docker_lib
+
+    try:
+        client = docker_lib.DockerClient(base_url=f"unix://{LOCAL_SOCKET_PATH}")
+        client.ping()
+        client.close()
+    except Exception:
+        return
+
+    db.session.add(
+        DesktopDockerContextModel(
+            context_name=LOCAL_CONTEXT_NAME,
+            hostname=None,
+            pub_hostname=socket.gethostname(),
+            weight=1,
+            enabled=True,
+        )
+    )
+    db.session.commit()
+    logger.info("seeded local docker context")
 
 
 def _reconcile_containers(app, host_manager, orchestrator):
@@ -60,6 +90,7 @@ def load(app):
 
     with app.app_context():
         _seed_defaults(app)
+        _seed_local_context(app)
         orchestrator.load_from_db()
         _reconcile_containers(app, host_manager, orchestrator)
 
