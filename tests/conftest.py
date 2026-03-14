@@ -101,7 +101,7 @@ repo_root_str = str(repo_root)
 PKG = "_rd_plugin"
 
 pkg = types.ModuleType(PKG)
-pkg.__path__ = [repo_root_str]
+pkg.__path__ = [str(repo_root / "src")]
 pkg.__package__ = PKG
 pkg.__file__ = str(repo_root / "__init__.py")
 sys.modules[PKG] = pkg
@@ -109,7 +109,7 @@ sys.modules[PKG] = pkg
 
 def _load_module(name):
     full = f"{PKG}.{name}"
-    filepath = repo_root / f"{name}.py"
+    filepath = repo_root / "src" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(full, filepath)
     mod = importlib.util.module_from_spec(spec)
     mod.__package__ = PKG
