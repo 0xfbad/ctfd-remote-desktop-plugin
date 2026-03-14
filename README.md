@@ -107,6 +107,12 @@ The plugin generates a random 8-char password per container and passes it as `VN
 
 VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:8]` gives 48 bits of entropy which is plenty for preventing port-scan drive-bys in a classroom setting. The password shows up in the browser URL bar and history, fine for a lab environment
 
+## Project structure
+
+The root `__init__.py` is a thin entry point that re-exports `load` from the `src/` subpackage. All source modules, templates, and the Blueprint live under `src/`, keeping the repo root clean for config files and project metadata. Internal relative imports resolve within `src/` so nothing changes from CTFd's perspective, it still calls `load(app)` from the plugin root
+
+A `config.json` at the root registers the plugin in CTFd's admin Plugins dropdown, pointing at the `/remote-desktop/admin` route the Blueprint already serves
+
 ## Components
 
 ### DockerHostManager
