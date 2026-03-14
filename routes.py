@@ -7,6 +7,7 @@ from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
 from CTFd.utils.user import get_current_user
 from .event_logger import event_logger
+from .docker_host_manager import LOCAL_CONTEXT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +396,7 @@ def create_routes(container_manager, orchestrator):
                         "weight": ctx.weight,
                         "enabled": ctx.enabled,
                         "connected": ctx.context_name in connected,
+                        "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
                     }
                 )
             return jsonify({"contexts": data})
