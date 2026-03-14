@@ -26,10 +26,20 @@ def test_hostname_without_user():
     assert result == "ssh://root@host.example.com"
 
 
-def test_no_meta_no_hostname():
+def test_no_meta_no_hostname_no_socket():
     with patch("docker_host_manager.os.path.exists", return_value=False):
         result = _resolve_endpoint("ctx", hostname=None)
     assert result is None
+
+
+def test_local_socket_fallback():
+    def exists_side_effect(path):
+        # meta file doesn't exist, but the docker socket does
+        return path == "/var/run/docker.sock"
+
+    with patch("docker_host_manager.os.path.exists", side_effect=exists_side_effect):
+        result = _resolve_endpoint("ctx", hostname=None)
+    assert result == "unix:///var/run/docker.sock"
 
 
 def test_meta_file_takes_priority_over_hostname():
