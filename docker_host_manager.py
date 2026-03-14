@@ -55,8 +55,8 @@ class _ThreadLocalClients(threading.local):
 
 class DockerHostManager:
     def __init__(self):
-        self._context_configs = {}  # context_name -> endpoint URL
-        self._pub_hostnames = {}  # context_name -> pub_hostname
+        self._context_configs = {}  # {context_name: endpoint_url}
+        self._pub_hostnames = {}  # {context_name: pub_hostname}
         self._thread_local = _ThreadLocalClients()
         self._config_generation = 0
         self._lock = threading.Lock()
@@ -213,21 +213,6 @@ class DockerHostManager:
             "ports": port_map,
         }
 
-    def get_ports(self, context_name, container_id_or_name):
-        client = self._get_client(context_name)
-        try:
-            container = client.containers.get(container_id_or_name)
-            network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-
-            port_map = {}
-            for port_key, bindings in network_ports.items():
-                if bindings and len(bindings) > 0:
-                    port_map[port_key] = int(bindings[0]["HostPort"])
-            return port_map
-        except docker.errors.DockerException:
-            self._clear_thread_local_client(context_name)
-            raise
-
     def stop_container(self, context_name, container_name, timeout=10):
         try:
             client = self._get_client(context_name)
@@ -251,15 +236,6 @@ class DockerHostManager:
         except Exception:
             return False
 
-    def list_containers(self, context_name, name_prefix):
-        client = self._get_client(context_name)
-        try:
-            containers = client.containers.list(all=True, filters={"name": [name_prefix]})
-            return [c.id for c in containers]
-        except docker.errors.DockerException:
-            self._clear_thread_local_client(context_name)
-            raise
-
     def is_container_running(self, context_name, container_id):
         try:
             client = self._get_client(context_name)
@@ -270,6 +246,3 @@ class DockerHostManager:
         except docker.errors.DockerException:
             self._clear_thread_local_client(context_name)
             raise
-
-    def close(self):
-        pass
