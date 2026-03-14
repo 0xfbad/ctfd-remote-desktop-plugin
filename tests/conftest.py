@@ -60,7 +60,6 @@ _user_utils.get_current_user = MagicMock()
 
 _plugins = sys.modules["CTFd.plugins"]
 _plugins.bypass_csrf_protection = lambda f: f
-_plugins.register_plugin_assets_directory = MagicMock()
 _plugins.register_user_page_menu_bar = MagicMock()
 _plugins.register_admin_plugin_menu_bar = MagicMock()
 
@@ -94,7 +93,7 @@ sys.modules["gevent"].spawn = MagicMock()
 repo_root = Path(__file__).resolve().parent.parent
 repo_root_str = str(repo_root)
 
-# DO NOT add repo_root to sys.path -- the root __init__.py has relative imports
+# DO NOT add repo_root to sys.path, the root __init__.py has relative imports
 # that confuse pytest's collector, so load modules explicitly via importlib
 
 # the plugin uses relative imports (from .event_logger import ...) which need
