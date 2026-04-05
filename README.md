@@ -8,6 +8,12 @@ When a student requests a session the plugin picks the least-loaded healthy Dock
 
 Students connect directly to the container's noVNC port on the runner host, no reverse proxy in the path. Admins can peek at any student's desktop from the dashboard using the same stored password
 
+## Access control
+
+The user-facing page at `/remote-desktop` checks two things before letting a student through. First, the `remote_desktop_enabled` setting must be on, if an admin flips it off in the dashboard settings all users see a full-page message saying the feature has been disabled by an administrator. Second, if CTFd has email verification enabled (`verify_emails` in CTFd config), unverified users get a message telling them to verify their email with a button linking to `/confirm`, matching how CTFd's own challenges page gates access. Admins bypass the verification check but still see the disabled page when the feature is turned off
+
+Both checks also gate the `/api/create` endpoint so session creation can't be triggered by hitting the API directly. Existing sessions are unaffected when the feature gets disabled mid-use, they continue running and expire naturally through the periodic cleanup job
+
 ## Setup
 
 ### Installing the plugin
@@ -151,6 +157,7 @@ Managed through the admin dashboard, each context has a name (matching a docker 
 
 | Key | Default | Description |
 |-----|---------|-------------|
+| remote_desktop_enabled | true | master switch, when false the user page shows a disabled message and session creation is blocked |
 | docker_image | ctfd-remote-desktop:latest | container image to run for each desktop session |
 | memory_limit | 4g | max memory per container |
 | shm_size | 512m | shared memory size, needs to be large enough for the browser and desktop compositor |
