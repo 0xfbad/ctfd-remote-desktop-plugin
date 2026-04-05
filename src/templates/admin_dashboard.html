@@ -146,6 +146,15 @@
                     <button class="btn btn-sm btn-outline-primary" onclick="saveSettings()">Save</button>
                 </div>
                 <div class="card-body">
+                    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
+                        <div class="custom-control custom-switch">
+                            <input type="checkbox" class="custom-control-input" id="setting-remote_desktop_enabled" checked>
+                            <label class="custom-control-label" for="setting-remote_desktop_enabled">
+                                <strong>Remote Desktop Enabled</strong>
+                                <br><small class="text-muted">When disabled, users cannot access the remote desktop page or create new sessions</small>
+                            </label>
+                        </div>
+                    </div>
                     <div class="row">
                         <div class="col-md-4">
                             <h5>Container</h5>
@@ -404,6 +413,7 @@
     let maxEvents = 500;
 
     const settingKeys = [
+        'remote_desktop_enabled',
         'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit',
         'initial_duration', 'extension_duration', 'max_extensions',
         'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'
@@ -510,7 +520,11 @@
             settingKeys.forEach(key => {
                 const el = document.getElementById(`setting-${key}`);
                 if (el && settings[key] !== undefined) {
-                    el.value = settings[key];
+                    if (el.type === 'checkbox') {
+                        el.checked = settings[key] === true || settings[key] === 'true' || settings[key] === 1;
+                    } else {
+                        el.value = settings[key];
+                    }
                 }
             });
         })
@@ -522,7 +536,7 @@
         settingKeys.forEach(key => {
             const el = document.getElementById(`setting-${key}`);
             if (el) {
-                payload[key] = el.value;
+                payload[key] = el.type === 'checkbox' ? el.checked : el.value;
             }
         });
 

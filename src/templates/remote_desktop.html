@@ -187,7 +187,28 @@
 {% endblock %}
 
 {% block content %}
-{% if container_info %}
+{% if page_blocked is defined and page_blocked %}
+<div class="container" style="margin-top: 100px;">
+    <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+            {% if page_blocked == "disabled" %}
+            <i class="fas fa-power-off" style="font-size: 72px; color: #6c757d; margin-bottom: 24px;"></i>
+            <h2>Remote Desktop Unavailable</h2>
+            <p class="text-muted mt-3" style="font-size: 16px;">
+                This feature has been disabled by an administrator. Check back later.
+            </p>
+            {% elif page_blocked == "unverified" %}
+            <i class="fas fa-envelope" style="font-size: 72px; color: #6c757d; margin-bottom: 24px;"></i>
+            <h2>Verify Your Email</h2>
+            <p class="text-muted mt-3" style="font-size: 16px;">
+                You need to verify your email address before you can access Remote Desktop.
+            </p>
+            <a href="/confirm" class="btn btn-primary btn-lg mt-3">Verify Email</a>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% elif container_info %}
 <div class="workspace-container" id="workspace-container">
     <div class="workspace-header">
         <div>

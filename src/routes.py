@@ -7,7 +7,7 @@ from collections import defaultdict
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
-from CTFd.utils.user import get_current_user
+from CTFd.utils.user import get_current_user, is_verified
 from .event_logger import event_logger
 from .docker_host_manager import LOCAL_CONTEXT_NAME
 
@@ -22,8 +22,17 @@ def create_routes(container_manager, orchestrator):
     @remote_desktop_bp.route("/remote-desktop")
     @authed_only
     def remote_desktop_page():
+        from .models import get_setting
+
+        if not get_setting("remote_desktop_enabled", True):
+            return render_template("remote_desktop.html", page_blocked="disabled")
+
+        user = get_current_user()
+
+        if not user.is_admin() and not is_verified():
+            return render_template("remote_desktop.html", page_blocked="unverified")
+
         try:
-            user = get_current_user()
             container_info = container_manager.get_container_info(user.id)
             creation_status = container_manager.get_creation_status(user.id)
 
@@ -104,8 +113,17 @@ def create_routes(container_manager, orchestrator):
     @authed_only
     @bypass_csrf_protection
     def create_session():
+        from .models import get_setting
+
+        if not get_setting("remote_desktop_enabled", True):
+            return jsonify({"error": "Remote Desktop is currently disabled"}), 403
+
+        user = get_current_user()
+
+        if not user.is_admin() and not is_verified():
+            return jsonify({"error": "Email verification required"}), 403
+
         try:
-            user = get_current_user()
             logger.info(f"create session request from user {user.name} (ID: {user.id})")
 
             if container_manager.get_container_info(user.id):

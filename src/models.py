@@ -50,6 +50,7 @@ class DesktopSettingsModel(db.Model):
 
 
 SETTING_DEFAULTS = {
+    "remote_desktop_enabled": True,
     "docker_image": "ctfd-remote-desktop:latest",
     "memory_limit": "4g",
     "shm_size": "512m",
