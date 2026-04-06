@@ -95,6 +95,7 @@ class ContainerManager:
 
             context_name = self.orchestrator.select_and_reserve()
             pub_hostname = self.host_manager.get_pub_hostname(context_name)
+            check_hostname = self.host_manager.get_check_hostname(context_name)
             display_hostname = context_name
 
             logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
@@ -154,10 +155,10 @@ class ContainerManager:
                         "message": f"Waiting for {display_hostname} display server... ({attempt}/{max_attempts})",
                     }
 
-            vnc_ready = self.wait_for_vnc_ready(pub_hostname, novnc_port, progress_callback=_vnc_progress)
+            vnc_ready = self.wait_for_vnc_ready(check_hostname, novnc_port, progress_callback=_vnc_progress)
 
             if not vnc_ready:
-                raise Exception(f"VNC server on {pub_hostname}:{novnc_port} did not become ready in time")
+                raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
 
             vnc_url = f"http://{pub_hostname}:{novnc_port}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
 

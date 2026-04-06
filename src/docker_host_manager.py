@@ -195,6 +195,14 @@ class DockerHostManager:
     def get_pub_hostname(self, context_name):
         return self._pub_hostnames.get(context_name)
 
+    def get_check_hostname(self, context_name):
+        """Address to use for internal connectivity checks (VNC readiness etc).
+        Local socket contexts use localhost since ports are mapped to the host."""
+        endpoint = self._context_configs.get(context_name, "")
+        if endpoint.startswith("unix://"):
+            return "localhost"
+        return self._pub_hostnames.get(context_name)
+
     def get_connected_contexts(self):
         return list(self._context_configs.keys())
 
