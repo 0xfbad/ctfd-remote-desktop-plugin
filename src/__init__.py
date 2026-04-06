@@ -1,3 +1,4 @@
+import os
 import sys
 import socket
 import signal
@@ -120,7 +121,18 @@ def load(app):
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
     register_admin_plugin_menu_bar("Remote Desktop", "/remote-desktop/admin")
 
-    # scheduler setup
+    # scheduler, atexit, and signal handlers must only run when serving HTTP.
+    # during CLI commands (flask db upgrade, etc.) the scheduler threads are
+    # non-daemon and keep the process alive after the command finishes.
+    _serving = (
+        "gunicorn" in sys.modules
+        or os.environ.get("WERKZEUG_RUN_MAIN")
+        or (len(sys.argv) > 1 and sys.argv[1] == "run")
+    )
+    if not _serving:
+        logger.info("remote desktop plugin loaded (scheduler skipped, CLI mode)")
+        return
+
     from .models import get_setting
 
     try:
