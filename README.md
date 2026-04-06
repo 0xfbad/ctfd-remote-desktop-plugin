@@ -63,7 +63,7 @@ Then add them through the admin dashboard at `/remote-desktop/admin`, each conte
 
 The image needs to be pre-pulled on every Docker host before students can use it. Pull it manually on each host or use a CI pipeline to push it out
 
-The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_USERNAME` (sanitize it, CTFd display names can have spaces and special chars), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), and `RESOLUTION` env vars, and serve the noVNC web client at `/vnc.html` with a WebSocket endpoint at `/websockify`
+The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), and `RESOLUTION` env vars, and serve the noVNC web client at `/vnc.html` with a WebSocket endpoint at `/websockify`
 
 ### Database
 
@@ -114,6 +114,15 @@ Every container gets hardened defaults
 - `security_opt=["no-new-privileges:true"]` prevents setuid/setgid escalation
 - `pids_limit` from settings (default 512) caps the process count to prevent fork bombs
 - `auto_remove=True` so Docker cleans up the filesystem when the container stops
+
+## Container usernames
+
+The plugin sanitizes CTFd display names down to `[a-z0-9]` (lowercase, strip everything non-alphanumeric, truncate to 32 chars) before passing them to the container as `CTFD_USERNAME`. The `username_source` setting controls what gets sanitized
+
+- `name` (default): uses the CTFd display name, so a student named `Alice B.` becomes `aliceb`
+- `email`: uses the local part of the student's email, so `jdoe@ucsc.edu` becomes `jdoe`
+
+If sanitization produces an empty string (a name like `;-;` strips to nothing) the plugin falls back to `user{id}`, for example `user42`. This is computed at container creation time, the raw display name is still used in logs and the admin dashboard
 
 ## VNC auth
 
@@ -171,6 +180,7 @@ Managed through the admin dashboard, each context has a name (matching a docker 
 | cleanup_interval | 300 | how often the scheduler scans for expired sessions in seconds |
 | pids_limit | 512 | max number of processes per container, prevents fork bombs |
 | max_concurrent_creates | 2 | how many containers can be created simultaneously on a single host |
+| username_source | name | what to derive the container linux username from, `name` uses the CTFd display name, `email` uses the local part before the @ |
 
 ## API endpoints
 

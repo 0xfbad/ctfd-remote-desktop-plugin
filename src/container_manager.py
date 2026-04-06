@@ -1,3 +1,4 @@
+import re
 import time
 import logging
 import secrets
@@ -11,6 +12,12 @@ from .docker_host_manager import parse_size
 
 logger = logging.getLogger(__name__)
 
+_ALNUM_RE = re.compile(r"[^a-z0-9]")
+
+
+def _sanitize_username(raw):
+    return _ALNUM_RE.sub("", raw.lower())[:32]
+
 
 class ContainerManager:
     def __init__(self, host_manager, orchestrator):
@@ -23,6 +30,16 @@ class ContainerManager:
         from .models import get_setting
 
         return get_setting(key)
+
+    def _resolve_username(self, user):
+        source = self._get_setting("username_source")
+
+        if source == "email" and user.email:
+            username = _sanitize_username(user.email.split("@")[0])
+        else:
+            username = _sanitize_username(user.name)
+
+        return username or f"user{user.id}"
 
     def wait_for_vnc_ready(self, hostname, novnc_port, max_attempts=None, progress_callback=None):
         if max_attempts is None:
@@ -64,9 +81,11 @@ class ContainerManager:
         try:
             user = Users.query.filter_by(id=user_id).first()
             username = user.name if user else f"User {user_id}"
+            container_username = self._resolve_username(user) if user else f"user{user_id}"
         except Exception as e:
             logger.error(f"[BACKGROUND] failed to get user {user_id}: {e}")
             username = f"User {user_id}"
+            container_username = f"user{user_id}"
 
         context_name = None
 
@@ -106,7 +125,7 @@ class ContainerManager:
                     env={
                         "VNC_PASSWORD": vnc_password,
                         "RESOLUTION": resolution,
-                        "CTFD_USERNAME": username,
+                        "CTFD_USERNAME": container_username,
                     },
                     ports=["5900/tcp", "6080/tcp"],
                     shm_size=shm_size,

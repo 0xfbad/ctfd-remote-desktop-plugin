@@ -57,6 +57,7 @@ _decorators.admins_only = lambda f: f
 
 _user_utils = sys.modules["CTFd.utils.user"]
 _user_utils.get_current_user = MagicMock()
+_user_utils.is_verified = MagicMock(return_value=True)
 
 _plugins = sys.modules["CTFd.plugins"]
 _plugins.bypass_csrf_protection = lambda f: f

@@ -64,6 +64,7 @@ SETTING_DEFAULTS = {
     "cleanup_interval": 300,
     "pids_limit": 512,
     "max_concurrent_creates": 2,
+    "username_source": "name",
 }
 
 
