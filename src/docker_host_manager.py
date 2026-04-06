@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
+DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
 
 
 def parse_size(s):
@@ -27,7 +28,7 @@ def _scan_context_meta(context_name=None):
     """Read docker context metadata from ~/.docker/contexts/meta/.
     If context_name is given, return that context's meta dict or None.
     Otherwise return all contexts as a list of meta dicts."""
-    contexts_dir = os.path.expanduser("~/.docker/contexts/meta")
+    contexts_dir = os.path.join(DOCKER_CONFIG_DIR, "contexts", "meta")
     if not os.path.isdir(contexts_dir):
         return None if context_name else []
 

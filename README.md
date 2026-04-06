@@ -39,12 +39,12 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/.ssh:/root/.ssh:ro
-      - ~/.docker:/root/.docker:ro
+      - ~/.docker:/home/ctfd/.docker:ro
 ```
 
-Replace `DOCKER_GID` with the GID of the docker group on the host, you can find it with `stat -c '%g' /var/run/docker.sock`. CTFd runs as a non-root user inside the container so without `group_add` you'll get `PermissionError` when the plugin tries to talk to the socket
+Replace `DOCKER_GID` with the GID of the docker group on the host, you can find it with `stat -c '%g' /var/run/docker.sock`. CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container so without `group_add` you'll get `PermissionError` when the plugin tries to talk to the socket. The docker config must be mounted to `/home/ctfd/.docker` (not `/root/.docker`) because `/root` is owned by root with 700 permissions, making it inaccessible to the ctfd user
 
-The docker socket lets the SDK talk to the local daemon, the SSH keys let it tunnel to remote hosts, and the docker config directory has the context metadata files the plugin reads to resolve endpoints. Docker stores context metadata in hash-named directories under `~/.docker/contexts/meta/`, the plugin scans all of them and matches by the `Name` field inside each `meta.json`
+The docker socket lets the SDK talk to the local daemon, the SSH keys let it tunnel to remote hosts, and the docker config directory has the context metadata files the plugin reads to resolve endpoints. Docker stores context metadata in hash-named directories under `~/.docker/contexts/meta/`, the plugin scans all of them and matches by the `Name` field inside each `meta.json`. Make sure `~/.docker` on the host is at least 755 so the container user can traverse into it
 
 If you're only using remote contexts and don't need a local daemon you can skip the socket mount, but you still need the SSH and docker config mounts
 
