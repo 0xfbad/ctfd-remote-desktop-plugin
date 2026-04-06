@@ -91,6 +91,7 @@ def _get_host_gateway():
     Falls back to localhost if it can't be determined."""
     try:
         import struct
+
         with open("/proc/net/route") as f:
             for line in f:
                 parts = line.strip().split()
@@ -233,7 +234,9 @@ class DockerHostManager:
             self._clear_thread_local_client(context_name)
             return False
 
-    def run_container(self, context_name, image, name, env, ports, shm_size=None, memory=None, nano_cpus=None, hostname=None):
+    def run_container(
+        self, context_name, image, name, env, ports, shm_size=None, memory=None, nano_cpus=None, hostname=None
+    ):
         from .models import get_setting
 
         client = self._get_client(context_name)
@@ -312,6 +315,25 @@ class DockerHostManager:
             return True
         except Exception:
             return False
+
+    def exec_in_container(self, context_name, container_name_or_id, cmd):
+        """Execute a command inside a running container. Returns (exit_code, output_str).
+        Returns (-1, '') on any failure so callers never need to handle exceptions."""
+        try:
+            client = self._get_client(context_name)
+            container = client.containers.get(container_name_or_id)
+            exit_code, output = container.exec_run(cmd)
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            return exit_code, output
+        except docker.errors.NotFound:
+            return -1, ""
+        except docker.errors.DockerException:
+            self._clear_thread_local_client(context_name)
+            return -1, ""
+        except Exception:
+            self._clear_thread_local_client(context_name)
+            return -1, ""
 
     def is_container_running(self, context_name, container_id):
         try:

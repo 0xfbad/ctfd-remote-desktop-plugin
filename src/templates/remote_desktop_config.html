@@ -8,6 +8,15 @@
             </label>
         </div>
     </div>
+    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
+        <div class="custom-control custom-switch">
+            <input type="checkbox" class="custom-control-input" id="rd-setting-command_logging_enabled">
+            <label class="custom-control-label" for="rd-setting-command_logging_enabled">
+                <strong>Command Logging</strong>
+                <br><small class="text-muted">Log shell commands run inside desktop sessions for research analytics. Requires a container image with telemetry hooks installed.</small>
+            </label>
+        </div>
+    </div>
     <div class="row">
         <div class="col-md-4">
             <h5>Container</h5>
@@ -233,7 +242,7 @@
 <script>
 (function() {
     var rdSettingKeys = [
-        'remote_desktop_enabled',
+        'remote_desktop_enabled', 'command_logging_enabled',
         'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit', 'username_source',
         'initial_duration', 'extension_duration', 'max_extensions',
         'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'

@@ -329,6 +329,135 @@
 			</div>
 		</div>
 	</div>
+
+	<div id="cmd-log-section" style="display:none;">
+		<hr>
+		<div class="row mb-3">
+			<div class="col-md-12">
+				<h2>Command Logs</h2>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-6">
+				<div class="card stat-card bg-light">
+					<div class="card-body">
+						<h4 id="stat-total-commands" class="mb-0">0</h4>
+						<small class="text-muted">Total Commands</small>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-6">
+				<div class="card stat-card bg-light">
+					<div class="card-body">
+						<h4 id="stat-unique-cmd-users" class="mb-0">0</h4>
+						<small class="text-muted">Users with Logs</small>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-12">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Per-User Commands</h3>
+						<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+							<option value="week">Past Week</option>
+							<option value="month">Past Month</option>
+							<option value="all">All Time</option>
+						</select>
+					</div>
+					<div class="card-body">
+						<div class="table-responsive">
+							<table class="table table-striped border">
+								<thead>
+									<tr>
+										<th><b>User</b></th>
+										<th><b>Commands</b></th>
+										<th><b>Errors</b></th>
+										<th><b>Error Rate</b></th>
+										<th><b>Unique Tools</b></th>
+										<th><b>History</b></th>
+									</tr>
+								</thead>
+								<tbody id="cmd-users-table"></tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-12">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Top Tools</h3>
+						<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+							<option value="week">Past Week</option>
+							<option value="month">Past Month</option>
+							<option value="all">All Time</option>
+						</select>
+					</div>
+					<div class="card-body">
+						<div class="chart-container" id="chart-top-tools"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-12">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Command Activity</h3>
+						<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+							<option value="week">Past Week</option>
+							<option value="month">Past Month</option>
+							<option value="all">All Time</option>
+						</select>
+					</div>
+					<div class="card-body">
+						<div class="chart-container" id="chart-cmd-activity"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="modal fade" id="cmdHistoryModal" tabindex="-1">
+		<div class="modal-dialog modal-xl">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title">Command History: <span id="cmd-history-username"></span></h5>
+					<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+				</div>
+				<div class="modal-body p-0">
+					<div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+						<table class="table table-striped table-sm mb-0">
+							<thead style="position: sticky; top: 0; background: white;">
+								<tr>
+									<th>Time</th>
+									<th>Command</th>
+									<th>Exit</th>
+									<th>Duration</th>
+									<th>CWD</th>
+								</tr>
+							</thead>
+							<tbody id="cmd-history-table"></tbody>
+						</table>
+					</div>
+				</div>
+				<div class="modal-footer">
+					<span class="text-muted mr-auto" id="cmd-history-info"></span>
+					<button type="button" class="btn btn-outline-secondary" id="cmd-history-prev" onclick="cmdHistoryPage(-1)">Prev</button>
+					<button type="button" class="btn btn-outline-secondary" id="cmd-history-next" onclick="cmdHistoryPage(1)">Next</button>
+					<button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
 </div>
 
 {% endblock %}
@@ -580,9 +709,11 @@
 	let durationDistChart = null;
 	let endReasonsChart = null;
 	let perHostChart = null;
+	let topToolsChart = null;
+	let cmdActivityChart = null;
 
 	function initCharts() {
-		['chart-top-users', 'chart-daily-usage', 'chart-concurrent', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host'].forEach(id => {
+		['chart-top-users', 'chart-daily-usage', 'chart-concurrent', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools', 'chart-cmd-activity'].forEach(id => {
 			const el = document.getElementById(id);
 			if (!el) return;
 			const chart = echarts.init(el);
@@ -592,6 +723,8 @@
 			else if (id === 'chart-duration-dist') durationDistChart = chart;
 			else if (id === 'chart-end-reasons') endReasonsChart = chart;
 			else if (id === 'chart-per-host') perHostChart = chart;
+			else if (id === 'chart-top-tools') topToolsChart = chart;
+			else if (id === 'chart-cmd-activity') cmdActivityChart = chart;
 		});
 	}
 
@@ -611,6 +744,8 @@
 	}
 
 	function refreshStats() {
+		refreshCommandLogStats();
+
 		const first = document.querySelector('.rd-stats-period');
 		const period = first ? first.value : 'week';
 
@@ -793,13 +928,169 @@
 		});
 	}
 
+	// command log stats
+
+	let cmdHistoryUserId = null;
+	let cmdHistoryOffset = 0;
+	const cmdHistoryLimit = 100;
+
+	function refreshCommandLogStats() {
+		fetch('/remote-desktop/admin/api/command-logs/stats/summary', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			const section = document.getElementById('cmd-log-section');
+			if (!data.enabled && data.total_commands === 0) {
+				section.style.display = 'none';
+				return;
+			}
+			section.style.display = '';
+			document.getElementById('stat-total-commands').textContent = data.total_commands.toLocaleString();
+			document.getElementById('stat-unique-cmd-users').textContent = data.unique_users;
+		});
+
+		const first = document.querySelector('.rd-stats-period');
+		const period = first ? first.value : 'week';
+
+		fetch(`/remote-desktop/admin/api/command-logs/stats/per-user?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			const tbody = document.getElementById('cmd-users-table');
+			const users = data.users || [];
+			if (!users.length) {
+				tbody.innerHTML = '<tr><td colspan="6" class="text-center">No command data</td></tr>';
+				return;
+			}
+			tbody.innerHTML = users.map(u => `
+				<tr>
+					<td><strong>${escapeHtml(u.username)}</strong></td>
+					<td>${u.total_commands.toLocaleString()}</td>
+					<td>${u.error_count}</td>
+					<td>${u.error_rate}%</td>
+					<td>${u.unique_tools}</td>
+					<td><button class="btn btn-sm btn-outline-primary" onclick="showCmdHistory(${u.user_id}, '${escapeHtml(u.username)}')">View</button></td>
+				</tr>
+			`).join('');
+		});
+
+		fetch(`/remote-desktop/admin/api/command-logs/stats/tools?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!topToolsChart) return;
+			const tools = (data.tools || []).slice(0, 20).reverse();
+			topToolsChart.setOption({
+				tooltip: {
+					trigger: 'axis',
+					axisPointer: { type: 'shadow' },
+					formatter: function(params) {
+						const p = params[0];
+						const t = tools.find(t => t.tool === p.name) || {};
+						return echarts.format.encodeHTML(p.name) + '<br/>' +
+							p.value + ' uses' + (t.errors ? '<br/>' + t.errors + ' errors' : '');
+					}
+				},
+				toolbox: { feature: { saveAsImage: {} } },
+				grid: { left: 120, right: 20, top: 30, bottom: 20 },
+				xAxis: { type: 'value' },
+				yAxis: { type: 'category', data: tools.map(t => t.tool) },
+				series: [{
+					type: 'bar',
+					data: tools.map(t => t.count),
+					itemStyle: { color: '#e83e8c' }
+				}]
+			});
+		});
+
+		fetch(`/remote-desktop/admin/api/command-logs/stats/activity?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!cmdActivityChart) return;
+			const points = data.points || [];
+			cmdActivityChart.setOption({
+				tooltip: { trigger: 'axis' },
+				toolbox: { feature: { saveAsImage: {} } },
+				dataZoom: [
+					{ type: 'inside' },
+					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
+				],
+				grid: { left: 50, right: 20, top: 30, bottom: 60 },
+				xAxis: { type: 'category', data: points.map(p => p.time), axisLabel: { rotate: 45 } },
+				yAxis: { type: 'value', minInterval: 1 },
+				series: [{
+					type: 'line',
+					data: points.map(p => p.commands),
+					itemStyle: { color: '#e83e8c' },
+					lineStyle: { color: '#e83e8c' },
+					areaStyle: { color: 'rgba(232, 62, 140, 0.1)' }
+				}]
+			});
+		});
+	}
+
+	function showCmdHistory(userId, username) {
+		cmdHistoryUserId = userId;
+		cmdHistoryOffset = 0;
+		document.getElementById('cmd-history-username').textContent = username;
+		loadCmdHistory();
+		$('#cmdHistoryModal').modal('show');
+	}
+
+	function loadCmdHistory() {
+		fetch(`/remote-desktop/admin/api/command-logs?user_id=${cmdHistoryUserId}&limit=${cmdHistoryLimit}&offset=${cmdHistoryOffset}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			const tbody = document.getElementById('cmd-history-table');
+			const logs = data.logs || [];
+			const total = data.total || 0;
+
+			if (!logs.length) {
+				tbody.innerHTML = '<tr><td colspan="5" class="text-center">No commands</td></tr>';
+			} else {
+				tbody.innerHTML = logs.map(log => {
+					const exitClass = log.exit_code === 0 ? 'text-success' : (log.exit_code !== null ? 'text-danger' : '');
+					return `<tr>
+						<td class="text-nowrap">${escapeHtml(formatTimestamp(log.timestamp))}</td>
+						<td><code style="word-break: break-all;">${escapeHtml(log.command)}</code></td>
+						<td class="${exitClass}">${log.exit_code !== null ? log.exit_code : '-'}</td>
+						<td>${log.duration !== null ? log.duration + 's' : '-'}</td>
+						<td><small class="text-muted">${escapeHtml(log.cwd || '')}</small></td>
+					</tr>`;
+				}).join('');
+			}
+
+			document.getElementById('cmd-history-info').textContent =
+				`Showing ${cmdHistoryOffset + 1}-${Math.min(cmdHistoryOffset + logs.length, total)} of ${total}`;
+			document.getElementById('cmd-history-prev').disabled = cmdHistoryOffset === 0;
+			document.getElementById('cmd-history-next').disabled = cmdHistoryOffset + cmdHistoryLimit >= total;
+		});
+	}
+
+	function cmdHistoryPage(dir) {
+		cmdHistoryOffset = Math.max(0, cmdHistoryOffset + dir * cmdHistoryLimit);
+		loadCmdHistory();
+	}
+
 	function startAutoRefresh() {
 		if (autoRefreshInterval) clearInterval(autoRefreshInterval);
 		autoRefreshInterval = setInterval(refreshAll, 10000);
 	}
 
 	window.addEventListener('resize', function() {
-		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart].forEach(c => {
+		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, topToolsChart, cmdActivityChart].forEach(c => {
 			if (c) c.resize();
 		});
 	});

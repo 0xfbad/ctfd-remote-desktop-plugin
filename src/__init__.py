@@ -1,10 +1,9 @@
 import os
 import sys
-import socket
 import signal
 import atexit
 import logging
-from CTFd.plugins import register_user_page_menu_bar, register_admin_plugin_menu_bar
+from CTFd.plugins import register_user_page_menu_bar
 
 from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, _get_host_gateway
 from .orchestrator import Orchestrator
@@ -120,7 +119,6 @@ def load(app):
     app.register_blueprint(remote_desktop_bp)
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
 
-
     # register config template in the DictLoader so {% include %} on
     # /admin/config can find it without hardcoding the plugin folder name
     config_tpl = os.path.join(os.path.dirname(__file__), "templates", "remote_desktop_config.html")
@@ -131,9 +129,7 @@ def load(app):
     # during CLI commands (flask db upgrade, etc.) the scheduler threads are
     # non-daemon and keep the process alive after the command finishes.
     _serving = (
-        "gunicorn" in sys.modules
-        or os.environ.get("WERKZEUG_RUN_MAIN")
-        or (len(sys.argv) > 1 and sys.argv[1] == "run")
+        "gunicorn" in sys.modules or os.environ.get("WERKZEUG_RUN_MAIN") or (len(sys.argv) > 1 and sys.argv[1] == "run")
     )
     if not _serving:
         logger.info("remote desktop plugin loaded (scheduler skipped, CLI mode)")
@@ -170,7 +166,17 @@ def load(app):
         id="health_check",
     )
 
-    # wrap periodic_cleanup so it runs within app context
+    cmd_log_interval = get_setting("command_log_interval")
+    scheduler.add_job(
+        func=container_manager.collect_all_command_logs,
+        trigger="interval",
+        seconds=cmd_log_interval,
+        misfire_grace_time=30,
+        coalesce=True,
+        id="command_log_collection",
+    )
+
+    # wrap periodic jobs so they run within app context
     _original_cleanup = container_manager.periodic_cleanup
 
     def _cleanup_with_context():
@@ -178,6 +184,14 @@ def load(app):
             _original_cleanup()
 
     container_manager.periodic_cleanup = _cleanup_with_context
+
+    _original_collect = container_manager.collect_all_command_logs
+
+    def _collect_with_context():
+        with app.app_context():
+            _original_collect()
+
+    container_manager.collect_all_command_logs = _collect_with_context
 
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown(wait=False))

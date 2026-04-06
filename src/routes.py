@@ -5,6 +5,7 @@ import traceback
 import json
 from collections import defaultdict
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
+from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
 from CTFd.utils.user import get_current_user, is_admin, is_verified
@@ -278,7 +279,7 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def trigger_cleanup():
         try:
-            user = get_current_user()
+            get_current_user()
             if not is_admin():
                 return jsonify({"error": "Admin access required"}), 403
 
@@ -689,12 +690,209 @@ def create_routes(container_manager, orchestrator):
                 ext_counts[row.extensions_used] += 1
                 end_reasons[row.end_reason] += 1
 
-            return jsonify({
-                "extensions": [{"count": k, "sessions": v} for k, v in sorted(ext_counts.items())],
-                "end_reasons": [{"reason": k, "count": v} for k, v in sorted(end_reasons.items(), key=lambda x: -x[1])],
-            })
+            return jsonify(
+                {
+                    "extensions": [{"count": k, "sessions": v} for k, v in sorted(ext_counts.items())],
+                    "end_reasons": [
+                        {"reason": k, "count": v} for k, v in sorted(end_reasons.items(), key=lambda x: -x[1])
+                    ],
+                }
+            )
         except Exception as e:
             logger.error(f"admin API error getting extension stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    # command logs
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_get_command_logs():
+        from .models import CommandLogModel
+
+        try:
+            user_id = request.args.get("user_id", type=int)
+            limit = min(request.args.get("limit", 200, type=int), 1000)
+            offset = request.args.get("offset", 0, type=int)
+
+            query = CommandLogModel.query
+            if user_id:
+                query = query.filter_by(user_id=user_id)
+
+            total = query.count()
+            logs = query.order_by(CommandLogModel.timestamp.desc()).offset(offset).limit(limit).all()
+
+            return jsonify(
+                {
+                    "logs": [
+                        {
+                            "id": log.id,
+                            "user_id": log.user_id,
+                            "timestamp": log.timestamp,
+                            "command": log.command,
+                            "exit_code": log.exit_code,
+                            "duration": log.duration,
+                            "cwd": log.cwd,
+                            "tty": log.tty,
+                        }
+                        for log in logs
+                    ],
+                    "total": total,
+                }
+            )
+        except Exception as e:
+            logger.error(f"admin API error getting command logs: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    def _cmd_log_query(period=None):
+        """Base query for command logs, excluding hidden users from aggregate stats."""
+        from .models import CommandLogModel
+
+        query = (
+            CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden == False)  # noqa: E712
+        )
+        if period == "week":
+            query = query.filter(CommandLogModel.timestamp >= time.time() - 7 * 86400)
+        elif period == "month":
+            query = query.filter(CommandLogModel.timestamp >= time.time() - 30 * 86400)
+        return query
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/per-user", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_command_stats_per_user():
+        try:
+            period = request.args.get("period", "all")
+            rows = _cmd_log_query(period).all()
+
+            user_stats = defaultdict(lambda: {"total": 0, "errors": 0, "commands": set(), "username": ""})
+
+            user_map = {}
+            for row in rows:
+                if row.user_id not in user_map:
+                    user = Users.query.filter_by(id=row.user_id).first()
+                    user_map[row.user_id] = user.name if user else f"User {row.user_id}"
+
+                entry = user_stats[row.user_id]
+                entry["total"] += 1
+                entry["username"] = user_map[row.user_id]
+                if row.exit_code and row.exit_code != 0:
+                    entry["errors"] += 1
+
+                tool = row.command.strip().split()[0] if row.command.strip() else ""
+                if tool.startswith("sudo") and len(row.command.strip().split()) > 1:
+                    tool = row.command.strip().split()[1]
+                entry["commands"].add(tool)
+
+            users = []
+            for uid, s in sorted(user_stats.items(), key=lambda x: x[1]["total"], reverse=True):
+                users.append(
+                    {
+                        "user_id": uid,
+                        "username": s["username"],
+                        "total_commands": s["total"],
+                        "error_count": s["errors"],
+                        "error_rate": round(s["errors"] / s["total"] * 100, 1) if s["total"] else 0,
+                        "unique_tools": len(s["commands"]),
+                    }
+                )
+
+            return jsonify({"users": users})
+        except Exception as e:
+            logger.error(f"admin API error getting per-user command stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/tools", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_command_stats_tools():
+        try:
+            period = request.args.get("period", "all")
+            rows = _cmd_log_query(period).all()
+
+            tool_counts = defaultdict(int)
+            tool_errors = defaultdict(int)
+            for row in rows:
+                parts = row.command.strip().split()
+                if not parts:
+                    continue
+                tool = parts[0]
+                if tool == "sudo" and len(parts) > 1:
+                    tool = parts[1]
+                tool_counts[tool] += 1
+                if row.exit_code and row.exit_code != 0:
+                    tool_errors[tool] += 1
+
+            tools = sorted(
+                [{"tool": t, "count": c, "errors": tool_errors.get(t, 0)} for t, c in tool_counts.items()],
+                key=lambda x: x["count"],
+                reverse=True,
+            )[:30]
+
+            return jsonify({"tools": tools})
+        except Exception as e:
+            logger.error(f"admin API error getting tool stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/activity", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_command_stats_activity():
+        try:
+            period = request.args.get("period", "all")
+            user_id = request.args.get("user_id", type=int)
+            query = _cmd_log_query(period)
+
+            if user_id:
+                query = query.filter_by(user_id=user_id)
+
+            rows = query.all()
+
+            hourly = defaultdict(int)
+            for row in rows:
+                hour_str = datetime.datetime.fromtimestamp(row.timestamp).strftime("%Y-%m-%d %H:00")
+                hourly[hour_str] += 1
+
+            points = [{"time": h, "commands": c} for h, c in sorted(hourly.items())]
+            return jsonify({"points": points})
+        except Exception as e:
+            logger.error(f"admin API error getting command activity: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/summary", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_command_stats_summary():
+        from .models import CommandLogModel, get_setting
+
+        try:
+            enabled = get_setting("command_logging_enabled")
+            total = (
+                CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id)
+                .filter(Users.hidden == False)  # noqa: E712
+                .count()
+            )
+            unique_users = (
+                (
+                    db.session.query(CommandLogModel.user_id)
+                    .join(Users, CommandLogModel.user_id == Users.id)
+                    .filter(Users.hidden == False)  # noqa: E712
+                    .distinct()
+                    .count()
+                )
+                if total
+                else 0
+            )
+
+            return jsonify(
+                {
+                    "enabled": enabled,
+                    "total_commands": total,
+                    "unique_users": unique_users,
+                }
+            )
+        except Exception as e:
+            logger.error(f"admin API error getting command log summary: {e}")
             return jsonify({"error": str(e)}), 500
 
     # context crud
@@ -723,6 +921,7 @@ def create_routes(container_manager, orchestrator):
                     }
                 )
             from .docker_host_manager import LOCAL_SOCKET_PATH
+
             docker_ok = ping_endpoint(f"unix://{LOCAL_SOCKET_PATH}")
             return jsonify({"contexts": data, "docker_socket": docker_ok})
         except Exception as e:
@@ -733,7 +932,7 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_discover_contexts():
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor
         from .models import DesktopDockerContextModel
         from .docker_host_manager import _get_host_gateway
 
@@ -758,13 +957,16 @@ def create_routes(container_manager, orchestrator):
                 else:
                     suggested = ""
 
-                available.append({
-                    "name": ctx["name"],
-                    "endpoint": ctx["endpoint"],
-                    "suggested_hostname": suggested,
-                })
+                available.append(
+                    {
+                        "name": ctx["name"],
+                        "endpoint": ctx["endpoint"],
+                        "suggested_hostname": suggested,
+                    }
+                )
 
             if available:
+
                 def _ping(ctx):
                     ctx["reachable"] = ping_endpoint(ctx["endpoint"])
                     return ctx

@@ -43,6 +43,19 @@ class DesktopSessionHistoryModel(db.Model):
     extensions_used = db.Column(db.Integer, default=0)
 
 
+class CommandLogModel(db.Model):
+    __tablename__ = "desktop_command_logs"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    container_id = db.Column(db.String(512), nullable=False)
+    timestamp = db.Column(db.Float(precision=53), nullable=False)
+    command = db.Column(db.Text, nullable=False)
+    exit_code = db.Column(db.Integer, nullable=True)
+    duration = db.Column(db.Integer, nullable=True)
+    cwd = db.Column(db.Text, nullable=True)
+    tty = db.Column(db.String(64), nullable=True)
+
+
 class DesktopSettingsModel(db.Model):
     __tablename__ = "desktop_settings"
     key = db.Column(db.String(512), primary_key=True)
@@ -65,6 +78,8 @@ SETTING_DEFAULTS = {
     "pids_limit": 512,
     "max_concurrent_creates": 2,
     "username_source": "name",
+    "command_logging_enabled": False,
+    "command_log_interval": 30,
 }
 
 

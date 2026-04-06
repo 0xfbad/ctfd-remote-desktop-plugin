@@ -1,4 +1,5 @@
 import re
+import json
 import time
 import logging
 import secrets
@@ -6,7 +7,7 @@ import traceback
 from threading import Lock
 
 from CTFd.models import db, Users
-from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel
+from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel, CommandLogModel
 from .event_logger import event_logger
 from .docker_host_manager import parse_size
 
@@ -25,6 +26,7 @@ class ContainerManager:
         self.orchestrator = orchestrator
         self.creation_status = {}
         self.lock = Lock()
+        self._log_offsets = {}  # container_id -> lines already ingested
 
     def _get_setting(self, key):
         from .models import get_setting
@@ -126,17 +128,22 @@ class ContainerManager:
                 # hard ceiling so containers can't outlive the max possible session
                 max_lifetime = int(initial_duration + (extension_duration * max_extensions) + 300)
 
+                container_env = {
+                    "VNC_PASSWORD": vnc_password,
+                    "RESOLUTION": resolution,
+                    "CTFD_USERNAME": container_username,
+                    "MAX_LIFETIME": str(max_lifetime),
+                }
+
+                if self._get_setting("command_logging_enabled"):
+                    container_env["SHELL_LOGGING"] = "1"
+
                 result = self.host_manager.run_container(
                     context_name=context_name,
                     image=docker_image,
                     name=container_name,
                     hostname=display_hostname,
-                    env={
-                        "VNC_PASSWORD": vnc_password,
-                        "RESOLUTION": resolution,
-                        "CTFD_USERNAME": container_username,
-                        "MAX_LIFETIME": str(max_lifetime),
-                    },
+                    env=container_env,
                     ports=["5900/tcp", "6080/tcp"],
                     shm_size=shm_size,
                     memory=memory_limit,
@@ -318,6 +325,14 @@ class ContainerManager:
 
         context_name = row.docker_context
         container_name = row.container_name
+
+        # collect final command logs before stopping
+        try:
+            self._collect_logs_for_container(row)
+        except Exception as e:
+            logger.debug(f"failed to collect final logs for {container_name}: {e}")
+
+        self._log_offsets.pop(row.container_id, None)
 
         ended_at = time.time()
         history = DesktopSessionHistoryModel(
@@ -559,3 +574,83 @@ class ContainerManager:
                 logger.error(f"failed to cleanup container for user {row.user_id}: {e}")
 
         logger.info("cleanup completed")
+
+    # command log collection
+
+    def _get_log_offset(self, container_id):
+        """Get the log offset for a container. On first access (or after a CTFd
+        restart), derive it from the DB row count so we don't re-ingest lines
+        we already have."""
+        offset = self._log_offsets.get(container_id)
+        if offset is not None:
+            return offset
+
+        try:
+            offset = CommandLogModel.query.filter_by(container_id=container_id).count()
+        except Exception:
+            offset = 0
+
+        self._log_offsets[container_id] = offset
+        return offset
+
+    def _collect_logs_for_container(self, row):
+        if not self._get_setting("command_logging_enabled"):
+            return
+
+        offset = self._get_log_offset(row.container_id)
+        cmd = ["sh", "-c", f"tail -n +{offset + 1} /var/log/.session-init/data.jsonl 2>/dev/null"]
+
+        exit_code, output = self.host_manager.exec_in_container(row.docker_context, row.container_name, cmd)
+
+        if exit_code != 0 or not output.strip():
+            return
+
+        lines = output.strip().split("\n")
+        new_entries = []
+        parsed = 0
+
+        for line in lines:
+            try:
+                data = json.loads(line)
+                new_entries.append(
+                    CommandLogModel(
+                        user_id=row.user_id,
+                        container_id=row.container_id,
+                        timestamp=data.get("ts", 0),
+                        command=data.get("cmd", ""),
+                        exit_code=data.get("exit"),
+                        duration=data.get("dur"),
+                        cwd=data.get("cwd"),
+                        tty=data.get("tty"),
+                    )
+                )
+                parsed += 1
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        if new_entries:
+            try:
+                db.session.bulk_save_objects(new_entries)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                return
+
+        # only advance offset by lines we actually parsed and committed,
+        # so truncated/partial lines get retried next cycle
+        self._log_offsets[row.container_id] = offset + parsed
+
+    def collect_all_command_logs(self):
+        if not self._get_setting("command_logging_enabled"):
+            return
+
+        try:
+            rows = DesktopContainerInfoModel.query.all()
+        except Exception:
+            return
+
+        for row in rows:
+            try:
+                self._collect_logs_for_container(row)
+            except Exception as e:
+                logger.debug(f"log collection failed for {row.container_name}: {e}")
