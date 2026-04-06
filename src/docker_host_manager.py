@@ -232,7 +232,7 @@ class DockerHostManager:
             self._clear_thread_local_client(context_name)
             return False
 
-    def run_container(self, context_name, image, name, env, ports, shm_size=None, memory=None, nano_cpus=None):
+    def run_container(self, context_name, image, name, env, ports, shm_size=None, memory=None, nano_cpus=None, hostname=None):
         from .models import get_setting
 
         client = self._get_client(context_name)
@@ -244,6 +244,7 @@ class DockerHostManager:
             container = client.containers.run(
                 image,
                 name=name,
+                hostname=hostname or name,
                 detach=True,
                 auto_remove=True,
                 environment=env,

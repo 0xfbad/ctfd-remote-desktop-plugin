@@ -130,6 +130,7 @@ class ContainerManager:
                     context_name=context_name,
                     image=docker_image,
                     name=container_name,
+                    hostname=display_hostname,
                     env={
                         "VNC_PASSWORD": vnc_password,
                         "RESOLUTION": resolution,
