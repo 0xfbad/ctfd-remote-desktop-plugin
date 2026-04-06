@@ -85,6 +85,22 @@ def discover_contexts():
     return discovered
 
 
+def _get_host_gateway():
+    """Get the docker host gateway IP from /proc/net/route (the default route).
+    Falls back to localhost if it can't be determined."""
+    try:
+        import struct
+        with open("/proc/net/route") as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts[1] == "00000000":
+                    gw = struct.pack("<I", int(parts[2], 16))
+                    return ".".join(str(b) for b in gw)
+    except Exception:
+        pass
+    return "localhost"
+
+
 def ping_endpoint(endpoint, timeout=3):
     """Quick connectivity check for a docker endpoint."""
     try:
@@ -197,10 +213,11 @@ class DockerHostManager:
 
     def get_check_hostname(self, context_name):
         """Address to use for internal connectivity checks (VNC readiness etc).
-        Local socket contexts use localhost since ports are mapped to the host."""
+        Local socket contexts use the docker host gateway since port mappings
+        are on the host, not reachable via localhost from inside a container."""
         endpoint = self._context_configs.get(context_name, "")
         if endpoint.startswith("unix://"):
-            return "localhost"
+            return _get_host_gateway()
         return self._pub_hostnames.get(context_name)
 
     def get_connected_contexts(self):
