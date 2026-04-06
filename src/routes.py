@@ -697,10 +697,8 @@ def create_routes(container_manager, orchestrator):
         """Base query for session history, excluding hidden users from aggregate stats."""
         from .models import DesktopSessionHistoryModel
 
-        query = (
-            DesktopSessionHistoryModel.query.join(Users, DesktopSessionHistoryModel.user_id == Users.id).filter(
-                Users.hidden == False
-            )  # noqa: E712
+        query = DesktopSessionHistoryModel.query.join(Users, DesktopSessionHistoryModel.user_id == Users.id).filter(
+            Users.hidden == False  # noqa: E712
         )
         if period == "week":
             query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
