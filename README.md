@@ -1,12 +1,12 @@
 # Remote Desktop Plugin
 
-CTFd plugin that provisions on-demand Kali desktops across a pool of Docker hosts, users click a button and get a browser VNC session with per-container auth and automatic cleanup
+CTFd plugin that provisions on-demand desktops across a pool of Docker hosts, users click a button and get a browser VNC session with per-container auth and automatic cleanup
 
 ## How it works
 
-When a user requests a session the plugin picks the least-loaded healthy Docker context, hits the Docker API over an SSH tunnel via the docker SDK, runs the container with dynamic port mapping, generates a random VNC password, and builds a direct noVNC URL with the password embedded as a query param so the browser auto-connects with no dialog. The whole thing runs in a gevent greenlet so it doesn't block the request thread, and the frontend polls for creation status updates
+When a user requests a session the plugin picks the least-loaded healthy Docker context, hits the Docker API over an SSH tunnel via the docker SDK, runs the container with dynamic port mapping, generates a random VNC password, and builds a noVNC URL that routes through nginx. The whole thing runs in a gevent greenlet so it doesn't block the request thread, and the frontend polls for creation status updates
 
-Users connect directly to the container's noVNC port on the runner host, no reverse proxy in the path. Admins can peek at any user's desktop from the dashboard using the same stored password
+All VNC traffic goes through nginx via `auth_request` so the Docker hosts don't need to be publicly accessible. nginx makes an internal subrequest to CTFd to validate the session and get the backend address, then proxies directly to the container for both HTTP assets and the WebSocket connection. Admins can peek at any user's desktop from the dashboard using the same stored password
 
 ## Access control
 
@@ -74,9 +74,9 @@ If you're only using remote contexts and don't need a local daemon you can skip 
 
 ### VNC proxy (nginx)
 
-VNC sessions are proxied through nginx so users never connect directly to container ports. This means remote Docker hosts don't need to be publicly accessible and everything goes through your existing HTTPS setup.
+VNC sessions are proxied through nginx so users never need direct access to container ports, everything goes through your existing HTTPS setup
 
-The setup script adds the required nginx location blocks to both `conf/nginx/http.conf` and `conf/nginx/https.conf` if they exist. If you use a different config file or have a custom nginx setup, add the blocks manually. CTFd's default ships with `http.conf` (plain HTTP), but production deployments typically use a separate `https.conf` with TLS termination. Make sure the blocks go into whichever config nginx is actually loading (check the volume mount in docker-compose.yml). The blocks needed are:
+The setup script adds the required nginx location blocks to both `conf/nginx/http.conf` and `conf/nginx/https.conf` if they exist. If you have a custom config, add the blocks manually. CTFd ships with `http.conf` but production deployments typically use a separate `https.conf` with TLS termination, make sure the blocks go into whichever file nginx is actually loading (check the volume mount in docker-compose.yml). The blocks needed are:
 
 ```nginx
 # inside your server block, before location /
@@ -109,7 +109,7 @@ location = /remote-desktop/vnc/auth {
 }
 ```
 
-The `resolver 127.0.0.11` is Docker's internal DNS, required because nginx uses dynamic `proxy_pass` with variables from the auth response headers. The `auth_request` subrequest hits CTFd to validate the session and get the backend container address. The `Cache-Control: no-store` prevents browsers from caching VNC pages with embedded passwords across sessions
+`resolver 127.0.0.11` is Docker's internal DNS, required because nginx can't resolve hostnames at runtime in a dynamic `proxy_pass` without it. `Cache-Control: no-store` prevents the browser from caching vnc.html with an old session's password baked into the query params
 
 ### Docker contexts
 
@@ -128,7 +128,9 @@ Then go to the Docker Contexts section on the admin config page (`/admin/config`
 
 The image needs to be pre-pulled on every Docker host before users can use it. Pull it manually on each host or use a CI pipeline to push it out
 
-The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), and `RESOLUTION` env vars, and serve the noVNC web client at `/vnc.html` with a WebSocket endpoint at `/websockify`
+The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), `RESOLUTION`, and `MAX_LIFETIME` env vars, and serve the noVNC web client at `/vnc.html` with a WebSocket endpoint at `/websockify`
+
+`MAX_LIFETIME` is the absolute ceiling in seconds, calculated as `initial_duration + (extension_duration * max_extensions) + 300`. The container image can use it to run something like `sleep $MAX_LIFETIME && kill 1` as a safety net if the plugin's cleanup job doesn't reach it. The container's hostname is set to the Docker context name (e.g. `local`, `server1`)
 
 ### Database
 
@@ -145,9 +147,11 @@ The plugin creates its tables automatically on first load, no manual migration n
 5. Generates random VNC password via `secrets.token_urlsafe(6)[:8]`
 6. Calls `DockerHostManager.run_container()` which talks to the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping (0:5900, 0:6080), security hardening (`cap_drop=ALL` + selective `cap_add`, pids limit), resource limits, and the VNC/resolution env vars
 7. Polls `container.reload()` for mapped ports (up to 5 attempts with 0.3s sleep)
-8. HTTP polls noVNC until it responds (configurable attempts, default 180)
-9. Builds direct URL like `http://{pub_hostname}:{port}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true`
+8. HTTP polls noVNC via the internal `check_hostname` until it responds (configurable attempts, default 180). For local socket contexts this is the docker host gateway IP, for SSH contexts it's the pub_hostname
+9. Builds a relative VNC URL like `/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true` that routes through the nginx proxy
 10. Writes a `DesktopContainerInfoModel` row to the database with all session state including timer config
+
+If no healthy contexts are available, creation fails immediately instead of spawning a background task that will fail anyway. If creation fails after the container was already started (e.g. VNC timeout), the error handler stops the orphaned container before releasing the slot
 
 ### Destruction
 
@@ -161,7 +165,7 @@ Timers start on first status poll after the container is ready. Default is 3600s
 
 All container and timer state lives in the database via `DesktopContainerInfoModel`, so if CTFd restarts your sessions survive. The model stores the container ID, user ID, container name, VNC ports, VNC password, the full noVNC URL, which Docker context it's on, the public hostname, creation timestamp, and all timer fields (started flag, start time, duration, extensions used, max extensions)
 
-On startup the plugin runs a reconciliation pass that checks every DB record against Docker to see if the container is still running. Records where the container is gone get a history entry written with reason `reconciliation` before being deleted. Records where it's still alive get their orchestrator slots reserved so the load balancer counts them correctly. This replaces the old approach of blanket-killing any `kali-desktop-*` container on startup, which was destructive if you had a rolling restart
+On startup the plugin runs a reconciliation pass that checks every DB record against Docker to see if the container is still running. Records where the container is gone get a history entry written with reason `reconciliation` before being deleted. Records where it's still alive get their orchestrator slots reserved so the load balancer counts them correctly. This replaces the old approach of blanket-killing any `rd-session-*` container on startup, which was destructive if you had a rolling restart
 
 ## Session history
 
@@ -190,15 +194,15 @@ If sanitization produces an empty string (a name like `;-;` strips to nothing) t
 
 ## VNC auth
 
-The plugin generates a random 8-char password per container and passes it as `VNC_PASSWORD` to the container. The container's startup script writes a VNC passwd file and launches Xvnc with `-SecurityTypes VncAuth`. The plugin then builds a direct URL with the password as a query param, noVNC reads it and sends it to VNC automatically so the user connects with zero interaction
+The plugin generates a random 8-char password per container and passes it as `VNC_PASSWORD` to the container. The container's startup script writes a VNC passwd file and launches Xvnc with `-SecurityTypes VncAuth`. The VNC URL has the password as a query param so noVNC auto-connects with no dialog
 
-VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:8]` gives 48 bits of entropy which is plenty for preventing port-scan drive-bys in a classroom setting. The password shows up in the browser URL bar and history, fine for a lab environment
+VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:8]` gives 48 bits of entropy which is plenty for preventing port-scan drive-bys in a classroom setting. The password shows up in the browser URL bar and history, fine for a lab environment. The nginx VNC location must have `Cache-Control: no-store` or the browser will cache vnc.html with the old password and auth will fail after recreating a session
 
 ## Project structure
 
 The root `__init__.py` is a thin entry point that re-exports `load` from the `src/` subpackage. All source modules, templates, and the Blueprint live under `src/`, keeping the repo root clean for config files and project metadata. Internal relative imports resolve within `src/` so nothing changes from CTFd's perspective, it still calls `load(app)` from the plugin root
 
-A `config.json` at the root registers the plugin's settings panel inline on CTFd's admin config page (`/admin/config`)
+A `config.json` at the root registers the plugin's settings panel inline on CTFd's admin config page (`/admin/config`). A `setup.sh` script automates docker-compose, nginx, and file permission configuration
 
 ## Components
 
@@ -206,13 +210,15 @@ A `config.json` at the root registers the plugin's settings panel inline on CTFd
 
 Manages docker SDK clients for each configured docker context, uses thread-local client caching with a generation counter so each thread gets its own `DockerClient` instance and stale clients from old configs get dropped transparently when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, resolves each endpoint by scanning all directories under `~/.docker/contexts/meta/` and matching by the `Name` field inside each `meta.json` (Docker stores these in hash-named directories, not by context name). Falls back to `ssh://{hostname}` from the DB record if no meta match is found, and as a final fallback connects via the local Docker socket at `/var/run/docker.sock` if it exists. Also exposes `discover_contexts()` which scans the same metadata directories and the local socket to find all available contexts for import. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of users hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
 
+`get_pub_hostname()` returns the address stored in the DB, `get_check_hostname()` returns where to actually connect for internal checks like VNC readiness polling. For local socket contexts these differ because `localhost` inside the CTFd container is the container itself, not the Docker host where the port mappings live, so `check_hostname` resolves to the host gateway IP (read from `/proc/net/route` default route). For SSH contexts they're the same
+
 ### Orchestrator
 
 Tracks per-context container counts, health status, and weights, picks the next context via weighted least-connections (`weight / (count + 1)`, highest score wins, ties broken alphabetically). Context selection and slot reservation happen atomically so two concurrent requests can't race for the same slot. On `load_from_db()` it queries enabled contexts, tells DockerHostManager to connect, then pings each context and checks for the configured docker image outside the lock so network I/O doesn't block scheduling. Contexts that fail either step get marked unhealthy and pulled from rotation. Results show up in the admin event feed
 
 ### ContainerManager
 
-Handles container creation, destruction, timer operations, and periodic cleanup. All session state is stored in the database via `DesktopContainerInfoModel`, the only in-memory state is `creation_status` which tracks the progress of in-flight container creations (selecting host, starting container, waiting for VNC, ready/failed). Error handling in the creation path wraps slot release and health marking individually so a failure in one doesn't mask the others
+Handles container creation, destruction, timer operations, and periodic cleanup. All session state is stored in the database via `DesktopContainerInfoModel`, the only in-memory state is `creation_status` which tracks the progress of in-flight container creations (selecting host, starting container, waiting for VNC, ready/failed). Checks `orchestrator.has_healthy_context()` before spawning the background greenlet to fail fast. If creation fails after the container was already started, the error handler stops it before releasing the slot. The error path wraps container stop, slot release, and health marking in individual try/except blocks so a failure in one doesn't mask the others
 
 ### EventLogger
 
@@ -332,8 +338,14 @@ This means a CTFd restart doesn't kill active user sessions, they survive and ge
 
 **Sessions not creating**: check that Docker contexts are configured and the image is pulled on all hosts, use the Test button in the admin context UI to verify connectivity and image availability
 
-**VNC never becomes ready**: the plugin polls `http://{pub_hostname}:{novnc_port}/` up to 180 times at 0.5s intervals waiting for noVNC to respond, if the container takes longer to start you can increase `vnc_ready_attempts` in settings, also make sure the pub_hostname is reachable from wherever CTFd is running
+**VNC never becomes ready**: the plugin polls `http://{check_hostname}:{novnc_port}/` up to 180 times at 0.5s intervals waiting for noVNC to respond. For local contexts `check_hostname` is the docker host gateway, for SSH contexts it's the pub_hostname. If the container takes longer to start you can increase `vnc_ready_attempts` in settings
+
+**VNC auth failed after recreating a session**: browser cached the old vnc.html with the previous password. Hard refresh (Ctrl+Shift+R) to clear it. If it keeps happening, check the nginx VNC location has `proxy_cache off` and `add_header Cache-Control "no-store"`
+
+**502 on VNC proxy**: check the nginx error log. Common causes: `no resolver defined` means the `resolver 127.0.0.11` directive is missing from the VNC location block, `host not found` means the Docker host isn't resolvable from the nginx container
 
 **Sessions lost after restart**: this shouldn't happen anymore since state is in the database, if it does check the CTFd logs for reconciliation messages, you should see something like "reconciled containers on startup: N recovered, M stale records removed"
 
 **Containers piling up on one host**: the orchestrator uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
+
+**Timer showing wrong values**: MySQL `FLOAT` is 32-bit, only ~7 significant digits, which rounds Unix timestamps by thousands of seconds. The model uses `db.Float(precision=53)` which maps to `DOUBLE` but if you're upgrading from an older version the column types won't change automatically. Run `ALTER TABLE desktop_container_info MODIFY created_at DOUBLE NOT NULL` and do the same for `timer_start_time`, `timer_duration`, and the history table's `started_at`, `ended_at`, `duration`
