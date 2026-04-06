@@ -45,58 +45,44 @@
 		cursor: default;
 	}
 
-	.event-feed {
+	.log-wrap {
 		max-height: 400px;
 		overflow-y: auto;
-		padding: 15px;
 	}
 
-	.event-item {
-		padding: 10px;
-		border-bottom: 1px solid #eee;
-		display: flex;
-		align-items: center;
-		gap: 10px;
+	.log-wrap thead th {
+		position: sticky;
+		top: 0;
+		background: white;
+		z-index: 1;
 	}
 
-	.event-item:last-child {
-		border-bottom: none;
-	}
-
-	.event-item:hover {
-		background-color: #f8f9fa;
-	}
-
-	.event-badge {
-		display: inline-block;
-		padding: 4px 10px;
-		border-radius: 4px;
-		font-size: 12px;
-		font-weight: 600;
-		min-width: 100px;
-		text-align: center;
-	}
-
-	.event-info { background-color: #d4edda; color: #155724; }
-	.event-warning { background-color: #fff3cd; color: #856404; }
-	.event-error { background-color: #f8d7da; color: #721c24; }
-
-	.event-time {
-		font-size: 12px;
-		color: #6c757d;
-		min-width: 140px;
+	.log-time {
 		white-space: nowrap;
+		color: #6c757d;
 	}
 
-	.event-message {
-		flex: 1;
-		word-wrap: break-word;
+	.log-user a {
+		color: #337ab7;
+		font-weight: 600;
+		text-decoration: none;
 	}
 
-	.event-username {
-		color: #007bff;
-		font-weight: bold;
+	.log-user a:hover { text-decoration: underline; }
+
+	.log-detail {
+		color: #6c757d;
 	}
+
+	.badge-evt-requested { background-color: #cce5ff; color: #004085; }
+	.badge-evt-created { background-color: #d4edda; color: #155724; }
+	.badge-evt-destroyed { background-color: #e2e3e5; color: #383d41; }
+	.badge-evt-expired { background-color: #fff3cd; color: #856404; }
+	.badge-evt-extended { background-color: #d1ecf1; color: #0c5460; }
+	.badge-evt-error { background-color: #f8d7da; color: #721c24; }
+	.badge-evt-admin { background-color: #fff3cd; color: #856404; }
+	.badge-evt-host-up { background-color: #d4edda; color: #155724; }
+	.badge-evt-host-down { background-color: #f8d7da; color: #721c24; }
 
 	.time-remaining {
 		font-family: monospace;
@@ -162,7 +148,7 @@
 				</div>
 				<div class="card-body">
 					<div class="table-responsive">
-						<table class="table table-striped border">
+						<table class="table table-striped table-sm border">
 							<thead>
 								<tr>
 									<th><b>User</b></th>
@@ -189,9 +175,23 @@
 				<div class="card-header">
 					<h3 class="card-title">Activity</h3>
 				</div>
-				<div class="card-body p-0">
-					<div class="event-feed" id="event-feed">
-						<div class="text-center text-muted py-3" id="event-feed-empty">No activity</div>
+				<div class="card-body">
+					<div class="table-responsive log-wrap">
+						<table class="table table-striped table-sm border">
+							<thead>
+								<tr>
+									<th><b>Time</b></th>
+									<th><b>User</b></th>
+									<th><b>Event</b></th>
+									<th><b>Details</b></th>
+								</tr>
+							</thead>
+							<tbody id="event-feed">
+								<tr id="event-feed-empty">
+									<td colspan="4" class="text-center text-muted py-3">No activity</td>
+								</tr>
+							</tbody>
+						</table>
 					</div>
 				</div>
 			</div>
@@ -371,9 +371,23 @@
 					<div class="card-header">
 						<h3 class="card-title">Command Feed</h3>
 					</div>
-					<div class="card-body p-0">
-						<div class="event-feed" id="cmd-feed">
-							<div class="text-center text-muted py-3" id="cmd-feed-empty">No commands yet</div>
+					<div class="card-body">
+						<div class="table-responsive log-wrap">
+							<table class="table table-striped table-sm border">
+								<thead>
+									<tr>
+										<th><b>Time</b></th>
+										<th><b>User</b></th>
+										<th><b>Command</b></th>
+										<th><b>Exit</b></th>
+									</tr>
+								</thead>
+								<tbody id="cmd-feed">
+									<tr id="cmd-feed-empty">
+										<td colspan="4" class="text-center text-muted py-3">No commands yet</td>
+									</tr>
+								</tbody>
+							</table>
 						</div>
 					</div>
 				</div>
@@ -393,7 +407,7 @@
 					</div>
 					<div class="card-body">
 						<div class="table-responsive">
-							<table class="table table-striped border">
+							<table class="table table-striped table-sm border">
 								<thead>
 									<tr>
 										<th><b>User</b></th>
@@ -506,42 +520,79 @@
 		});
 	}
 
+	const EVENT_LABELS = {
+		'session_requested': 'Requested',
+		'session_created': 'Created',
+		'session_destroyed': 'Destroyed',
+		'session_expired': 'Expired',
+		'session_extended': 'Extended',
+		'session_error': 'Error',
+		'admin_action': 'Admin',
+		'host_unhealthy': 'Host Down',
+		'host_healthy': 'Host Up',
+	};
+
+	const EVENT_BADGE_CLASS = {
+		'session_requested': 'badge-evt-requested',
+		'session_created': 'badge-evt-created',
+		'session_destroyed': 'badge-evt-destroyed',
+		'session_expired': 'badge-evt-expired',
+		'session_extended': 'badge-evt-extended',
+		'session_error': 'badge-evt-error',
+		'admin_action': 'badge-evt-admin',
+		'host_unhealthy': 'badge-evt-host-down',
+		'host_healthy': 'badge-evt-host-up',
+	};
+
+	function formatEventDetails(event) {
+		const m = event.metadata || {};
+		switch (event.type) {
+			case 'session_requested':
+			case 'session_expired':
+				return '';
+			case 'session_created':
+			case 'session_destroyed':
+				return [m.context, m.container_name].filter(Boolean).join(' / ');
+			case 'session_extended':
+				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
+			case 'session_error':
+				return event.message;
+			case 'admin_action':
+				if (m.killed_count !== undefined) return `purged ${m.killed_count} sessions`;
+				return m.admin_name ? `by ${m.admin_name}` : '';
+			case 'host_unhealthy':
+			case 'host_healthy':
+				return m.context_name || '';
+			default:
+				return event.message || '';
+		}
+	}
+
 	function addEventToFeed(event) {
 		const feed = document.getElementById('event-feed');
 		const empty = document.getElementById('event-feed-empty');
 		if (empty) empty.remove();
-		const eventItem = document.createElement('div');
-		eventItem.className = 'event-item';
 
-		let messageHtml = escapeHtml(event.message);
-		if (event.username) {
-			messageHtml = `<span class="event-username">${escapeHtml(event.username)}</span> ${messageHtml}`;
-		}
+		const row = document.createElement('tr');
+		const badgeClass = EVENT_BADGE_CLASS[event.type] || 'badge-secondary';
+		const label = EVENT_LABELS[event.type] || event.type;
+		const details = formatEventDetails(event);
 
-		if (event.metadata && Object.keys(event.metadata).length > 0) {
-			const metaKeys = Object.keys(event.metadata).filter(k => !['traceback', 'error'].includes(k));
-			if (metaKeys.length > 0) {
-				const metaStr = metaKeys.map(k => `${k}=${event.metadata[k]}`).join(', ');
-				messageHtml += ` <small class="text-muted">[${escapeHtml(metaStr)}]</small>`;
-			}
-		}
-
-		const badgeClass = event.level === 'error' ? 'event-error' :
-						   event.level === 'warning' ? 'event-warning' : 'event-info';
-
-		eventItem.innerHTML = `
-			<span class="event-time">${escapeHtml(formatTimestamp(event.timestamp))}</span>
-			<span class="event-badge ${badgeClass}">${escapeHtml(event.type)}</span>
-			<span class="event-message">${messageHtml}</span>
+		row.innerHTML = `
+			<td class="log-time">${escapeHtml(formatTimestamp(event.timestamp))}</td>
+			<td class="log-user">${event.username ? `<a href="/admin/users/${event.user_id}">${escapeHtml(event.username)}</a>` : ''}</td>
+			<td><span class="badge ${badgeClass}">${escapeHtml(label)}</span></td>
+			<td class="log-detail">${escapeHtml(details)}</td>
 		`;
 
-		feed.insertBefore(eventItem, feed.firstChild);
+		feed.insertBefore(row, feed.firstChild);
 
 		while (feed.children.length > maxEvents) {
 			feed.removeChild(feed.lastChild);
 		}
 
-		feed.scrollTop = 0;
+		const wrapper = feed.closest('.log-wrap');
+		if (wrapper) wrapper.scrollTop = 0;
 	}
 
 	function connectEventStream() {
@@ -963,13 +1014,15 @@
 			if (empty) empty.remove();
 
 			feed.innerHTML = logs.map(log => {
-				const exitClass = log.exit_code === 0 ? 'event-info' :
-								  log.exit_code !== null ? 'event-error' : 'event-info';
-				return `<div class="event-item">
-					<span class="event-time">${escapeHtml(formatTimestamp(log.timestamp))}</span>
-					<span class="event-badge ${exitClass}" style="min-width:28px;padding:4px 6px;">${log.exit_code !== null ? log.exit_code : '-'}</span>
-					<span class="event-message"><span class="event-username">${escapeHtml(log.username)}</span> <code>${escapeHtml(log.command)}</code></span>
-				</div>`;
+				const exitBadge = log.exit_code === 0 ? 'badge-success' :
+								  log.exit_code !== null ? 'badge-danger' : 'badge-secondary';
+				const exitText = log.exit_code !== null ? log.exit_code : '-';
+				return `<tr>
+					<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
+					<td class="log-user"><a href="/admin/users/${log.user_id}">${escapeHtml(log.username)}</a></td>
+					<td><code>${escapeHtml(log.command)}</code></td>
+					<td><span class="badge ${exitBadge}">${exitText}</span></td>
+				</tr>`;
 			}).join('');
 		});
 	}
