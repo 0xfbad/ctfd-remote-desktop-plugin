@@ -132,7 +132,7 @@
 
 <div class="jumbotron">
 	<div class="container">
-		<h1>Desktop Sessions</h1>
+		<h1>Remote Desktop Dashboard</h1>
 	</div>
 </div>
 
@@ -141,7 +141,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Sessions</h3>
+					<h3 class="card-title">Current Sessions</h3>
 					<button class="btn btn-danger" id="purge-all-btn" onclick="killAllSessions()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
@@ -188,7 +188,7 @@
 							</thead>
 							<tbody id="event-feed">
 								<tr id="event-feed-empty">
-									<td colspan="4" class="text-center text-muted py-3">No activity</td>
+									<td colspan="4" class="text-center text-muted py-3">No activity yet</td>
 								</tr>
 							</tbody>
 						</table>
@@ -643,7 +643,7 @@
 		const tbody = document.getElementById('containers-table');
 
 		if (!containers || containers.length === 0) {
-			tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sessions</td></tr>';
+			tbody.innerHTML = '<tr><td colspan="7" class="text-center">No current sessions</td></tr>';
 			return;
 		}
 
