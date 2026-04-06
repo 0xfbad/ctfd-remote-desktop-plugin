@@ -563,7 +563,8 @@
 							   formatDurationShort(p.value) + ' (' + (data.users.find(u => u.username === p.name) || {}).session_count + ' sessions)';
 					}
 				},
-				grid: { left: 100, right: 20, top: 10, bottom: 20 },
+				toolbox: { feature: { saveAsImage: {} } },
+				grid: { left: 100, right: 20, top: 30, bottom: 20 },
 				xAxis: { type: 'value', axisLabel: { formatter: v => formatDurationShort(v) } },
 				yAxis: { type: 'category', data: users.map(u => u.username) },
 				series: [{
@@ -590,7 +591,12 @@
 						return echarts.format.encodeHTML(p.name) + '<br/>' + p.value + ' sessions';
 					}
 				},
-				grid: { left: 50, right: 20, top: 10, bottom: 30 },
+				toolbox: { feature: { saveAsImage: {} } },
+				dataZoom: [
+					{ type: 'inside' },
+					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
+				],
+				grid: { left: 50, right: 20, top: 30, bottom: 60 },
 				xAxis: { type: 'category', data: days.map(d => d.date), axisLabel: { rotate: 45 } },
 				yAxis: { type: 'value', minInterval: 1 },
 				series: [{
