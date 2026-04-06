@@ -260,6 +260,75 @@
 			</div>
 		</div>
 	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Concurrent Sessions</h3>
+					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<option value="week">Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="chart-concurrent"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-6">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Session Duration Distribution</h3>
+					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<option value="week">Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="chart-duration-dist"></div>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-6">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Session End Reasons</h3>
+					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<option value="week">Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="chart-end-reasons"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Per-Host Breakdown</h3>
+					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<option value="week">Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="chart-per-host"></div>
+				</div>
+			</div>
+		</div>
+	</div>
 </div>
 
 {% endblock %}
@@ -507,12 +576,23 @@
 
 	let topUsersChart = null;
 	let dailyUsageChart = null;
+	let concurrentChart = null;
+	let durationDistChart = null;
+	let endReasonsChart = null;
+	let perHostChart = null;
 
 	function initCharts() {
-		const topUsersEl = document.getElementById('chart-top-users');
-		const dailyUsageEl = document.getElementById('chart-daily-usage');
-		if (topUsersEl) topUsersChart = echarts.init(topUsersEl);
-		if (dailyUsageEl) dailyUsageChart = echarts.init(dailyUsageEl);
+		['chart-top-users', 'chart-daily-usage', 'chart-concurrent', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host'].forEach(id => {
+			const el = document.getElementById(id);
+			if (!el) return;
+			const chart = echarts.init(el);
+			if (id === 'chart-top-users') topUsersChart = chart;
+			else if (id === 'chart-daily-usage') dailyUsageChart = chart;
+			else if (id === 'chart-concurrent') concurrentChart = chart;
+			else if (id === 'chart-duration-dist') durationDistChart = chart;
+			else if (id === 'chart-end-reasons') endReasonsChart = chart;
+			else if (id === 'chart-per-host') perHostChart = chart;
+		});
 	}
 
 	function formatDurationShort(seconds) {
@@ -608,6 +688,109 @@
 				}]
 			});
 		});
+
+		fetch(`/remote-desktop/admin/api/stats/concurrent?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!concurrentChart) return;
+			const points = data.points || [];
+			concurrentChart.setOption({
+				tooltip: { trigger: 'axis' },
+				toolbox: { feature: { saveAsImage: {} } },
+				dataZoom: [
+					{ type: 'inside' },
+					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
+				],
+				grid: { left: 50, right: 20, top: 30, bottom: 60 },
+				xAxis: { type: 'category', data: points.map(p => p.time), axisLabel: { rotate: 45 } },
+				yAxis: { type: 'value', minInterval: 1 },
+				series: [{
+					type: 'line',
+					data: points.map(p => p.concurrent),
+					itemStyle: { color: '#6f42c1' },
+					lineStyle: { color: '#6f42c1' },
+					areaStyle: { color: 'rgba(111, 66, 193, 0.1)' }
+				}]
+			});
+		});
+
+		fetch(`/remote-desktop/admin/api/stats/duration-distribution?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!durationDistChart) return;
+			const buckets = data.buckets || [];
+			durationDistChart.setOption({
+				tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+				toolbox: { feature: { saveAsImage: {} } },
+				grid: { left: 50, right: 20, top: 30, bottom: 30 },
+				xAxis: { type: 'category', data: buckets.map(b => b.range) },
+				yAxis: { type: 'value', minInterval: 1 },
+				series: [{
+					type: 'bar',
+					data: buckets.map(b => b.count),
+					itemStyle: { color: '#fd7e14' }
+				}]
+			});
+		});
+
+		fetch(`/remote-desktop/admin/api/stats/extensions?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!endReasonsChart) return;
+			const reasons = data.end_reasons || [];
+			endReasonsChart.setOption({
+				tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+				toolbox: { feature: { saveAsImage: {} } },
+				series: [{
+					type: 'pie',
+					radius: ['30%', '70%'],
+					data: reasons.map(r => ({ name: r.reason, value: r.count })),
+					label: { formatter: '{b}\n{c}' }
+				}]
+			});
+		});
+
+		fetch(`/remote-desktop/admin/api/stats/per-host?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!perHostChart) return;
+			const hosts = data.hosts || [];
+			perHostChart.setOption({
+				tooltip: {
+					trigger: 'axis',
+					axisPointer: { type: 'shadow' },
+					formatter: function(params) {
+						const host = params[0].name;
+						const sessions = params[0].value;
+						const h = hosts.find(h => h.host === host) || {};
+						return echarts.format.encodeHTML(host) + '<br/>' +
+							sessions + ' sessions<br/>' +
+							formatDurationShort(h.total_duration || 0) + ' total';
+					}
+				},
+				toolbox: { feature: { saveAsImage: {} } },
+				grid: { left: 100, right: 20, top: 30, bottom: 20 },
+				xAxis: { type: 'value', minInterval: 1 },
+				yAxis: { type: 'category', data: hosts.map(h => h.host) },
+				series: [{
+					type: 'bar',
+					data: hosts.map(h => h.sessions),
+					itemStyle: { color: '#20c997' }
+				}]
+			});
+		});
 	}
 
 	function startAutoRefresh() {
@@ -616,8 +799,9 @@
 	}
 
 	window.addEventListener('resize', function() {
-		if (topUsersChart) topUsersChart.resize();
-		if (dailyUsageChart) dailyUsageChart.resize();
+		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart].forEach(c => {
+			if (c) c.resize();
+		});
 	});
 
 	document.addEventListener('DOMContentLoaded', function() {

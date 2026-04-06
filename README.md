@@ -171,7 +171,14 @@ On startup the plugin runs a reconciliation pass that checks every DB record aga
 
 Every session that ends gets a row in `desktop_session_history` recording user_id, username, docker_context, started_at, ended_at, duration, end_reason, and extensions_used. The end_reason field tracks how the session ended: `user_destroyed` when the user clicks destroy, `expired` when the timer runs out, `admin_killed` when an admin kills it from the dashboard, or `reconciliation` when the startup check finds a stale record
 
-The admin dashboard has a Usage Stats section that queries this history. Summary cards show total sessions, average duration, and peak concurrent sessions (calculated with a sweep-line algorithm over all start/end intervals). A top users chart shows the 15 heaviest users by total duration, and a daily usage chart shows session counts over time. Both charts filter by a shared period dropdown (past week, past month, all time)
+The admin dashboard has a Usage Stats section that queries this history. Summary cards show total sessions, average duration, and peak concurrent. All charts share a period dropdown (past week, past month, all time) and have download buttons
+
+- **Top Users** horizontal bar of the 15 heaviest users by total session time, tooltip shows session count
+- **Daily Usage** line chart of session counts per day with area fill and zoom slider
+- **Concurrent Sessions** reconstructed from start/end timestamps (sampled every 5 minutes), includes currently active sessions. Useful for capacity planning
+- **Session Duration Distribution** histogram bucketed into <5m, 5-15m, 15-30m, 30-60m, 1-2h, 2h+. If most sessions hit the max bucket your timer settings are probably too short
+- **Session End Reasons** donut chart breaking down user_destroyed, expired, admin_killed, reconciliation. High expired rate means people are walking away instead of stopping sessions
+- **Per-Host Breakdown** sessions per Docker context with total duration in tooltip, shows whether load balancing is working
 
 Admins can also kill all active sessions at once with the Kill All button in the sessions card header. It iterates every active session and destroys them with reason `admin_killed`, logging a single admin event
 
@@ -280,8 +287,12 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 **Stats**
 
 - `GET /admin/api/stats/summary` total sessions, avg duration, peak concurrent
-- `GET /admin/api/stats/top-users?period=week|month|all` top 15 users by duration
-- `GET /admin/api/stats/usage?period=week|month|all` daily session counts
+- `GET /admin/api/stats/top-users?period=` top 15 users by duration
+- `GET /admin/api/stats/usage?period=` daily session counts
+- `GET /admin/api/stats/concurrent?period=` concurrent sessions over time (sampled every 5m)
+- `GET /admin/api/stats/per-host?period=` sessions and total duration per Docker context
+- `GET /admin/api/stats/duration-distribution?period=` histogram of session lengths
+- `GET /admin/api/stats/extensions?period=` extension usage counts and end reason breakdown
 
 **VNC Proxy**
 

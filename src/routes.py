@@ -546,6 +546,157 @@ def create_routes(container_manager, orchestrator):
         resp.headers["X-VNC-Port"] = str(row.novnc_port)
         return resp
 
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/per-host", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_per_host():
+        from .models import DesktopSessionHistoryModel
+
+        try:
+            period = request.args.get("period", "all")
+            query = DesktopSessionHistoryModel.query
+
+            if period == "week":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
+            elif period == "month":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
+
+            rows = query.all()
+
+            hosts = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0, "failures": 0})
+            for row in rows:
+                ctx = row.docker_context
+                hosts[ctx]["sessions"] += 1
+                hosts[ctx]["total_duration"] += row.duration
+                if row.end_reason == "reconciliation":
+                    hosts[ctx]["failures"] += 1
+
+            result = [{"host": h, **hosts[h]} for h in sorted(hosts.keys())]
+            return jsonify({"hosts": result})
+        except Exception as e:
+            logger.error(f"admin API error getting per-host stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/duration-distribution", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_duration_dist():
+        from .models import DesktopSessionHistoryModel
+
+        try:
+            period = request.args.get("period", "all")
+            query = DesktopSessionHistoryModel.query
+
+            if period == "week":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
+            elif period == "month":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
+
+            rows = query.all()
+
+            # bucket durations into ranges
+            buckets = {"<5m": 0, "5-15m": 0, "15-30m": 0, "30-60m": 0, "1-2h": 0, "2h+": 0}
+            for row in rows:
+                d = row.duration
+                if d < 300:
+                    buckets["<5m"] += 1
+                elif d < 900:
+                    buckets["5-15m"] += 1
+                elif d < 1800:
+                    buckets["15-30m"] += 1
+                elif d < 3600:
+                    buckets["30-60m"] += 1
+                elif d < 7200:
+                    buckets["1-2h"] += 1
+                else:
+                    buckets["2h+"] += 1
+
+            result = [{"range": k, "count": v} for k, v in buckets.items()]
+            return jsonify({"buckets": result})
+        except Exception as e:
+            logger.error(f"admin API error getting duration distribution: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/concurrent", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_concurrent():
+        from .models import DesktopSessionHistoryModel, DesktopContainerInfoModel
+
+        try:
+            period = request.args.get("period", "all")
+            query = DesktopSessionHistoryModel.query
+
+            if period == "week":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
+            elif period == "month":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
+
+            rows = query.all()
+
+            # also include currently active sessions
+            active = DesktopContainerInfoModel.query.all()
+            now = time.time()
+
+            # build time series by sampling at regular intervals
+            all_sessions = []
+            for r in rows:
+                all_sessions.append((r.started_at, r.ended_at))
+            for r in active:
+                all_sessions.append((r.created_at, now))
+
+            if not all_sessions:
+                return jsonify({"points": []})
+
+            min_t = min(s[0] for s in all_sessions)
+            max_t = max(s[1] for s in all_sessions)
+
+            # sample every 5 minutes, cap at 2000 points
+            interval = max((max_t - min_t) / 2000, 300)
+            points = []
+            t = min_t
+            while t <= max_t:
+                count = sum(1 for s in all_sessions if s[0] <= t < s[1])
+                date_str = datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+                points.append({"time": date_str, "concurrent": count})
+                t += interval
+
+            return jsonify({"points": points})
+        except Exception as e:
+            logger.error(f"admin API error getting concurrent stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/extensions", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_extensions():
+        from .models import DesktopSessionHistoryModel
+
+        try:
+            period = request.args.get("period", "all")
+            query = DesktopSessionHistoryModel.query
+
+            if period == "week":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
+            elif period == "month":
+                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
+
+            rows = query.all()
+
+            ext_counts = defaultdict(int)
+            end_reasons = defaultdict(int)
+            for row in rows:
+                ext_counts[row.extensions_used] += 1
+                end_reasons[row.end_reason] += 1
+
+            return jsonify({
+                "extensions": [{"count": k, "sessions": v} for k, v in sorted(ext_counts.items())],
+                "end_reasons": [{"reason": k, "count": v} for k, v in sorted(end_reasons.items(), key=lambda x: -x[1])],
+            })
+        except Exception as e:
+            logger.error(f"admin API error getting extension stats: {e}")
+            return jsonify({"error": str(e)}), 500
+
     # context crud
 
     @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["GET"])
