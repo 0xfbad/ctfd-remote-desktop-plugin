@@ -40,6 +40,10 @@
 		margin-bottom: 0;
 	}
 
+	.table-sm td, .table-sm th {
+		padding: .4rem .5rem;
+	}
+
 	.table tbody tr,
 	.table tbody tr:hover {
 		cursor: default;
@@ -141,7 +145,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Current Sessions</h3>
+					<h3 class="card-title">Active Sessions</h3>
 					<button class="btn btn-danger" id="purge-all-btn" onclick="killAllSessions()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
@@ -598,7 +602,7 @@
 	function connectEventStream() {
 		if (eventSource) eventSource.close();
 
-		eventSource = new EventSource('/remote-desktop/admin/api/events/stream');
+		eventSource = new EventSource('/remote-desktop/dashboard/api/events/stream');
 
 		eventSource.onmessage = function(e) {
 			try {
@@ -626,7 +630,7 @@
 	// containers
 
 	function refreshContainers() {
-		fetch('/remote-desktop/admin/api/containers', {
+		fetch('/remote-desktop/dashboard/api/containers', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -643,7 +647,7 @@
 		const tbody = document.getElementById('containers-table');
 
 		if (!containers || containers.length === 0) {
-			tbody.innerHTML = '<tr><td colspan="7" class="text-center">No current sessions</td></tr>';
+			tbody.innerHTML = '<tr><td colspan="7" class="text-center">No active sessions</td></tr>';
 			return;
 		}
 
@@ -710,7 +714,7 @@
 		formData.append('nonce', window.init.csrfNonce);
 		formData.append('user_id', userId);
 
-		fetch('/remote-desktop/admin/api/kill', {
+		fetch('/remote-desktop/dashboard/api/kill', {
 			method: 'POST',
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin',
@@ -728,7 +732,7 @@
 		formData.append('nonce', window.init.csrfNonce);
 		formData.append('user_id', userId);
 
-		fetch('/remote-desktop/admin/api/extend', {
+		fetch('/remote-desktop/dashboard/api/extend', {
 			method: 'POST',
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin',
@@ -749,7 +753,7 @@
 		const btn = document.getElementById('purge-all-btn');
 		btn.disabled = true;
 
-		fetch('/remote-desktop/admin/api/kill-all', {
+		fetch('/remote-desktop/dashboard/api/kill-all', {
 			method: 'POST',
 			headers: {
 				'X-Requested-With': 'XMLHttpRequest',
@@ -818,7 +822,7 @@
 		const first = document.querySelector('.rd-stats-period');
 		const period = first ? first.value : 'week';
 
-		fetch('/remote-desktop/admin/api/stats/summary', {
+		fetch('/remote-desktop/dashboard/api/stats/summary', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -829,7 +833,7 @@
 			document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent;
 		});
 
-		fetch(`/remote-desktop/admin/api/stats/top-users?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/stats/top-users?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -859,7 +863,7 @@
 			});
 		});
 
-		fetch(`/remote-desktop/admin/api/stats/usage?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/stats/usage?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -893,7 +897,7 @@
 			});
 		});
 
-		fetch(`/remote-desktop/admin/api/stats/concurrent?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/stats/concurrent?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -921,7 +925,7 @@
 			});
 		});
 
-		fetch(`/remote-desktop/admin/api/stats/duration-distribution?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/stats/duration-distribution?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -943,7 +947,7 @@
 			});
 		});
 
-		fetch(`/remote-desktop/admin/api/stats/extensions?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/stats/extensions?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -963,7 +967,7 @@
 			});
 		});
 
-		fetch(`/remote-desktop/admin/api/stats/per-host?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/stats/per-host?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1000,7 +1004,7 @@
 	// command log stats
 
 	function refreshCommandFeed() {
-		fetch('/remote-desktop/admin/api/command-logs?limit=50', {
+		fetch('/remote-desktop/dashboard/api/command-logs?limit=50', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1032,7 +1036,7 @@
 	const cmdHistoryLimit = 100;
 
 	function refreshCommandLogStats() {
-		fetch('/remote-desktop/admin/api/command-logs/stats/summary', {
+		fetch('/remote-desktop/dashboard/api/command-logs/stats/summary', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1063,7 +1067,7 @@
 		const first = document.querySelector('.rd-stats-period');
 		const period = first ? first.value : 'week';
 
-		fetch(`/remote-desktop/admin/api/command-logs/stats/per-user?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/command-logs/stats/per-user?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1085,7 +1089,7 @@
 			`).join('');
 		});
 
-		fetch(`/remote-desktop/admin/api/command-logs/stats/tools?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/command-logs/stats/tools?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1116,7 +1120,7 @@
 			});
 		});
 
-		fetch(`/remote-desktop/admin/api/command-logs/stats/activity?period=${period}`, {
+		fetch(`/remote-desktop/dashboard/api/command-logs/stats/activity?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1154,7 +1158,7 @@
 	}
 
 	function loadCmdHistory() {
-		fetch(`/remote-desktop/admin/api/command-logs?user_id=${cmdHistoryUserId}&limit=${cmdHistoryLimit}&offset=${cmdHistoryOffset}`, {
+		fetch(`/remote-desktop/dashboard/api/command-logs?user_id=${cmdHistoryUserId}&limit=${cmdHistoryLimit}&offset=${cmdHistoryOffset}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})

@@ -249,7 +249,7 @@
     ];
 
     function loadRdSettings() {
-        fetch('/remote-desktop/admin/api/settings', {
+        fetch('/remote-desktop/dashboard/api/settings', {
             headers: { 'X-Requested-With': 'XMLHttpRequest' },
             credentials: 'same-origin'
         })
@@ -279,7 +279,7 @@
             }
         });
 
-        fetch('/remote-desktop/admin/api/settings', {
+        fetch('/remote-desktop/dashboard/api/settings', {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json',
@@ -318,7 +318,7 @@
     }
 
     function loadHosts() {
-        rdFetch('/remote-desktop/admin/api/hosts')
+        rdFetch('/remote-desktop/dashboard/api/hosts')
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 hostsData = data.hosts || [];
@@ -328,7 +328,7 @@
     }
 
     function loadContexts() {
-        rdFetch('/remote-desktop/admin/api/contexts')
+        rdFetch('/remote-desktop/dashboard/api/contexts')
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 renderContexts(data.contexts || []);
@@ -407,7 +407,7 @@
         icon.style.color = '#6c757d';
         btn.disabled = true;
 
-        rdFetch('/remote-desktop/admin/api/contexts/' + id + '/test')
+        rdFetch('/remote-desktop/dashboard/api/contexts/' + id + '/test')
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 if (data.success) {
@@ -440,7 +440,7 @@
 
     function deleteContext(id, name) {
         if (!confirm('Delete context "' + name + '"?')) return;
-        rdFetch('/remote-desktop/admin/api/contexts/' + id, {
+        rdFetch('/remote-desktop/dashboard/api/contexts/' + id, {
             method: 'DELETE',
             headers: { 'CSRF-Token': window.init.csrfNonce }
         })
@@ -460,7 +460,7 @@
         list.style.display = 'none';
         empty.style.display = 'none';
 
-        rdFetch('/remote-desktop/admin/api/contexts/discover')
+        rdFetch('/remote-desktop/dashboard/api/contexts/discover')
             .then(function(r) { return r.json(); })
             .then(function(data) {
                 loading.style.display = 'none';
@@ -514,7 +514,7 @@
         btn.disabled = true;
         btn.textContent = '...';
 
-        rdFetch('/remote-desktop/admin/api/contexts', {
+        rdFetch('/remote-desktop/dashboard/api/contexts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'CSRF-Token': window.init.csrfNonce },
             body: JSON.stringify({ context_name: name, pub_hostname: pubHostname, weight: 1, enabled: true })
@@ -552,7 +552,7 @@
         };
         if (!payload.pub_hostname) { CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }
 
-        rdFetch('/remote-desktop/admin/api/contexts/' + id, {
+        rdFetch('/remote-desktop/dashboard/api/contexts/' + id, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', 'CSRF-Token': window.init.csrfNonce },
             body: JSON.stringify(payload)
@@ -565,7 +565,7 @@
     });
 
     document.getElementById('rd-reload-contexts-btn').addEventListener('click', function() {
-        rdFetch('/remote-desktop/admin/api/contexts/reload', {
+        rdFetch('/remote-desktop/dashboard/api/contexts/reload', {
             method: 'POST',
             headers: { 'CSRF-Token': window.init.csrfNonce }
         })

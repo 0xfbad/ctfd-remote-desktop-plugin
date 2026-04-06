@@ -291,12 +291,12 @@ def create_routes(container_manager, orchestrator):
 
     # admin dashboard
 
-    @remote_desktop_bp.route("/remote-desktop/admin")
+    @remote_desktop_bp.route("/remote-desktop/dashboard")
     @admins_only
     def admin_dashboard():
         return render_template("admin_dashboard.html")
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/containers", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/containers", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_get_containers():
@@ -307,7 +307,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting containers: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/hosts", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/hosts", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_get_hosts():
@@ -318,7 +318,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting hosts: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/kill", methods=["POST"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/kill", methods=["POST"])
     @admins_only
     @bypass_csrf_protection
     def admin_kill_container():
@@ -355,7 +355,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error killing container: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/extend", methods=["POST"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/extend", methods=["POST"])
     @admins_only
     @bypass_csrf_protection
     def admin_extend_session():
@@ -397,7 +397,7 @@ def create_routes(container_manager, orchestrator):
 
     # kill-all
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/kill-all", methods=["POST"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/kill-all", methods=["POST"])
     @admins_only
     @bypass_csrf_protection
     def admin_kill_all():
@@ -411,7 +411,7 @@ def create_routes(container_manager, orchestrator):
 
     # stats
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/top-users", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/top-users", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_top_users():
@@ -432,7 +432,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting top users: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/usage", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/usage", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_usage():
@@ -452,7 +452,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting usage stats: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/summary", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/summary", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_summary():
@@ -523,7 +523,7 @@ def create_routes(container_manager, orchestrator):
         resp.headers["X-VNC-Port"] = str(row.novnc_port)
         return resp
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/per-host", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/per-host", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_per_host():
@@ -545,7 +545,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting per-host stats: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/duration-distribution", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/duration-distribution", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_duration_dist():
@@ -576,7 +576,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting duration distribution: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/concurrent", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/concurrent", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_concurrent():
@@ -618,7 +618,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting concurrent stats: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/stats/extensions", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/extensions", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_stats_extensions():
@@ -646,7 +646,7 @@ def create_routes(container_manager, orchestrator):
 
     # command logs
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_get_command_logs():
@@ -719,7 +719,7 @@ def create_routes(container_manager, orchestrator):
             query = query.filter(CommandLogModel.timestamp >= time.time() - 30 * 86400)
         return query
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/per-user", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/per-user", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_command_stats_per_user():
@@ -764,7 +764,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting per-user command stats: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/tools", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/tools", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_command_stats_tools():
@@ -796,7 +796,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting tool stats: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/activity", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/activity", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_command_stats_activity():
@@ -821,7 +821,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting command activity: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/command-logs/stats/summary", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/summary", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_command_stats_summary():
@@ -877,7 +877,7 @@ def create_routes(container_manager, orchestrator):
 
     # context crud
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_get_contexts():
@@ -908,7 +908,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting contexts: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/discover", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/discover", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_discover_contexts():
@@ -959,7 +959,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error discovering contexts: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["POST"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts", methods=["POST"])
     @admins_only
     @bypass_csrf_protection
     def admin_add_context():
@@ -1005,7 +1005,7 @@ def create_routes(container_manager, orchestrator):
 
         return jsonify({"success": True, "id": new_context.id})
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/<int:context_id>", methods=["PUT"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>", methods=["PUT"])
     @admins_only
     @bypass_csrf_protection
     def admin_update_context(context_id):
@@ -1044,7 +1044,7 @@ def create_routes(container_manager, orchestrator):
 
         return jsonify({"success": True})
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/<int:context_id>", methods=["DELETE"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>", methods=["DELETE"])
     @admins_only
     @bypass_csrf_protection
     def admin_delete_context(context_id):
@@ -1061,7 +1061,7 @@ def create_routes(container_manager, orchestrator):
 
         return jsonify({"success": True})
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/<int:context_id>/test", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>/test", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_test_context(context_id):
@@ -1082,7 +1082,7 @@ def create_routes(container_manager, orchestrator):
 
         return jsonify({"success": True})
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/reload", methods=["POST"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/reload", methods=["POST"])
     @admins_only
     @bypass_csrf_protection
     def admin_reload_contexts():
@@ -1095,7 +1095,7 @@ def create_routes(container_manager, orchestrator):
 
     # settings
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/settings", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
     def admin_get_settings():
@@ -1108,7 +1108,7 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting settings: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/settings", methods=["PUT"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["PUT"])
     @admins_only
     @bypass_csrf_protection
     def admin_update_settings():
@@ -1127,7 +1127,7 @@ def create_routes(container_manager, orchestrator):
 
     # events sse
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/events/stream")
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/events/stream")
     @admins_only
     def admin_events_stream():
         def event_stream():
@@ -1168,7 +1168,7 @@ def create_routes(container_manager, orchestrator):
             },
         )
 
-    @remote_desktop_bp.route("/remote-desktop/admin/api/events/recent")
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/events/recent")
     @admins_only
     def admin_get_recent_events():
         try:

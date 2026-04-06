@@ -1,5 +1,5 @@
 {
     "name": "Remote Desktop",
-    "route": "/remote-desktop/admin",
+    "route": "/remote-desktop/dashboard",
     "config": "remote_desktop_config.html"
 }
