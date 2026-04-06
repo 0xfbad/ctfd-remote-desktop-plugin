@@ -9,7 +9,7 @@ from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
 from CTFd.utils.user import get_current_user, is_verified
 from .event_logger import event_logger
-from .docker_host_manager import LOCAL_CONTEXT_NAME
+from .docker_host_manager import LOCAL_CONTEXT_NAME, discover_contexts, ping_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -538,9 +538,59 @@ def create_routes(container_manager, orchestrator):
                         "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
                     }
                 )
-            return jsonify({"contexts": data})
+            from .docker_host_manager import LOCAL_SOCKET_PATH
+            docker_ok = ping_endpoint(f"unix://{LOCAL_SOCKET_PATH}")
+            return jsonify({"contexts": data, "docker_socket": docker_ok})
         except Exception as e:
             logger.error(f"admin API error getting contexts: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/admin/api/contexts/discover", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_discover_contexts():
+        import socket as _socket
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from .models import DesktopDockerContextModel
+
+        try:
+            found = discover_contexts()
+            existing = {ctx.context_name for ctx in DesktopDockerContextModel.query.all()}
+
+            available = []
+            for ctx in found:
+                if ctx["name"] in existing:
+                    continue
+
+                ep = ctx["endpoint"]
+                if ep.startswith("unix://"):
+                    suggested = _socket.gethostname()
+                elif "://" in ep:
+                    stripped = ep.split("://", 1)[-1]
+                    if "@" in stripped:
+                        stripped = stripped.split("@", 1)[-1]
+                    stripped = stripped.split(":")[0].split("/")[0]
+                    suggested = stripped
+                else:
+                    suggested = ""
+
+                available.append({
+                    "name": ctx["name"],
+                    "endpoint": ctx["endpoint"],
+                    "suggested_hostname": suggested,
+                })
+
+            if available:
+                def _ping(ctx):
+                    ctx["reachable"] = ping_endpoint(ctx["endpoint"])
+                    return ctx
+
+                with ThreadPoolExecutor(max_workers=len(available)) as pool:
+                    list(pool.map(_ping, available))
+
+            return jsonify({"contexts": available})
+        except Exception as e:
+            logger.error(f"admin API error discovering contexts: {e}")
             return jsonify({"error": str(e)}), 500
 
     @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["POST"])
