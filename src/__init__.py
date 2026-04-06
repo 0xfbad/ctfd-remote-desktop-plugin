@@ -121,6 +121,12 @@ def load(app):
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
     register_admin_plugin_menu_bar("Remote Desktop", "/remote-desktop/admin")
 
+    # register config template in the DictLoader so {% include %} on
+    # /admin/config can find it without hardcoding the plugin folder name
+    config_tpl = os.path.join(os.path.dirname(__file__), "templates", "remote_desktop_config.html")
+    with open(config_tpl) as f:
+        app.overridden_templates["remote_desktop_config.html"] = f.read()
+
     # scheduler, atexit, and signal handlers must only run when serving HTTP.
     # during CLI commands (flask db upgrade, etc.) the scheduler threads are
     # non-daemon and keep the process alive after the command finishes.
