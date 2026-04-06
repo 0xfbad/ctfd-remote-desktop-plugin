@@ -244,7 +244,11 @@
         <div class="no-session-screen" id="no-session-screen">
             <i class="fas fa-desktop" style="font-size: 64px; margin-bottom: 20px; color: #6c757d;"></i>
             <h3>No Active Session</h3>
-            <p>Click Start to launch a remote desktop session</p>
+            <p id="session-prompt">Click Start to launch a remote desktop session</p>
+            <div id="session-error" style="display:none; margin-top: 16px; padding: 12px 20px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; text-align: center;">
+                <p id="session-error-msg" style="color: #721c24; margin: 0;"></p>
+                <p id="session-error-detail" style="color: #856404; font-size: 12px; margin: 6px 0 0 0;"></p>
+            </div>
         </div>
         <div id="status-message" class="status-message hidden"></div>
     </div>
@@ -286,6 +290,24 @@ function showStatusMessage(message, timeout = 3000) {
             statusDiv.classList.add('hidden');
         }, timeout);
     }
+}
+
+function showSessionError(detail) {
+    const el = document.getElementById('session-error');
+    const msgEl = document.getElementById('session-error-msg');
+    const detailEl = document.getElementById('session-error-detail');
+    if (!el) return;
+    msgEl.textContent = 'Something went wrong on our end, please try again later or contact an administrator.';
+    const d = new Date();
+    const ts = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+    const user = window.init.userName || 'unknown';
+    detailEl.textContent = user + ' at ' + ts + (detail ? ': ' + detail : '');
+    el.style.display = '';
+}
+
+function hideSessionError() {
+    const el = document.getElementById('session-error');
+    if (el) el.style.display = 'none';
 }
 
 function formatTime(seconds) {
@@ -340,7 +362,7 @@ function checkStatus() {
             startBtn.disabled = false;
             startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
         }
-        showStatusMessage('Session is taking longer than expected. Please try again.', 0);
+        showSessionError('session timed out');
         return;
     }
 
@@ -376,7 +398,7 @@ function checkStatus() {
                 startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
             }
             lastFailedHostname = '';
-            showStatusMessage('Something went wrong on our end. Please try again in a moment.', 0);
+            showSessionError(errorMsg);
         } else {
             const message = data.message || 'Creating container...';
 
@@ -429,6 +451,7 @@ function startSession() {
     .then(response => response.json().then(data => ({ok: response.ok, data})))
     .then(({ok, data}) => {
         if (ok && data.status === 'creating') {
+            hideSessionError();
             showStatusMessage('Creating container...', 0);
             pollCreationStatus();
         } else {
@@ -436,7 +459,7 @@ function startSession() {
                 startBtn.disabled = false;
                 startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
             }
-            showStatusMessage(data.error || 'Something went wrong on our end. Please try again in a moment.', 0);
+            showSessionError(data.error);
         }
     })
     .catch(error => {
@@ -445,7 +468,7 @@ function startSession() {
             startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
         }
         console.error('Create session error:', error);
-        showStatusMessage('Something went wrong on our end. Please try again in a moment.', 0);
+        showSessionError('request failed');
     });
 }
 

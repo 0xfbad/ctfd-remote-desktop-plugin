@@ -256,7 +256,7 @@ class ContainerManager:
             return {"success": False, "error": "Session already exists"}
 
         if not self.orchestrator.has_healthy_context():
-            return {"success": False, "error": "No servers are available right now. Please try again later or contact an administrator."}
+            return {"success": False, "error": "no healthy contexts available"}
 
         with self.lock:
             self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
