@@ -76,7 +76,7 @@ If you're only using remote contexts and don't need a local daemon you can skip 
 
 VNC sessions are proxied through nginx so users never connect directly to container ports. This means remote Docker hosts don't need to be publicly accessible and everything goes through your existing HTTPS setup.
 
-The setup script adds the required nginx location blocks automatically. If your nginx uses a custom config file (like `https.conf` instead of `http.conf`), you may need to add them manually. The blocks needed are:
+The setup script adds the required nginx location blocks to both `conf/nginx/http.conf` and `conf/nginx/https.conf` if they exist. If you use a different config file or have a custom nginx setup, add the blocks manually. CTFd's default ships with `http.conf` (plain HTTP), but production deployments typically use a separate `https.conf` with TLS termination. Make sure the blocks go into whichever config nginx is actually loading (check the volume mount in docker-compose.yml). The blocks needed are:
 
 ```nginx
 # inside your server block, before location /

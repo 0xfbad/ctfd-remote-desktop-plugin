@@ -131,6 +131,7 @@ else
 
     # VNC proxy with auth_request
     location ~ ^/remote-desktop/vnc/(?<vnc_user_id>\d+)/(?<vnc_path>.+)$ {
+      resolver 127.0.0.11 valid=30s;
       auth_request /remote-desktop/vnc/auth;
       auth_request_set $vnc_host $upstream_http_x_vnc_host;
       auth_request_set $vnc_port $upstream_http_x_vnc_port;
@@ -146,6 +147,8 @@ else
       proxy_read_timeout 86400s;
       proxy_send_timeout 86400s;
       proxy_buffering off;
+      proxy_cache off;
+      add_header Cache-Control "no-store";
     }
 
     # internal auth subrequest for VNC proxy
