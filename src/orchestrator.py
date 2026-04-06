@@ -75,6 +75,10 @@ class Orchestrator:
         healthy_count = sum(1 for h in new_health.values() if h)
         logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
 
+    def has_healthy_context(self):
+        with self.lock:
+            return any(self.health.values())
+
     def get_next_context(self):
         with self.lock:
             return self._pick_best_context()
