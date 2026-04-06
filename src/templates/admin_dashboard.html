@@ -664,7 +664,7 @@
 
 			const row = `
 				<tr>
-					<td><strong>${escapeHtml(container.username)}</strong></td>
+					<td class="log-user"><a href="/admin/users/${parseInt(container.user_id)}">${escapeHtml(container.username)}</a></td>
 					<td><code>${escapeHtml(container.container_name)}</code></td>
 					<td>${escapeHtml(container.docker_context || '')}</td>
 					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
@@ -1081,8 +1081,8 @@
 			}
 			tbody.innerHTML = users.map(u => `
 				<tr>
-					<td><strong>${escapeHtml(u.username)}</strong></td>
-					<td><a href="#" onclick="showCmdHistory(${u.user_id}, ${JSON.stringify(u.username)}); return false;">${u.total_commands.toLocaleString()}</a></td>
+					<td class="log-user"><a href="/admin/users/${parseInt(u.user_id)}">${escapeHtml(u.username)}</a></td>
+					<td><a href="#" class="cmd-history-link" data-userid="${parseInt(u.user_id)}" data-username="${escapeHtml(u.username)}">${u.total_commands.toLocaleString()}</a></td>
 					<td>${u.error_rate}%</td>
 					<td>${u.unique_tools}</td>
 				</tr>
@@ -1212,6 +1212,13 @@
 		initCharts();
 		refreshStats();
 		startAutoRefresh();
+
+		document.getElementById('cmd-users-table').addEventListener('click', function(e) {
+			const link = e.target.closest('.cmd-history-link');
+			if (!link) return;
+			e.preventDefault();
+			showCmdHistory(parseInt(link.dataset.userid), link.dataset.username);
+		});
 	});
 
 	window.addEventListener('beforeunload', function() {
