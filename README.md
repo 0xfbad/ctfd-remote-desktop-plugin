@@ -48,12 +48,25 @@ CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container.
 stat -c '%g' /var/run/docker.sock
 ```
 
-2. Open up file permissions so the container user can read them
+2. Fix file permissions. The `.ssh` directory is bind-mounted read-only into the CTFd container, but the container runs as a different uid (ctfd). Paramiko (the Docker SDK's SSH transport) needs to read the private key but doesn't enforce Unix permissions the way openssh does. OpenSSH on the other hand refuses any key looser than 600. The setup script handles this by keeping the standard key names (`id_ed25519`) at 644 for the container and creating a 600 `_cli` copy for command-line SSH
 
 ```bash
 chmod 755 ~/.docker ~/.ssh
-chmod 644 ~/.ssh/known_hosts ~/.ssh/id_ed25519  # or whatever your key is
+chmod 644 ~/.ssh/known_hosts
+
+# for each private key: original at 644 (container), copy at 600 (CLI)
+cp ~/.ssh/id_ed25519 ~/.ssh/id_ed25519_cli
+chmod 600 ~/.ssh/id_ed25519_cli
+chmod 644 ~/.ssh/id_ed25519
 ```
+
+For CLI SSH from the host, use the config that points at the 600 copies:
+
+```bash
+ssh -F ~/.ssh/cli_config user@remote-host
+```
+
+Or add an alias to your shell rc: `alias ssh='ssh -F ~/.ssh/cli_config'`
 
 3. Add these to your CTFd service in `docker-compose.yml`, replacing `DOCKER_GID` with the number from step 1
 

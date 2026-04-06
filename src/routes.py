@@ -867,28 +867,46 @@ def create_routes(container_manager, orchestrator):
 
         try:
             enabled = get_setting("command_logging_enabled")
-            total = (
-                CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id)
-                .filter(Users.hidden == False)  # noqa: E712
-                .count()
+            base = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(
+                Users.hidden == False  # noqa: E712
             )
-            unique_users = (
-                (
-                    db.session.query(CommandLogModel.user_id)
+            total = base.count()
+
+            unique_commands = 0
+            unique_tools = 0
+            if total:
+                unique_commands = (
+                    db.session.query(CommandLogModel.command)
                     .join(Users, CommandLogModel.user_id == Users.id)
                     .filter(Users.hidden == False)  # noqa: E712
                     .distinct()
                     .count()
                 )
-                if total
-                else 0
-            )
+
+                rows = (
+                    db.session.query(CommandLogModel.command)
+                    .join(Users, CommandLogModel.user_id == Users.id)
+                    .filter(Users.hidden == False)  # noqa: E712
+                    .distinct()
+                    .all()
+                )
+                tools = set()
+                for (cmd,) in rows:
+                    parts = cmd.strip().split()
+                    if not parts:
+                        continue
+                    tool = parts[0]
+                    if tool == "sudo" and len(parts) > 1:
+                        tool = parts[1]
+                    tools.add(tool)
+                unique_tools = len(tools)
 
             return jsonify(
                 {
                     "enabled": enabled,
                     "total_commands": total,
-                    "unique_users": unique_users,
+                    "unique_tools": unique_tools,
+                    "unique_commands": unique_commands,
                 }
             )
         except Exception as e:

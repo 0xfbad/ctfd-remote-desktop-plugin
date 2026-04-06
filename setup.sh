@@ -111,14 +111,46 @@ if [ -f "$HOME/.ssh/known_hosts" ]; then
     fix_perms "$HOME/.ssh/known_hosts" "644" "~/.ssh/known_hosts"
 fi
 
-# find and fix ssh private keys
+# ssh keys: the .ssh dir is bind-mounted into the ctfd container which runs
+# as a different uid. paramiko (used by the docker SDK for ssh tunnels) needs
+# to read the key but doesn't enforce permissions. openssh does enforce 600.
+# solution: keep the standard key names at 644 so paramiko can read them,
+# and make a 600 copy for CLI ssh usage.
 for key in "$HOME/.ssh/id_"*; do
     [ -f "$key" ] || continue
     case "$key" in
-        *.pub) continue ;;
+        *.pub|*_cli) continue ;;
     esac
-    fix_perms "$key" "644" "$key"
+
+    cli_copy="${key}_cli"
+    if [ ! -f "$cli_copy" ]; then
+        cp "$key" "$cli_copy"
+        chmod 600 "$cli_copy"
+        added "$cli_copy (600, for CLI ssh)"
+    else
+        skip "$cli_copy"
+    fi
+
+    fix_perms "$key" "644" "$key (container-readable)"
 done
+
+# ssh config for CLI usage that points at the 600 copies. kept outside the
+# standard config path so the container user doesn't try to read it
+CLI_CONFIG="$HOME/.ssh/cli_config"
+if [ ! -f "$CLI_CONFIG" ]; then
+    {
+        echo "Host *"
+        for key in "$HOME/.ssh/id_"*_cli; do
+            [ -f "$key" ] || continue
+            echo "    IdentityFile $key"
+        done
+        echo "    StrictHostKeyChecking no"
+    } > "$CLI_CONFIG"
+    chmod 600 "$CLI_CONFIG"
+    added "~/.ssh/cli_config (use: ssh -F ~/.ssh/cli_config)"
+else
+    skip "~/.ssh/cli_config"
+fi
 
 # nginx config
 echo ""

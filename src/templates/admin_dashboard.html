@@ -339,7 +339,7 @@
 		</div>
 
 		<div class="row">
-			<div class="col-md-6">
+			<div class="col-md-4">
 				<div class="card stat-card bg-light">
 					<div class="card-body">
 						<h4 id="stat-total-commands" class="mb-0">0</h4>
@@ -347,11 +347,34 @@
 					</div>
 				</div>
 			</div>
-			<div class="col-md-6">
+			<div class="col-md-4">
 				<div class="card stat-card bg-light">
 					<div class="card-body">
-						<h4 id="stat-unique-cmd-users" class="mb-0">0</h4>
-						<small class="text-muted">Users with Logs</small>
+						<h4 id="stat-unique-tools" class="mb-0">0</h4>
+						<small class="text-muted">Unique Tools</small>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="card stat-card bg-light">
+					<div class="card-body">
+						<h4 id="stat-unique-commands" class="mb-0">0</h4>
+						<small class="text-muted">Unique Commands</small>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-12">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Command Feed</h3>
+					</div>
+					<div class="card-body p-0">
+						<div class="event-feed" id="cmd-feed">
+							<div class="text-center text-muted py-3" id="cmd-feed-empty">No commands yet</div>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -374,11 +397,9 @@
 								<thead>
 									<tr>
 										<th><b>User</b></th>
-										<th><b>Commands</b></th>
-										<th><b>Errors</b></th>
+										<th><b>Total</b></th>
 										<th><b>Error Rate</b></th>
 										<th><b>Unique Tools</b></th>
-										<th><b>History</b></th>
 									</tr>
 								</thead>
 								<tbody id="cmd-users-table"></tbody>
@@ -390,7 +411,7 @@
 		</div>
 
 		<div class="row">
-			<div class="col-md-12">
+			<div class="col-md-6">
 				<div class="card">
 					<div class="card-header">
 						<h3 class="card-title">Top Tools</h3>
@@ -405,10 +426,7 @@
 					</div>
 				</div>
 			</div>
-		</div>
-
-		<div class="row">
-			<div class="col-md-12">
+			<div class="col-md-6">
 				<div class="card">
 					<div class="card-header">
 						<h3 class="card-title">Command Activity</h3>
@@ -930,6 +948,47 @@
 
 	// command log stats
 
+	let cmdFeedLastTs = 0;
+	let cmdFeedUserMap = {};
+
+	function refreshCommandFeed() {
+		fetch('/remote-desktop/admin/api/command-logs?limit=50', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			const feed = document.getElementById('cmd-feed');
+			const empty = document.getElementById('cmd-feed-empty');
+			const logs = data.logs || [];
+
+			if (!logs.length) return;
+			if (empty) empty.remove();
+
+			// build user map from per-user stats if available
+			fetch('/remote-desktop/admin/api/command-logs/stats/per-user?period=all', {
+				headers: { 'X-Requested-With': 'XMLHttpRequest' },
+				credentials: 'same-origin'
+			})
+			.then(r => r.json())
+			.then(userData => {
+				(userData.users || []).forEach(u => { cmdFeedUserMap[u.user_id] = u.username; });
+
+				// newest first, build the feed
+				feed.innerHTML = logs.map(log => {
+					const username = cmdFeedUserMap[log.user_id] || 'User ' + log.user_id;
+					const exitClass = log.exit_code === 0 ? 'event-info' :
+									  log.exit_code !== null ? 'event-error' : 'event-info';
+					return `<div class="event-item">
+						<span class="event-time">${escapeHtml(formatTimestamp(log.timestamp))}</span>
+						<span class="event-badge ${exitClass}">${log.exit_code !== null ? log.exit_code : '-'}</span>
+						<span class="event-message"><span class="event-username">${escapeHtml(username)}</span> <code>${escapeHtml(log.command)}</code></span>
+					</div>`;
+				}).join('');
+			});
+		});
+	}
+
 	let cmdHistoryUserId = null;
 	let cmdHistoryOffset = 0;
 	const cmdHistoryLimit = 100;
@@ -946,10 +1005,22 @@
 				section.style.display = 'none';
 				return;
 			}
+			const wasHidden = section.style.display === 'none';
 			section.style.display = '';
 			document.getElementById('stat-total-commands').textContent = data.total_commands.toLocaleString();
-			document.getElementById('stat-unique-cmd-users').textContent = data.unique_users;
+			document.getElementById('stat-unique-tools').textContent = data.unique_tools.toLocaleString();
+			document.getElementById('stat-unique-commands').textContent = data.unique_commands.toLocaleString();
+
+			// echarts can't size on hidden elements, resize after first show
+			if (wasHidden) {
+				setTimeout(function() {
+					if (topToolsChart) topToolsChart.resize();
+					if (cmdActivityChart) cmdActivityChart.resize();
+				}, 50);
+			}
 		});
+
+		refreshCommandFeed();
 
 		const first = document.querySelector('.rd-stats-period');
 		const period = first ? first.value : 'week';
@@ -963,17 +1034,15 @@
 			const tbody = document.getElementById('cmd-users-table');
 			const users = data.users || [];
 			if (!users.length) {
-				tbody.innerHTML = '<tr><td colspan="6" class="text-center">No command data</td></tr>';
+				tbody.innerHTML = '<tr><td colspan="4" class="text-center">No command data</td></tr>';
 				return;
 			}
 			tbody.innerHTML = users.map(u => `
 				<tr>
 					<td><strong>${escapeHtml(u.username)}</strong></td>
-					<td>${u.total_commands.toLocaleString()}</td>
-					<td>${u.error_count}</td>
+					<td><a href="#" onclick="showCmdHistory(${u.user_id}, '${escapeHtml(u.username)}'); return false;">${u.total_commands.toLocaleString()}</a></td>
 					<td>${u.error_rate}%</td>
 					<td>${u.unique_tools}</td>
-					<td><button class="btn btn-sm btn-outline-primary" onclick="showCmdHistory(${u.user_id}, '${escapeHtml(u.username)}')">View</button></td>
 				</tr>
 			`).join('');
 		});
