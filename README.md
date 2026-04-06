@@ -29,7 +29,22 @@ CTFd picks up plugins on startup so you'll need to restart after cloning
 
 ### Docker access
 
-The CTFd container needs access to Docker, both for the local socket and for remote hosts over SSH. Add these to your CTFd service in `docker-compose.yml`
+CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container. Everything needs to be mounted to paths it can read, not under `/root`.
+
+1. Get your docker group GID
+
+```bash
+stat -c '%g' /var/run/docker.sock
+```
+
+2. Open up file permissions so the container user can read them
+
+```bash
+chmod 755 ~/.docker ~/.ssh
+chmod 644 ~/.ssh/known_hosts ~/.ssh/id_ed25519  # or whatever your key is
+```
+
+3. Add these to your CTFd service in `docker-compose.yml`, replacing `DOCKER_GID` with the number from step 1
 
 ```yaml
 services:
@@ -38,17 +53,13 @@ services:
       - "DOCKER_GID"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.ssh:/root/.ssh:ro
+      - ~/.ssh:/home/ctfd/.ssh:ro
       - ~/.docker:/home/ctfd/.docker:ro
 ```
 
-Replace `DOCKER_GID` with the GID of the docker group on the host, you can find it with `stat -c '%g' /var/run/docker.sock`. CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container so without `group_add` you'll get `PermissionError` when the plugin tries to talk to the socket. The docker config must be mounted to `/home/ctfd/.docker` (not `/root/.docker`) because `/root` is owned by root with 700 permissions, making it inaccessible to the ctfd user
+The socket mount gives local Docker access, the SSH mount lets the Docker SDK tunnel to remote hosts, and the docker config mount has the context metadata files the plugin reads to find your configured contexts. Everything is mounted read-only.
 
-The docker socket lets the SDK talk to the local daemon, the SSH keys let it tunnel to remote hosts, and the docker config directory has the context metadata files the plugin reads to resolve endpoints. Docker stores context metadata in hash-named directories under `~/.docker/contexts/meta/`, the plugin scans all of them and matches by the `Name` field inside each `meta.json`. Make sure `~/.docker` on the host is at least 755 so the container user can traverse into it
-
-If you're only using remote contexts and don't need a local daemon you can skip the socket mount, but you still need the SSH and docker config mounts
-
-For remote contexts to work from inside the CTFd container you'll also want `network_mode: host` or equivalent network access so the SSH connections can reach your Docker hosts
+If you're only using remote contexts and don't need a local daemon you can skip the socket and `group_add`, but you still need the SSH and docker config mounts
 
 ### Docker contexts
 
