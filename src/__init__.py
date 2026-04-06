@@ -120,6 +120,7 @@ def load(app):
     app.register_blueprint(remote_desktop_bp)
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
 
+
     # register config template in the DictLoader so {% include %} on
     # /admin/config can find it without hardcoding the plugin folder name
     config_tpl = os.path.join(os.path.dirname(__file__), "templates", "remote_desktop_config.html")

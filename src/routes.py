@@ -513,6 +513,39 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting summary stats: {e}")
             return jsonify({"error": str(e)}), 500
 
+    # vnc proxy
+
+    @remote_desktop_bp.route("/remote-desktop/vnc/auth", methods=["GET"])
+    @authed_only
+    @bypass_csrf_protection
+    def vnc_auth():
+        """nginx auth_request subrequest endpoint. Returns 200 with backend
+        host/port in headers if the user is authorized, or 403/404 otherwise.
+        nginx captures the headers and uses them to proxy to the container."""
+        from .models import DesktopContainerInfoModel
+
+        user_id = request.headers.get("X-VNC-User-ID")
+        if not user_id:
+            return "", 400
+
+        user_id = int(user_id)
+        current_user = get_current_user()
+        if current_user.id != user_id and not is_admin():
+            return "", 403
+
+        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+        if not row:
+            return "", 404
+
+        check_hostname = container_manager.host_manager.get_check_hostname(row.docker_context)
+        if not check_hostname:
+            return "", 502
+
+        resp = Response("", 200)
+        resp.headers["X-VNC-Host"] = check_hostname
+        resp.headers["X-VNC-Port"] = str(row.novnc_port)
+        return resp
+
     # context crud
 
     @remote_desktop_bp.route("/remote-desktop/admin/api/contexts", methods=["GET"])

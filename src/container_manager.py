@@ -169,7 +169,7 @@ class ContainerManager:
             if not vnc_ready:
                 raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
 
-            vnc_url = f"http://{pub_hostname}:{novnc_port}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
+            vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
 
             max_extensions = self._get_setting("max_extensions")
 
