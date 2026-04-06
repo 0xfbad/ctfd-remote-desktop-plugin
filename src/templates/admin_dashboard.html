@@ -421,7 +421,7 @@
 	function peekVNC(userId) {
 		const container = activeContainers[userId];
 		if (!container || !container.vnc_url) {
-			CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'VNC unavailable', button: 'OK' });
+			CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'VNC unavailable', button: 'OK' });
 			return;
 		}
 
@@ -430,7 +430,7 @@
 		const vncWindow = window.open(container.vnc_url + '&viewonly=1', windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
 
 		if (!vncWindow) {
-			CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
+			CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
 		}
 	}
 
@@ -452,7 +452,7 @@
 		.then(response => response.json())
 		.then(data => {
 			if (data.success) refreshAll();
-			else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Kill failed', button: 'OK' });
+			else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Kill failed', button: 'OK' });
 		});
 	}
 
@@ -470,7 +470,7 @@
 		.then(response => response.json())
 		.then(data => {
 			if (data.success) refreshAll();
-			else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Extend failed', button: 'OK' });
+			else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Extend failed', button: 'OK' });
 		});
 	}
 
@@ -493,10 +493,10 @@
 		.then(response => response.json())
 		.then(data => {
 			if (data.success) {
-				CTFd.ui.ezal.ezAlert({ title: 'Success', body: `Killed ${data.killed} session(s)`, button: 'OK' });
+				CTFd.ui.ezq.ezAlert({ title: 'Success', body: `Killed ${data.killed} session(s)`, button: 'OK' });
 				refreshAll();
 			} else {
-				CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Purge failed', button: 'OK' });
+				CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Purge failed', button: 'OK' });
 			}
 			btn.disabled = false;
 		})
