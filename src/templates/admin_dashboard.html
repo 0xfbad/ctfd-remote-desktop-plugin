@@ -1025,7 +1025,7 @@
 			tbody.innerHTML = users.map(u => `
 				<tr>
 					<td><strong>${escapeHtml(u.username)}</strong></td>
-					<td><a href="#" onclick="showCmdHistory(${u.user_id}, '${escapeHtml(u.username)}'); return false;">${u.total_commands.toLocaleString()}</a></td>
+					<td><a href="#" onclick="showCmdHistory(${u.user_id}, ${JSON.stringify(u.username)}); return false;">${u.total_commands.toLocaleString()}</a></td>
 					<td>${u.error_rate}%</td>
 					<td>${u.unique_tools}</td>
 				</tr>
