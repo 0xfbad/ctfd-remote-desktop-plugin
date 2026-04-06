@@ -77,11 +77,13 @@
 
 <hr class="mt-4">
 
+<div id="rd-docker-alert" style="display:none;"></div>
+
 <div class="d-flex justify-content-between align-items-center mb-3">
-    <h5 class="mb-0">Docker Contexts <span class="cfg-help" data-tip="Each context is a Docker host that can run desktop sessions. Add multiple contexts to spread load across servers. Sessions are distributed by weight.">?</span></h5>
+    <h5 class="mb-0">Docker Contexts <span class="cfg-help" data-tip="Each context is a Docker host that can run desktop sessions. Import contexts from your Docker configuration to spread load across servers. Sessions are distributed by weight.">?</span></h5>
     <div>
         <button type="button" class="btn btn-sm btn-outline-secondary" id="rd-reload-contexts-btn">Reload</button>
-        <button type="button" class="btn btn-sm btn-outline-primary" id="rd-add-context-btn">Add Context</button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="rd-import-contexts-btn">Import Contexts</button>
     </div>
 </div>
 <div class="table-responsive">
@@ -101,41 +103,26 @@
     </table>
 </div>
 
-<div class="modal fade" id="rdAddContextModal" tabindex="-1">
-    <div class="modal-dialog">
+<div class="modal fade" id="rdImportContextsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Add Docker Context</h5>
+                <h5 class="modal-title">Import Docker Contexts</h5>
                 <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
             </div>
             <div class="modal-body">
-                <div class="form-group">
-                    <label>Context Name</label>
-                    <input type="text" class="form-control" id="rd-add-ctx-name" placeholder="worker1">
-                    <small class="form-text text-muted">Matches a docker context name, or used as a label when hostname is set</small>
+                <p class="text-muted small mb-3">Docker contexts detected from <code>~/.docker/contexts</code> on this host. Set the public hostname for each context you want to use, this is the address users connect to for VNC sessions. You can adjust weight and other settings after importing.</p>
+                <div id="rd-discover-loading" class="text-center py-3">
+                    <i class="fas fa-spinner fa-spin"></i> Scanning for contexts...
                 </div>
-                <div class="form-group">
-                    <label>Hostname (SSH)</label>
-                    <input type="text" class="form-control" id="rd-add-ctx-hostname" placeholder="deploy@host.example.com">
-                    <small class="form-text text-muted">SSH target, optional if a matching docker context exists on the host</small>
-                </div>
-                <div class="form-group">
-                    <label>Public Hostname</label>
-                    <input type="text" class="form-control" id="rd-add-ctx-pub-hostname" placeholder="host.example.com">
-                    <small class="form-text text-muted">What students see in VNC URLs</small>
-                </div>
-                <div class="form-group">
-                    <label>Weight</label>
-                    <input type="number" class="form-control" id="rd-add-ctx-weight" value="1" min="1">
-                </div>
-                <div class="form-check">
-                    <input type="checkbox" class="form-check-input" id="rd-add-ctx-enabled" checked>
-                    <label class="form-check-label" for="rd-add-ctx-enabled">Enabled</label>
+                <div id="rd-discover-list" style="display:none;"></div>
+                <div id="rd-discover-empty" style="display:none;" class="text-center text-muted py-3">
+                    No new Docker contexts found on this host
+                    <br><small>Make sure <code>~/.docker</code> is mounted and contexts are created with <code>docker context create</code></small>
                 </div>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" id="rd-add-ctx-submit">Add</button>
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
             </div>
         </div>
     </div>
@@ -157,14 +144,17 @@
                 <div class="form-group">
                     <label>Hostname (SSH)</label>
                     <input type="text" class="form-control" id="rd-edit-ctx-hostname">
+                    <small class="form-text text-muted">SSH target for remote hosts, leave blank if a matching docker context exists on the host</small>
                 </div>
                 <div class="form-group">
                     <label>Public Hostname</label>
                     <input type="text" class="form-control" id="rd-edit-ctx-pub-hostname">
+                    <small class="form-text text-muted">Address users use to connect to VNC sessions on this host</small>
                 </div>
                 <div class="form-group">
                     <label>Weight</label>
                     <input type="number" class="form-control" id="rd-edit-ctx-weight" min="1">
+                    <small class="form-text text-muted">Higher weight means more sessions are scheduled to this context</small>
                 </div>
                 <div class="form-check">
                     <input type="checkbox" class="form-check-input" id="rd-edit-ctx-enabled">
@@ -293,9 +283,9 @@
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) {
-                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Settings saved', button: 'OK' });
+                CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Settings saved', button: 'OK' });
             } else {
-                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Save failed', button: 'OK' });
+                CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Save failed', button: 'OK' });
             }
         })
         .catch(function(err) { console.error('Error saving RD settings:', err); });
@@ -331,8 +321,25 @@
     function loadContexts() {
         rdFetch('/remote-desktop/admin/api/contexts')
             .then(function(r) { return r.json(); })
-            .then(function(data) { renderContexts(data.contexts || []); })
+            .then(function(data) {
+                renderContexts(data.contexts || []);
+                renderDockerAlert(data.docker_socket, data.contexts || []);
+            })
             .catch(function(err) { console.error('Error fetching contexts:', err); });
+    }
+
+    function renderDockerAlert(socketOk, contexts) {
+        var el = document.getElementById('rd-docker-alert');
+        el.style.display = '';
+
+        if (!socketOk) {
+            el.className = 'alert alert-danger mb-3';
+            el.innerHTML = 'Unable to reach the local Docker socket. Make sure <code>/var/run/docker.sock</code> is mounted and the container has the right group permissions (<code>group_add</code>). See the Docker access section in the README.';
+            return;
+        }
+
+        el.className = 'alert alert-success mb-3';
+        el.innerHTML = 'Local Docker socket is reachable.';
     }
 
     function renderContexts(contexts) {
@@ -378,18 +385,35 @@
             var id = btn.dataset.id;
             var name = btn.dataset.name;
 
-            if (action === 'test') testContext(id, name);
+            if (action === 'test') testContext(id, name, btn);
             else if (action === 'edit') showEditModal(btn);
             else if (action === 'delete') deleteContext(id, name);
         });
     }
 
-    function testContext(id, name) {
+    function testContext(id, name, btn) {
+        var icon = btn.querySelector('i');
+        var origClass = icon.className;
+        icon.className = 'fas fa-spinner fa-spin';
+        icon.style.color = '#6c757d';
+        btn.disabled = true;
+
         rdFetch('/remote-desktop/admin/api/contexts/' + id + '/test')
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                if (data.success) CTFd.ui.ezal.ezAlert({ title: 'Success', body: name + ' is reachable', button: 'OK' });
-                else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Test failed', button: 'OK' });
+                if (data.success) {
+                    CTFd.ui.ezq.ezAlert({ title: 'Test Passed', body: name + ' is reachable and the configured image was found', button: 'OK' });
+                } else {
+                    CTFd.ui.ezq.ezAlert({ title: 'Test Failed', body: name + ': ' + (data.error || 'could not reach context'), button: 'OK' });
+                }
+            })
+            .catch(function() {
+                CTFd.ui.ezq.ezAlert({ title: 'Test Failed', body: name + ': request failed, check the logs for details', button: 'OK' });
+            })
+            .finally(function() {
+                icon.className = origClass;
+                icon.style.color = '#28a745';
+                btn.disabled = false;
             });
     }
 
@@ -400,6 +424,8 @@
         document.getElementById('rd-edit-ctx-pub-hostname').value = btn.dataset.pub;
         document.getElementById('rd-edit-ctx-weight').value = btn.dataset.weight;
         document.getElementById('rd-edit-ctx-enabled').checked = btn.dataset.enabled === 'true';
+        var hostnameField = document.getElementById('rd-edit-ctx-hostname').closest('.form-group');
+        hostnameField.style.display = btn.dataset.hostname ? '' : 'none';
         $('#rdEditContextModal').modal('show');
     }
 
@@ -412,40 +438,99 @@
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) loadHosts();
-            else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
+            else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Delete failed', button: 'OK' });
         });
     }
 
-    document.getElementById('rd-add-context-btn').addEventListener('click', function() {
-        document.getElementById('rd-add-ctx-name').value = '';
-        document.getElementById('rd-add-ctx-hostname').value = '';
-        document.getElementById('rd-add-ctx-pub-hostname').value = '';
-        document.getElementById('rd-add-ctx-weight').value = '1';
-        document.getElementById('rd-add-ctx-enabled').checked = true;
-        $('#rdAddContextModal').modal('show');
-    });
+    function discoverContexts() {
+        var loading = document.getElementById('rd-discover-loading');
+        var list = document.getElementById('rd-discover-list');
+        var empty = document.getElementById('rd-discover-empty');
 
-    document.getElementById('rd-add-ctx-submit').addEventListener('click', function() {
-        var payload = {
-            context_name: document.getElementById('rd-add-ctx-name').value,
-            hostname: document.getElementById('rd-add-ctx-hostname').value || null,
-            pub_hostname: document.getElementById('rd-add-ctx-pub-hostname').value,
-            weight: parseInt(document.getElementById('rd-add-ctx-weight').value) || 1,
-            enabled: document.getElementById('rd-add-ctx-enabled').checked
-        };
-        if (!payload.context_name) { CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Context name is required', button: 'OK' }); return; }
-        if (!payload.pub_hostname) { CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }
+        loading.style.display = '';
+        list.style.display = 'none';
+        empty.style.display = 'none';
+
+        rdFetch('/remote-desktop/admin/api/contexts/discover')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                loading.style.display = 'none';
+                var contexts = data.contexts || [];
+
+                if (contexts.length === 0) {
+                    empty.style.display = '';
+                    return;
+                }
+
+                list.style.display = '';
+                list.innerHTML = contexts.map(function(ctx) {
+                    var statusBadge = ctx.reachable
+                        ? '<small class="text-success">connected</small>'
+                        : '<small class="text-warning">unreachable</small>';
+                    return '<div class="border rounded p-2 mb-2 d-flex align-items-center rd-discover-row">' +
+                        '<div class="flex-grow-1 mr-3">' +
+                            '<strong>' + escapeHtml(ctx.name) + '</strong>' +
+                            '<div><small class="text-muted">' + escapeHtml(ctx.endpoint) + '</small> ' + statusBadge + '</div>' +
+                        '</div>' +
+                        '<div class="d-flex align-items-center" style="gap: 8px;">' +
+                            '<input type="text" class="form-control form-control-sm rd-import-hostname" ' +
+                                'placeholder="Public hostname" value="' + escapeHtml(ctx.suggested_hostname) + '" ' +
+                                'data-name="' + escapeHtml(ctx.name) + '" style="width: 180px;">' +
+                            '<button class="btn btn-sm btn-primary rd-import-btn" ' +
+                                'data-name="' + escapeHtml(ctx.name) + '">Import</button>' +
+                        '</div>' +
+                    '</div>';
+                }).join('');
+
+                list.querySelectorAll('.rd-import-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var row = this.closest('.rd-discover-row');
+                        var pubHostname = row.querySelector('.rd-import-hostname').value.trim();
+                        if (!pubHostname) {
+                            CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' });
+                            return;
+                        }
+                        importContext(this.dataset.name, pubHostname, this);
+                    });
+                });
+            })
+            .catch(function(err) {
+                loading.style.display = 'none';
+                empty.style.display = '';
+                console.error('Error discovering contexts:', err);
+            });
+    }
+
+    function importContext(name, pubHostname, btn) {
+        btn.disabled = true;
+        btn.textContent = '...';
 
         rdFetch('/remote-desktop/admin/api/contexts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'CSRF-Token': window.init.csrfNonce },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({ context_name: name, pub_hostname: pubHostname, weight: 1, enabled: true })
         })
         .then(function(r) { return r.json(); })
         .then(function(data) {
-            if (data.success) { $('#rdAddContextModal').modal('hide'); loadHosts(); }
-            else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Add failed', button: 'OK' });
+            if (data.success) {
+                var row = btn.closest('.rd-discover-row');
+                row.style.opacity = '0.5';
+                row.querySelector('.rd-import-hostname').disabled = true;
+                btn.textContent = 'Imported';
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-success');
+                loadHosts();
+            } else {
+                btn.disabled = false;
+                btn.textContent = 'Import';
+                CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Import failed', button: 'OK' });
+            }
         });
+    }
+
+    document.getElementById('rd-import-contexts-btn').addEventListener('click', function() {
+        discoverContexts();
+        $('#rdImportContextsModal').modal('show');
     });
 
     document.getElementById('rd-edit-ctx-submit').addEventListener('click', function() {
@@ -456,7 +541,7 @@
             weight: parseInt(document.getElementById('rd-edit-ctx-weight').value) || 1,
             enabled: document.getElementById('rd-edit-ctx-enabled').checked
         };
-        if (!payload.pub_hostname) { CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }
+        if (!payload.pub_hostname) { CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }
 
         rdFetch('/remote-desktop/admin/api/contexts/' + id, {
             method: 'PUT',
@@ -466,7 +551,7 @@
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) { $('#rdEditContextModal').modal('hide'); loadHosts(); }
-            else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Update failed', button: 'OK' });
+            else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Update failed', button: 'OK' });
         });
     });
 
@@ -477,8 +562,8 @@
         })
         .then(function(r) { return r.json(); })
         .then(function(data) {
-            if (data.success) { CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Contexts reloaded', button: 'OK' }); loadHosts(); }
-            else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Reload failed', button: 'OK' });
+            if (data.success) { CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Contexts reloaded', button: 'OK' }); loadHosts(); }
+            else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Reload failed', button: 'OK' });
         });
     });
 
