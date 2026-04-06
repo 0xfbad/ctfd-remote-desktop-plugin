@@ -415,20 +415,9 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_top_users():
-        from .models import DesktopSessionHistoryModel
-
         try:
             period = request.args.get("period", "all")
-            query = DesktopSessionHistoryModel.query
-
-            if period == "week":
-                cutoff = time.time() - 7 * 86400
-                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
-            elif period == "month":
-                cutoff = time.time() - 30 * 86400
-                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
-
-            rows = query.all()
+            rows = _session_query(period).all()
 
             user_stats = defaultdict(lambda: {"total_duration": 0.0, "session_count": 0, "username": ""})
             for row in rows:
@@ -447,20 +436,9 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_usage():
-        from .models import DesktopSessionHistoryModel
-
         try:
             period = request.args.get("period", "all")
-            query = DesktopSessionHistoryModel.query
-
-            if period == "week":
-                cutoff = time.time() - 7 * 86400
-                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
-            elif period == "month":
-                cutoff = time.time() - 30 * 86400
-                query = query.filter(DesktopSessionHistoryModel.started_at >= cutoff)
-
-            rows = query.all()
+            rows = _session_query(period).all()
 
             daily = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0})
             for row in rows:
@@ -478,10 +456,8 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_summary():
-        from .models import DesktopSessionHistoryModel
-
         try:
-            rows = DesktopSessionHistoryModel.query.all()
+            rows = _session_query().all()
             total_sessions = len(rows)
 
             if total_sessions == 0:
@@ -551,18 +527,9 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_per_host():
-        from .models import DesktopSessionHistoryModel
-
         try:
             period = request.args.get("period", "all")
-            query = DesktopSessionHistoryModel.query
-
-            if period == "week":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
-            elif period == "month":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
-
-            rows = query.all()
+            rows = _session_query(period).all()
 
             hosts = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0, "failures": 0})
             for row in rows:
@@ -582,18 +549,9 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_duration_dist():
-        from .models import DesktopSessionHistoryModel
-
         try:
             period = request.args.get("period", "all")
-            query = DesktopSessionHistoryModel.query
-
-            if period == "week":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
-            elif period == "month":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
-
-            rows = query.all()
+            rows = _session_query(period).all()
 
             # bucket durations into ranges
             buckets = {"<5m": 0, "5-15m": 0, "15-30m": 0, "30-60m": 0, "1-2h": 0, "2h+": 0}
@@ -622,18 +580,11 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_concurrent():
-        from .models import DesktopSessionHistoryModel, DesktopContainerInfoModel
+        from .models import DesktopContainerInfoModel
 
         try:
             period = request.args.get("period", "all")
-            query = DesktopSessionHistoryModel.query
-
-            if period == "week":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
-            elif period == "month":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
-
-            rows = query.all()
+            rows = _session_query(period).all()
 
             # also include currently active sessions
             active = DesktopContainerInfoModel.query.all()
@@ -671,18 +622,9 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_stats_extensions():
-        from .models import DesktopSessionHistoryModel
-
         try:
             period = request.args.get("period", "all")
-            query = DesktopSessionHistoryModel.query
-
-            if period == "week":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
-            elif period == "month":
-                query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
-
-            rows = query.all()
+            rows = _session_query(period).all()
 
             ext_counts = defaultdict(int)
             end_reasons = defaultdict(int)
@@ -722,12 +664,19 @@ def create_routes(container_manager, orchestrator):
             total = query.count()
             logs = query.order_by(CommandLogModel.timestamp.desc()).offset(offset).limit(limit).all()
 
+            user_map = {}
+            for log in logs:
+                if log.user_id not in user_map:
+                    u = Users.query.filter_by(id=log.user_id).first()
+                    user_map[log.user_id] = u.name if u else f"User {log.user_id}"
+
             return jsonify(
                 {
                     "logs": [
                         {
                             "id": log.id,
                             "user_id": log.user_id,
+                            "username": user_map.get(log.user_id, f"User {log.user_id}"),
                             "timestamp": log.timestamp,
                             "command": log.command,
                             "exit_code": log.exit_code,
@@ -743,6 +692,21 @@ def create_routes(container_manager, orchestrator):
         except Exception as e:
             logger.error(f"admin API error getting command logs: {e}")
             return jsonify({"error": str(e)}), 500
+
+    def _session_query(period=None):
+        """Base query for session history, excluding hidden users from aggregate stats."""
+        from .models import DesktopSessionHistoryModel
+
+        query = (
+            DesktopSessionHistoryModel.query.join(Users, DesktopSessionHistoryModel.user_id == Users.id).filter(
+                Users.hidden == False
+            )  # noqa: E712
+        )
+        if period == "week":
+            query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
+        elif period == "month":
+            query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
+        return query
 
     def _cmd_log_query(period=None):
         """Base query for command logs, excluding hidden users from aggregate stats."""

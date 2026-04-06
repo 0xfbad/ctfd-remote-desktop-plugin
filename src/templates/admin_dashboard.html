@@ -948,9 +948,6 @@
 
 	// command log stats
 
-	let cmdFeedLastTs = 0;
-	let cmdFeedUserMap = {};
-
 	function refreshCommandFeed() {
 		fetch('/remote-desktop/admin/api/command-logs?limit=50', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
@@ -965,27 +962,15 @@
 			if (!logs.length) return;
 			if (empty) empty.remove();
 
-			// build user map from per-user stats if available
-			fetch('/remote-desktop/admin/api/command-logs/stats/per-user?period=all', {
-				headers: { 'X-Requested-With': 'XMLHttpRequest' },
-				credentials: 'same-origin'
-			})
-			.then(r => r.json())
-			.then(userData => {
-				(userData.users || []).forEach(u => { cmdFeedUserMap[u.user_id] = u.username; });
-
-				// newest first, build the feed
-				feed.innerHTML = logs.map(log => {
-					const username = cmdFeedUserMap[log.user_id] || 'User ' + log.user_id;
-					const exitClass = log.exit_code === 0 ? 'event-info' :
-									  log.exit_code !== null ? 'event-error' : 'event-info';
-					return `<div class="event-item">
-						<span class="event-time">${escapeHtml(formatTimestamp(log.timestamp))}</span>
-						<span class="event-badge ${exitClass}">${log.exit_code !== null ? log.exit_code : '-'}</span>
-						<span class="event-message"><span class="event-username">${escapeHtml(username)}</span> <code>${escapeHtml(log.command)}</code></span>
-					</div>`;
-				}).join('');
-			});
+			feed.innerHTML = logs.map(log => {
+				const exitClass = log.exit_code === 0 ? 'event-info' :
+								  log.exit_code !== null ? 'event-error' : 'event-info';
+				return `<div class="event-item">
+					<span class="event-time">${escapeHtml(formatTimestamp(log.timestamp))}</span>
+					<span class="event-badge ${exitClass}" style="min-width:28px;padding:4px 6px;">${log.exit_code !== null ? log.exit_code : '-'}</span>
+					<span class="event-message"><span class="event-username">${escapeHtml(log.username)}</span> <code>${escapeHtml(log.command)}</code></span>
+				</div>`;
+			}).join('');
 		});
 	}
 
