@@ -12,88 +12,89 @@
         <div class="col-md-4">
             <h5>Container</h5>
             <div class="form-group">
-                <label>Docker Image</label>
+                <label>Docker Image <span class="cfg-help" data-tip="The Docker image used to create each desktop session. Change this if you have a custom image with specific tools or software pre-installed.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-docker_image">
             </div>
             <div class="form-group">
-                <label>Memory Limit</label>
+                <label>Memory Limit <span class="cfg-help" data-tip="Maximum RAM each desktop can use (e.g. 512m, 1g). Increase if users run memory-heavy applications, decrease to fit more desktops on one server.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-memory_limit">
             </div>
             <div class="form-group">
-                <label>SHM Size</label>
+                <label>SHM Size <span class="cfg-help" data-tip="Shared memory available to the desktop (e.g. 256m). Browsers and GUI apps use this for rendering. If users see crashes or blank screens, try increasing it.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-shm_size">
             </div>
             <div class="form-group">
-                <label>Resolution</label>
+                <label>Resolution <span class="cfg-help" data-tip="Screen resolution of the remote desktop (e.g. 1280x720). Higher values give more screen space but use more bandwidth and memory.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-resolution">
             </div>
             <div class="form-group">
-                <label>CPU Limit</label>
+                <label>CPU Limit <span class="cfg-help" data-tip="Maximum CPU cores each desktop can use (e.g. 1.0 = one core, 0.5 = half a core). Lower values let you run more desktops per server, higher values give users a snappier experience.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-cpu_limit">
             </div>
             <div class="form-group">
-                <label>Container Username Source</label>
+                <label>Username Source <span class="cfg-help" data-tip="Where to pull the Linux username inside the desktop. Normalized to lowercase letters and numbers, falls back to user{id} if the result is empty.">?</span></label>
                 <select class="form-control" id="rd-setting-username_source">
                     <option value="name">CTFd Display Name</option>
                     <option value="email">Email (before @)</option>
                 </select>
-                <small class="text-muted">Normalized to [a-z0-9], falls back to user{id} if empty</small>
             </div>
         </div>
         <div class="col-md-4">
             <h5>Session Timers</h5>
             <div class="form-group">
-                <label>Initial Duration (seconds)</label>
+                <label>Initial Duration (seconds) <span class="cfg-help" data-tip="How long a desktop session lasts before it expires. Users will see a countdown timer. Set higher for longer competitions, lower to save server resources.">?</span></label>
                 <input type="number" class="form-control" id="rd-setting-initial_duration">
             </div>
             <div class="form-group">
-                <label>Extension Duration (seconds)</label>
+                <label>Extension Duration (seconds) <span class="cfg-help" data-tip="How much extra time is added each time a user clicks Extend. Shorter values give users more control over how long they stay, longer values mean fewer clicks.">?</span></label>
                 <input type="number" class="form-control" id="rd-setting-extension_duration">
             </div>
             <div class="form-group">
-                <label>Max Extensions</label>
+                <label>Max Extensions <span class="cfg-help" data-tip="How many times a user can extend their session. Set to 0 for no extensions (hard time limit). Higher values let users keep their desktop alive longer.">?</span></label>
                 <input type="number" class="form-control" id="rd-setting-max_extensions">
             </div>
         </div>
         <div class="col-md-4">
             <h5>Timeouts</h5>
             <div class="form-group">
-                <label>VNC Ready Attempts</label>
+                <label>VNC Ready Attempts <span class="cfg-help" data-tip="How many times the server checks if a new desktop is ready before giving up. Increase if desktops fail to start on slower hardware.">?</span></label>
                 <input type="number" class="form-control" id="rd-setting-vnc_ready_attempts">
             </div>
             <div class="form-group">
-                <label>HTTP Request Timeout (seconds)</label>
+                <label>HTTP Timeout (seconds) <span class="cfg-help" data-tip="How long to wait for a response from Docker when creating or managing desktops. Increase if you see timeout errors on slow networks.">?</span></label>
                 <input type="number" class="form-control" id="rd-setting-http_request_timeout">
             </div>
             <div class="form-group">
-                <label>Cleanup Interval (seconds)</label>
+                <label>Cleanup Interval (seconds) <span class="cfg-help" data-tip="How often the server checks for expired sessions to clean up. Lower values free resources faster, higher values reduce server load.">?</span></label>
                 <input type="number" class="form-control" id="rd-setting-cleanup_interval">
             </div>
         </div>
     </div>
-    <button type="button" class="btn btn-md btn-primary float-right" id="rd-save-btn">Update</button>
+    <div class="clearfix">
+        <button type="button" class="btn btn-md btn-primary float-right" id="rd-save-btn">Update</button>
+    </div>
 </form>
 
-<hr class="mt-5">
+<hr class="mt-4">
 
 <div class="d-flex justify-content-between align-items-center mb-3">
-    <h5 class="mb-0">Docker Contexts</h5>
+    <h5 class="mb-0">Docker Contexts <span class="cfg-help" data-tip="Each context is a Docker host that can run desktop sessions. Add multiple contexts to spread load across servers. Sessions are distributed by weight.">?</span></h5>
     <div>
         <button type="button" class="btn btn-sm btn-outline-secondary" id="rd-reload-contexts-btn">Reload</button>
         <button type="button" class="btn btn-sm btn-outline-primary" id="rd-add-context-btn">Add Context</button>
     </div>
 </div>
 <div class="table-responsive">
-    <table class="table table-striped">
+    <table class="table table-striped border">
         <thead>
             <tr>
-                <th>Context Name</th>
-                <th>Public Hostname</th>
-                <th>Weight</th>
-                <th>Enabled</th>
-                <th>Status</th>
-                <th>Sessions</th>
-                <th>Actions</th>
+                <th><b>Context Name</b></th>
+                <th><b>Public Hostname</b></th>
+                <th><b>Weight</b></th>
+                <th><b>Enabled</b></th>
+                <th><b>Status</b></th>
+                <th><b>Sessions</b></th>
+                <th><b>Actions</b></th>
             </tr>
         </thead>
         <tbody id="rd-contexts-table"></tbody>
@@ -182,6 +183,61 @@
 .rd-ctx-actions { white-space: nowrap; display: flex; gap: 4px; }
 .rd-ctx-actions .btn { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: none; background: transparent; }
 .rd-ctx-actions .btn:hover { background-color: rgba(0,0,0,0.05); border-radius: 3px; }
+
+.cfg-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid #adb5bd;
+    color: #adb5bd;
+    background: none;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: help;
+    position: relative;
+    vertical-align: middle;
+    margin-left: 3px;
+    line-height: 1;
+}
+
+.cfg-help:hover {
+    border-color: #6c757d;
+    color: #6c757d;
+}
+
+.cfg-help:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #343a40;
+    color: #f8f9fa;
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+    width: 240px;
+    white-space: normal;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.cfg-help:hover::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: #343a40;
+    z-index: 1000;
+    pointer-events: none;
+}
 </style>
 
 <script>
