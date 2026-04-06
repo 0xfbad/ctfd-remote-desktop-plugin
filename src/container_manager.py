@@ -21,9 +21,10 @@ def _sanitize_username(raw):
 
 
 class ContainerManager:
-    def __init__(self, host_manager, orchestrator):
+    def __init__(self, host_manager, orchestrator, app=None):
         self.host_manager = host_manager
         self.orchestrator = orchestrator
+        self.app = app
         self.creation_status = {}
         self.lock = Lock()
         self._log_offsets = {}  # container_id -> lines already ingested
@@ -513,30 +514,31 @@ class ContainerManager:
         }
 
     def periodic_cleanup(self):
-        rows = DesktopContainerInfoModel.query.filter_by(timer_started=True).all()
+        with self.app.app_context():
+            rows = DesktopContainerInfoModel.query.filter_by(timer_started=True).all()
 
-        expired_user_ids = []
-        for row in rows:
-            if row.timer_start_time is None:
-                continue
-            elapsed = time.time() - row.timer_start_time
-            if row.timer_duration - elapsed <= 0:
-                expired_user_ids.append(row.user_id)
+            expired_user_ids = []
+            for row in rows:
+                if row.timer_start_time is None:
+                    continue
+                elapsed = time.time() - row.timer_start_time
+                if row.timer_duration - elapsed <= 0:
+                    expired_user_ids.append(row.user_id)
 
-        for user_id in expired_user_ids:
-            user = Users.query.filter_by(id=user_id).first()
-            username = user.name if user else f"User {user_id}"
+            for user_id in expired_user_ids:
+                user = Users.query.filter_by(id=user_id).first()
+                username = user.name if user else f"User {user_id}"
 
-            logger.info(f"auto-destroying expired session for user {user_id}")
+                logger.info(f"auto-destroying expired session for user {user_id}")
 
-            event_logger.log_event(
-                "session_expired", "session expired", user_id=user_id, username=username, level="warning"
-            )
+                event_logger.log_event(
+                    "session_expired", "session expired", user_id=user_id, username=username, level="warning"
+                )
 
-            try:
-                self.destroy_container(user_id, reason="expired", log_destruction=False)
-            except Exception as e:
-                logger.error(f"failed to destroy expired session for user {user_id}: {e}")
+                try:
+                    self.destroy_container(user_id, reason="expired", log_destruction=False)
+                except Exception as e:
+                    logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
     def destroy_all_containers_admin(self, admin_user):
         rows = DesktopContainerInfoModel.query.all()
@@ -641,16 +643,17 @@ class ContainerManager:
         self._log_offsets[row.container_id] = offset + parsed
 
     def collect_all_command_logs(self):
-        if not self._get_setting("command_logging_enabled"):
-            return
+        with self.app.app_context():
+            if not self._get_setting("command_logging_enabled"):
+                return
 
-        try:
-            rows = DesktopContainerInfoModel.query.all()
-        except Exception:
-            return
-
-        for row in rows:
             try:
-                self._collect_logs_for_container(row)
-            except Exception as e:
-                logger.debug(f"log collection failed for {row.container_name}: {e}")
+                rows = DesktopContainerInfoModel.query.all()
+            except Exception:
+                return
+
+            for row in rows:
+                try:
+                    self._collect_logs_for_container(row)
+                except Exception as e:
+                    logger.debug(f"log collection failed for {row.container_name}: {e}")

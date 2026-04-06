@@ -109,7 +109,7 @@ def load(app):
         orchestrator.load_from_db()
         _reconcile_containers(app, host_manager, orchestrator)
 
-    container_manager = ContainerManager(host_manager, orchestrator)
+    container_manager = ContainerManager(host_manager, orchestrator, app)
 
     app.desktop_host_manager = host_manager
     app.desktop_orchestrator = orchestrator
