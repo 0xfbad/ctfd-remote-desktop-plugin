@@ -18,11 +18,11 @@ Both checks also gate the `/api/create` endpoint so session creation can't be tr
 
 ### Installing the plugin
 
-Clone this repo into CTFd's plugin directory, the folder name doesn't matter but it needs to sit directly under `CTFd/CTFd/plugins/`
+Clone this repo into CTFd's plugin directory
 
 ```bash
 cd CTFd/CTFd/plugins
-git clone <repo-url> remote_desktop
+git clone <repo-url>
 ```
 
 CTFd picks up plugins on startup so you'll need to restart after cloning
@@ -57,7 +57,7 @@ docker context create server1 --docker "host=ssh://user@server1.example.com"
 docker context create server2 --docker "host=ssh://user@server2.example.com"
 ```
 
-Then add them through the admin dashboard at `/remote-desktop/admin`, each context needs a name matching what you created above, an optional SSH hostname (used as fallback if the context meta file is missing), a public hostname (what students see in their VNC URLs), and a weight for load balancing
+Then add them through the Docker Contexts section on the admin config page (`/admin/config` under the Remote Desktop tab), each context needs a name matching what you created above, an optional SSH hostname (used as fallback if the context meta file is missing), a public hostname (what students see in their VNC URLs), and a weight for load balancing
 
 ### Container image
 
@@ -133,7 +133,7 @@ VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:
 
 The root `__init__.py` is a thin entry point that re-exports `load` from the `src/` subpackage. All source modules, templates, and the Blueprint live under `src/`, keeping the repo root clean for config files and project metadata. Internal relative imports resolve within `src/` so nothing changes from CTFd's perspective, it still calls `load(app)` from the plugin root
 
-A `config.json` at the root registers the plugin in CTFd's admin Plugins dropdown, pointing at the `/remote-desktop/admin` route the Blueprint already serves
+A `config.json` at the root registers the plugin's settings panel inline on CTFd's admin config page (`/admin/config`)
 
 ## Components
 
@@ -165,7 +165,7 @@ Managed through the admin dashboard, each context has a name (matching a docker 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| remote_desktop_enabled | true | master switch, when false the user page shows a disabled message and session creation is blocked |
+| remote_desktop_enabled | false | master switch, when false the user page shows a disabled message and session creation is blocked |
 | docker_image | ctfd-remote-desktop:latest | container image to run for each desktop session |
 | memory_limit | 4g | max memory per container |
 | shm_size | 512m | shared memory size, needs to be large enough for the browser and desktop compositor |
