@@ -132,6 +132,62 @@
 		padding: 12px;
 		text-align: center;
 	}
+
+	.cfg-help {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		border: 1px solid #adb5bd;
+		color: #adb5bd;
+		background: none;
+		font-size: 10px;
+		font-weight: 600;
+		cursor: help;
+		position: relative;
+		vertical-align: middle;
+		margin-left: 3px;
+		margin-bottom: 2px;
+		line-height: 1;
+	}
+
+	.cfg-help:hover {
+		border-color: #6c757d;
+		color: #6c757d;
+	}
+
+	.cfg-help:hover::after {
+		content: attr(data-tip);
+		position: absolute;
+		bottom: calc(100% + 8px);
+		left: 50%;
+		transform: translateX(-50%);
+		background: #343a40;
+		color: #f8f9fa;
+		padding: 8px 10px;
+		border-radius: 4px;
+		font-size: 12px;
+		font-weight: 400;
+		line-height: 1.4;
+		width: 240px;
+		white-space: normal;
+		z-index: 1000;
+		pointer-events: none;
+	}
+
+	.cfg-help:hover::before {
+		content: '';
+		position: absolute;
+		bottom: calc(100% + 2px);
+		left: 50%;
+		transform: translateX(-50%);
+		border: 5px solid transparent;
+		border-top-color: #343a40;
+		z-index: 1000;
+		pointer-events: none;
+	}
 </style>
 
 <div class="jumbotron">
@@ -145,7 +201,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Active Sessions</h3>
+					<h3 class="card-title">Active Sessions <span class="cfg-help" data-tip="Currently running desktop containers. Kill or extend individual sessions, or purge all at once during incidents.">?</span></h3>
 					<button class="btn btn-danger" id="purge-all-btn" onclick="killAllSessions()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
@@ -177,7 +233,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Activity</h3>
+					<h3 class="card-title">Activity <span class="cfg-help" data-tip="Real-time event stream. Session lifecycle, admin actions, and host health changes as they happen. Useful for catching errors during a live competition.">?</span></h3>
 				</div>
 				<div class="card-body">
 					<div class="table-responsive log-wrap">
@@ -233,8 +289,8 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Top Users</h3>
-					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+					<h3 class="card-title">Top Users <span class="cfg-help" data-tip="Ranked by total desktop time. Identify power users or accounts consuming disproportionate resources.">?</span></h3>
+					<select id="period-top-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshTopUsers()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -251,8 +307,8 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Daily Usage</h3>
-					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+					<h3 class="card-title">Daily Usage <span class="cfg-help" data-tip="Sessions created per day. Spot usage trends and plan server capacity around peak competition days.">?</span></h3>
+					<select id="period-daily-usage" class="form-control form-control-sm" style="width: auto;" onchange="refreshDailyUsage()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -269,8 +325,8 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Concurrent Sessions</h3>
-					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+					<h3 class="card-title">Concurrent Sessions <span class="cfg-help" data-tip="How many desktops were running simultaneously. Use this to right-size your Docker hosts and catch capacity bottlenecks.">?</span></h3>
+					<select id="period-concurrent" class="form-control form-control-sm" style="width: auto;" onchange="refreshConcurrent()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -287,8 +343,8 @@
 		<div class="col-md-6">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Session Duration Distribution</h3>
-					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+					<h3 class="card-title">Session Duration Distribution <span class="cfg-help" data-tip="How long sessions typically last. If most are very short, your timeout may be too aggressive. If most hit the max, users probably need more time.">?</span></h3>
+					<select id="period-duration-dist" class="form-control form-control-sm" style="width: auto;" onchange="refreshDurationDist()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -302,8 +358,8 @@
 		<div class="col-md-6">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Session End Reasons</h3>
-					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+					<h3 class="card-title">Session End Reasons <span class="cfg-help" data-tip="Why sessions ended: expired, user-closed, or admin-killed. A high expired count means users may need longer timers or more extensions.">?</span></h3>
+					<select id="period-end-reasons" class="form-control form-control-sm" style="width: auto;" onchange="refreshEndReasons()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -320,8 +376,8 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Per-Host Breakdown</h3>
-					<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+					<h3 class="card-title">Per-Host Breakdown <span class="cfg-help" data-tip="Session distribution across Docker hosts. Check if load balancing weights are working or if one host is taking all the traffic.">?</span></h3>
+					<select id="period-per-host" class="form-control form-control-sm" style="width: auto;" onchange="refreshPerHost()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -373,7 +429,7 @@
 			<div class="col-md-12">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Command Feed</h3>
+						<h3 class="card-title">Command Feed <span class="cfg-help" data-tip="Recent shell commands from all sessions. Spot-check what participants are running or investigate suspicious activity.">?</span></h3>
 					</div>
 					<div class="card-body">
 						<div class="table-responsive log-wrap">
@@ -402,8 +458,8 @@
 			<div class="col-md-12">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Per-User Commands</h3>
-						<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<h3 class="card-title">Per-User Commands <span class="cfg-help" data-tip="Command counts and error rates by user. High error rates may indicate someone struggling or brute-forcing. Click the total to see their full history.">?</span></h3>
+						<select id="period-cmd-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdPerUser()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
@@ -432,8 +488,8 @@
 			<div class="col-md-6">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Top Tools</h3>
-						<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<h3 class="card-title">Top Tools <span class="cfg-help" data-tip="Most-used command line tools across all sessions. See what software participants actually reach for and whether your image has the right tooling.">?</span></h3>
+						<select id="period-cmd-tools" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdTools()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
@@ -447,8 +503,8 @@
 			<div class="col-md-6">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Command Activity</h3>
-						<select class="form-control form-control-sm rd-stats-period" style="width: auto;" onchange="syncPeriodAndRefresh(this)">
+						<h3 class="card-title">Command Activity <span class="cfg-help" data-tip="Command execution volume over time. Correlate spikes with competition events like hint releases or new challenge drops.">?</span></h3>
+						<select id="period-cmd-activity" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdActivity()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
@@ -809,19 +865,12 @@
 		return h + 'h ' + m + 'm';
 	}
 
-	function syncPeriodAndRefresh(source) {
-		document.querySelectorAll('.rd-stats-period').forEach(function(sel) {
-			if (sel !== source) sel.value = source.value;
-		});
-		refreshStats();
+	function getPeriod(id) {
+		const el = document.getElementById(id);
+		return el ? el.value : 'week';
 	}
 
-	function refreshStats() {
-		refreshCommandLogStats();
-
-		const first = document.querySelector('.rd-stats-period');
-		const period = first ? first.value : 'week';
-
+	function refreshSummaryStats() {
 		fetch('/remote-desktop/dashboard/api/stats/summary', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -832,7 +881,10 @@
 			document.getElementById('stat-avg-duration').textContent = formatDurationShort(data.avg_duration);
 			document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent;
 		});
+	}
 
+	function refreshTopUsers() {
+		const period = getPeriod('period-top-users');
 		fetch(`/remote-desktop/dashboard/api/stats/top-users?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -852,8 +904,8 @@
 					}
 				},
 				toolbox: { feature: { saveAsImage: {} } },
-				grid: { left: 100, right: 20, top: 30, bottom: 20 },
-				xAxis: { type: 'value', axisLabel: { formatter: v => formatDurationShort(v) } },
+				grid: { left: 100, right: 20, top: 30, bottom: 40 },
+				xAxis: { type: 'value', name: 'Time', nameLocation: 'middle', nameGap: 25, axisLabel: { formatter: v => formatDurationShort(v) } },
 				yAxis: { type: 'category', data: users.map(u => u.username) },
 				series: [{
 					type: 'bar',
@@ -862,7 +914,10 @@
 				}]
 			});
 		});
+	}
 
+	function refreshDailyUsage() {
+		const period = getPeriod('period-daily-usage');
 		fetch(`/remote-desktop/dashboard/api/stats/usage?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -884,9 +939,9 @@
 					{ type: 'inside' },
 					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
 				],
-				grid: { left: 50, right: 20, top: 30, bottom: 60 },
+				grid: { left: 60, right: 20, top: 30, bottom: 60 },
 				xAxis: { type: 'category', data: days.map(d => d.date), axisLabel: { rotate: 45 } },
-				yAxis: { type: 'value', minInterval: 1 },
+				yAxis: { type: 'value', name: 'Sessions', minInterval: 1 },
 				series: [{
 					type: 'line',
 					data: days.map(d => d.sessions),
@@ -896,7 +951,10 @@
 				}]
 			});
 		});
+	}
 
+	function refreshConcurrent() {
+		const period = getPeriod('period-concurrent');
 		fetch(`/remote-desktop/dashboard/api/stats/concurrent?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -912,9 +970,9 @@
 					{ type: 'inside' },
 					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
 				],
-				grid: { left: 50, right: 20, top: 30, bottom: 60 },
+				grid: { left: 60, right: 20, top: 30, bottom: 60 },
 				xAxis: { type: 'category', data: points.map(p => p.time), axisLabel: { rotate: 45 } },
-				yAxis: { type: 'value', minInterval: 1 },
+				yAxis: { type: 'value', name: 'Sessions', minInterval: 1 },
 				series: [{
 					type: 'line',
 					data: points.map(p => p.concurrent),
@@ -924,7 +982,10 @@
 				}]
 			});
 		});
+	}
 
+	function refreshDurationDist() {
+		const period = getPeriod('period-duration-dist');
 		fetch(`/remote-desktop/dashboard/api/stats/duration-distribution?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -936,9 +997,9 @@
 			durationDistChart.setOption({
 				tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
 				toolbox: { feature: { saveAsImage: {} } },
-				grid: { left: 50, right: 20, top: 30, bottom: 30 },
+				grid: { left: 60, right: 20, top: 30, bottom: 30 },
 				xAxis: { type: 'category', data: buckets.map(b => b.range) },
-				yAxis: { type: 'value', minInterval: 1 },
+				yAxis: { type: 'value', name: 'Sessions', minInterval: 1 },
 				series: [{
 					type: 'bar',
 					data: buckets.map(b => b.count),
@@ -946,7 +1007,10 @@
 				}]
 			});
 		});
+	}
 
+	function refreshEndReasons() {
+		const period = getPeriod('period-end-reasons');
 		fetch(`/remote-desktop/dashboard/api/stats/extensions?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -966,7 +1030,10 @@
 				}]
 			});
 		});
+	}
 
+	function refreshPerHost() {
+		const period = getPeriod('period-per-host');
 		fetch(`/remote-desktop/dashboard/api/stats/per-host?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -989,8 +1056,8 @@
 					}
 				},
 				toolbox: { feature: { saveAsImage: {} } },
-				grid: { left: 100, right: 20, top: 30, bottom: 20 },
-				xAxis: { type: 'value', minInterval: 1 },
+				grid: { left: 100, right: 20, top: 30, bottom: 40 },
+				xAxis: { type: 'value', name: 'Sessions', nameLocation: 'middle', nameGap: 25, minInterval: 1 },
 				yAxis: { type: 'category', data: hosts.map(h => h.host) },
 				series: [{
 					type: 'bar',
@@ -999,6 +1066,17 @@
 				}]
 			});
 		});
+	}
+
+	function refreshStats() {
+		refreshCommandLogStats();
+		refreshSummaryStats();
+		refreshTopUsers();
+		refreshDailyUsage();
+		refreshConcurrent();
+		refreshDurationDist();
+		refreshEndReasons();
+		refreshPerHost();
 	}
 
 	// command log stats
@@ -1035,7 +1113,7 @@
 	let cmdHistoryOffset = 0;
 	const cmdHistoryLimit = 100;
 
-	function refreshCommandLogStats() {
+	function refreshCmdSummary() {
 		fetch('/remote-desktop/dashboard/api/command-logs/stats/summary', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -1053,7 +1131,6 @@
 			document.getElementById('stat-unique-tools').textContent = data.unique_tools.toLocaleString();
 			document.getElementById('stat-unique-commands').textContent = data.unique_commands.toLocaleString();
 
-			// echarts can't size on hidden elements, resize after first show
 			if (wasHidden) {
 				setTimeout(function() {
 					if (topToolsChart) topToolsChart.resize();
@@ -1061,12 +1138,10 @@
 				}, 50);
 			}
 		});
+	}
 
-		refreshCommandFeed();
-
-		const first = document.querySelector('.rd-stats-period');
-		const period = first ? first.value : 'week';
-
+	function refreshCmdPerUser() {
+		const period = getPeriod('period-cmd-users');
 		fetch(`/remote-desktop/dashboard/api/command-logs/stats/per-user?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -1088,7 +1163,10 @@
 				</tr>
 			`).join('');
 		});
+	}
 
+	function refreshCmdTools() {
+		const period = getPeriod('period-cmd-tools');
 		fetch(`/remote-desktop/dashboard/api/command-logs/stats/tools?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -1109,8 +1187,8 @@
 					}
 				},
 				toolbox: { feature: { saveAsImage: {} } },
-				grid: { left: 120, right: 20, top: 30, bottom: 20 },
-				xAxis: { type: 'value' },
+				grid: { left: 120, right: 20, top: 30, bottom: 40 },
+				xAxis: { type: 'value', name: 'Uses', nameLocation: 'middle', nameGap: 25 },
 				yAxis: { type: 'category', data: tools.map(t => t.tool) },
 				series: [{
 					type: 'bar',
@@ -1119,7 +1197,10 @@
 				}]
 			});
 		});
+	}
 
+	function refreshCmdActivity() {
+		const period = getPeriod('period-cmd-activity');
 		fetch(`/remote-desktop/dashboard/api/command-logs/stats/activity?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
@@ -1135,9 +1216,9 @@
 					{ type: 'inside' },
 					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
 				],
-				grid: { left: 50, right: 20, top: 30, bottom: 60 },
+				grid: { left: 60, right: 20, top: 30, bottom: 60 },
 				xAxis: { type: 'category', data: points.map(p => p.time), axisLabel: { rotate: 45 } },
-				yAxis: { type: 'value', minInterval: 1 },
+				yAxis: { type: 'value', name: 'Commands', minInterval: 1 },
 				series: [{
 					type: 'line',
 					data: points.map(p => p.commands),
@@ -1147,6 +1228,14 @@
 				}]
 			});
 		});
+	}
+
+	function refreshCommandLogStats() {
+		refreshCmdSummary();
+		refreshCommandFeed();
+		refreshCmdPerUser();
+		refreshCmdTools();
+		refreshCmdActivity();
 	}
 
 	function showCmdHistory(userId, username) {
