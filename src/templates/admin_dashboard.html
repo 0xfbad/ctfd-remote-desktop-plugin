@@ -1,621 +1,611 @@
 {% extends "admin/base.html" %}
 
 {% block content %}
+
+<style>
+	.card {
+		margin-bottom: 20px;
+		border-radius: 8px;
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+	}
+
+	.card:hover {
+		cursor: default;
+	}
+
+	.card-header {
+		background-color: #f8f9fa;
+		border-bottom: 1px solid #dee2e6;
+		padding: 15px;
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+	}
+
+	.card-title {
+		margin: 0;
+		font-size: 18px;
+		font-weight: 600;
+	}
+
+	.card-body {
+		padding: 0;
+	}
+
+	.table-responsive {
+		margin: 0;
+	}
+
+	.table {
+		margin-bottom: 0;
+	}
+
+	.table tbody tr,
+	.table tbody tr:hover {
+		cursor: default;
+	}
+
+	.event-feed {
+		max-height: 400px;
+		overflow-y: auto;
+		padding: 15px;
+	}
+
+	.event-item {
+		padding: 10px;
+		border-bottom: 1px solid #eee;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.event-item:last-child {
+		border-bottom: none;
+	}
+
+	.event-item:hover {
+		background-color: #f8f9fa;
+	}
+
+	.event-badge {
+		display: inline-block;
+		padding: 4px 10px;
+		border-radius: 4px;
+		font-size: 12px;
+		font-weight: 600;
+		min-width: 100px;
+		text-align: center;
+	}
+
+	.event-info { background-color: #d4edda; color: #155724; }
+	.event-warning { background-color: #fff3cd; color: #856404; }
+	.event-error { background-color: #f8d7da; color: #721c24; }
+
+	.event-time {
+		font-size: 12px;
+		color: #6c757d;
+		min-width: 140px;
+		white-space: nowrap;
+	}
+
+	.event-message {
+		flex: 1;
+		word-wrap: break-word;
+	}
+
+	.event-username {
+		color: #007bff;
+		font-weight: bold;
+	}
+
+	.time-remaining {
+		font-family: monospace;
+		font-weight: 500;
+	}
+
+	.status-active { color: #28a745; font-weight: bold; }
+	.status-expired { color: #dc3545; font-weight: bold; }
+	.status-warning { color: #ffc107; font-weight: bold; }
+
+	.action-buttons {
+		white-space: nowrap;
+		display: flex;
+		gap: 4px;
+	}
+
+	.action-buttons .btn {
+		width: 32px;
+		height: 32px;
+		padding: 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border: none;
+		background: transparent;
+	}
+
+	.action-buttons .btn:hover {
+		background-color: rgba(0,0,0,0.05);
+		border-radius: 3px;
+	}
+
+	.icon-monitor { color: #6c757d; }
+	.icon-kill { color: #dc3545; }
+	.icon-extend { color: #ffc107; }
+
+	.chart-container {
+		width: 100%;
+		height: 300px;
+	}
+
+	.stat-card .card-body {
+		padding: 12px;
+		text-align: center;
+	}
+</style>
+
 <div class="jumbotron">
-    <div class="container">
-        <h1>Desktop Sessions</h1>
-    </div>
+	<div class="container">
+		<h1>Desktop Sessions</h1>
+	</div>
 </div>
 
 <div class="container">
-    <div class="row">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h3 class="card-title mb-0">Sessions</h3>
-                    <button class="btn btn-sm btn-outline-danger" id="kill-all-btn" style="display: none;" onclick="killAllSessions()">Kill All</button>
-                </div>
-                <div class="card-body">
-                    <div class="table-responsive">
-                        <table class="table table-striped">
-                            <thead>
-                                <tr>
-                                    <th>User</th>
-                                    <th>Container</th>
-                                    <th>Context</th>
-                                    <th>Time Remaining</th>
-                                    <th>Extends</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="containers-table">
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Sessions</h3>
+					<button class="btn btn-danger" id="purge-all-btn" onclick="killAllSessions()">
+						<i class="fas fa-trash"></i> Purge All
+					</button>
+				</div>
+				<div class="card-body">
+					<div class="table-responsive">
+						<table class="table table-striped">
+							<thead>
+								<tr>
+									<th>User</th>
+									<th>Container</th>
+									<th>Context</th>
+									<th>Time Remaining</th>
+									<th>Extends</th>
+									<th>Status</th>
+									<th>Actions</th>
+								</tr>
+							</thead>
+							<tbody id="containers-table">
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
 
-    <div class="row mt-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">Activity</h3>
-                </div>
-                <div class="card-body p-0">
-                    <div id="event-feed" class="event-feed">
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Activity</h3>
+				</div>
+				<div class="card-body p-0">
+					<div class="event-feed" id="event-feed">
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
 
-    <div class="row mt-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h3 class="card-title mb-0">Usage Stats</h3>
-                    <select class="form-control form-control-sm" id="stats-period" style="width: auto;" onchange="refreshStats()">
-                        <option value="week">Past Week</option>
-                        <option value="month">Past Month</option>
-                        <option value="all">All Time</option>
-                    </select>
-                </div>
-                <div class="card-body">
-                    <div class="row mb-3">
-                        <div class="col-md-4">
-                            <div class="card bg-light">
-                                <div class="card-body text-center py-3">
-                                    <h4 id="stat-total-sessions" class="mb-0">0</h4>
-                                    <small class="text-muted">Total Sessions</small>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card bg-light">
-                                <div class="card-body text-center py-3">
-                                    <h4 id="stat-avg-duration" class="mb-0">0m</h4>
-                                    <small class="text-muted">Avg Duration</small>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card bg-light">
-                                <div class="card-body text-center py-3">
-                                    <h4 id="stat-peak-concurrent" class="mb-0">0</h4>
-                                    <small class="text-muted">Peak Concurrent</small>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <h5>Top Users</h5>
-                            <div id="chart-top-users" style="height: 300px;"></div>
-                        </div>
-                        <div class="col-md-6">
-                            <h5>Daily Usage</h5>
-                            <div id="chart-daily-usage" style="height: 300px;"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+	<div class="row">
+		<div class="col-md-4">
+			<div class="card stat-card bg-light">
+				<div class="card-body">
+					<h4 id="stat-total-sessions" class="mb-0">0</h4>
+					<small class="text-muted">Total Sessions</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-4">
+			<div class="card stat-card bg-light">
+				<div class="card-body">
+					<h4 id="stat-avg-duration" class="mb-0">0m</h4>
+					<small class="text-muted">Avg Duration</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-4">
+			<div class="card stat-card bg-light">
+				<div class="card-body">
+					<h4 id="stat-peak-concurrent" class="mb-0">0</h4>
+					<small class="text-muted">Peak Concurrent</small>
+				</div>
+			</div>
+		</div>
+	</div>
 
-
+	<div class="row">
+		<div class="col-md-6">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Top Users</h3>
+					<select class="form-control form-control-sm" id="stats-period" style="width: auto;" onchange="refreshStats()">
+						<option value="week">Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body" style="padding: 15px;">
+					<div class="chart-container" id="chart-top-users"></div>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-6">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Daily Usage</h3>
+				</div>
+				<div class="card-body" style="padding: 15px;">
+					<div class="chart-container" id="chart-daily-usage"></div>
+				</div>
+			</div>
+		</div>
+	</div>
 </div>
 
-<style>
-    .status-active {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .status-expired {
-        color: #dc3545;
-        font-weight: bold;
-    }
-    .status-warning {
-        color: #ffc107;
-        font-weight: bold;
-    }
-    .time-remaining {
-        font-family: monospace;
-        font-weight: bold;
-    }
-    .card:hover {
-        cursor: default;
-    }
-    .event-feed {
-        max-height: 400px;
-        overflow-y: auto;
-    }
-    .event-item {
-        padding: 10px 15px;
-        border-bottom: 1px solid #dee2e6;
-        display: flex;
-        align-items: flex-start;
-        gap: 10px;
-        font-size: 14px;
-    }
-    .event-item:hover {
-        background-color: #f8f9fa;
-    }
-    .event-timestamp {
-        color: #6c757d;
-        white-space: nowrap;
-        font-size: 14px;
-        min-width: 140px;
-    }
-    .event-type {
-        font-weight: bold;
-        text-transform: uppercase;
-        font-size: 14px;
-        min-width: 160px;
-        white-space: nowrap;
-    }
-    .event-message {
-        flex: 1;
-        word-wrap: break-word;
-        font-size: 14px;
-    }
-    .event-username {
-        color: #007bff;
-        font-weight: bold;
-    }
-    .event-level-info .event-type {
-        color: #28a745;
-    }
-    .event-level-warning .event-type {
-        color: #ffc107;
-    }
-    .event-level-error .event-type {
-        color: #dc3545;
-    }
-    .action-buttons {
-        white-space: nowrap;
-        display: flex;
-        gap: 4px;
-    }
-    .action-buttons .btn {
-        width: 32px;
-        height: 32px;
-        padding: 0;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        border: none;
-        background: transparent;
-    }
-    .action-buttons .btn:hover {
-        background-color: rgba(0,0,0,0.05);
-        border-radius: 3px;
-    }
-    .icon-monitor {
-        color: #6c757d;
-    }
-    .icon-kill {
-        color: #dc3545;
-    }
-    .icon-extend {
-        color: #ffc107;
-    }
-</style>
+{% endblock %}
 
+{% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script>
-    let autoRefreshInterval = null;
-    let eventSource = null;
-    let maxEvents = 500;
-    let activeContainers = {};
+	let autoRefreshInterval = null;
+	let eventSource = null;
+	let maxEvents = 500;
+	let activeContainers = {};
 
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
+	function escapeHtml(text) {
+		const div = document.createElement('div');
+		div.textContent = text;
+		return div.innerHTML;
+	}
 
-    function formatTimestamp(timestamp) {
-        const date = new Date(timestamp * 1000);
-        return date.toLocaleString(undefined, {
-            month: '2-digit',
-            day: '2-digit',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        });
-    }
+	function formatTimestamp(timestamp) {
+		const date = new Date(timestamp * 1000);
+		return date.toLocaleString(undefined, {
+			month: '2-digit',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hour12: false
+		});
+	}
 
-    function addEventToFeed(event) {
-        const feed = document.getElementById('event-feed');
-        const eventItem = document.createElement('div');
-        eventItem.className = `event-item event-level-${event.level}`;
+	function addEventToFeed(event) {
+		const feed = document.getElementById('event-feed');
+		const eventItem = document.createElement('div');
+		eventItem.className = 'event-item';
 
-        let messageHtml = escapeHtml(event.message);
-        if (event.username) {
-            messageHtml = `<span class="event-username">${escapeHtml(event.username)}</span> ${messageHtml}`;
-        }
+		let messageHtml = escapeHtml(event.message);
+		if (event.username) {
+			messageHtml = `<span class="event-username">${escapeHtml(event.username)}</span> ${messageHtml}`;
+		}
 
-        if (event.metadata && Object.keys(event.metadata).length > 0) {
-            const metaKeys = Object.keys(event.metadata).filter(k => !['traceback', 'error'].includes(k));
-            if (metaKeys.length > 0) {
-                const metaStr = metaKeys.map(k => `${k}=${event.metadata[k]}`).join(', ');
-                messageHtml += ` <small class="text-muted">[${escapeHtml(metaStr)}]</small>`;
-            }
-        }
+		if (event.metadata && Object.keys(event.metadata).length > 0) {
+			const metaKeys = Object.keys(event.metadata).filter(k => !['traceback', 'error'].includes(k));
+			if (metaKeys.length > 0) {
+				const metaStr = metaKeys.map(k => `${k}=${event.metadata[k]}`).join(', ');
+				messageHtml += ` <small class="text-muted">[${escapeHtml(metaStr)}]</small>`;
+			}
+		}
 
-        const formattedTimestamp = formatTimestamp(event.timestamp);
+		const badgeClass = event.level === 'error' ? 'event-error' :
+						   event.level === 'warning' ? 'event-warning' : 'event-info';
 
-        eventItem.innerHTML = `
-            <span class="event-timestamp">${escapeHtml(formattedTimestamp)}</span>
-            <span class="event-type">${escapeHtml(event.type)}</span>
-            <span class="event-message">${messageHtml}</span>
-        `;
+		eventItem.innerHTML = `
+			<span class="event-time">${escapeHtml(formatTimestamp(event.timestamp))}</span>
+			<span class="event-badge ${badgeClass}">${escapeHtml(event.type)}</span>
+			<span class="event-message">${messageHtml}</span>
+		`;
 
-        feed.insertBefore(eventItem, feed.firstChild);
+		feed.insertBefore(eventItem, feed.firstChild);
 
-        while (feed.children.length > maxEvents) {
-            feed.removeChild(feed.lastChild);
-        }
+		while (feed.children.length > maxEvents) {
+			feed.removeChild(feed.lastChild);
+		}
 
-        feed.scrollTop = 0;
-    }
+		feed.scrollTop = 0;
+	}
 
-    function connectEventStream() {
-        if (eventSource) {
-            eventSource.close();
-        }
+	function connectEventStream() {
+		if (eventSource) eventSource.close();
 
-        eventSource = new EventSource('/remote-desktop/admin/api/events/stream');
+		eventSource = new EventSource('/remote-desktop/admin/api/events/stream');
 
-        eventSource.onmessage = function(e) {
-            try {
-                const event = JSON.parse(e.data);
-                addEventToFeed(event);
-            } catch (err) {
-                console.error('Error parsing event:', err);
-            }
-        };
+		eventSource.onmessage = function(e) {
+			try {
+				const event = JSON.parse(e.data);
+				addEventToFeed(event);
+			} catch (err) {
+				console.error('Error parsing event:', err);
+			}
+		};
 
-        eventSource.onerror = function(e) {
-            console.error('EventSource error:', e);
-            setTimeout(() => {
-                connectEventStream();
-            }, 5000);
-        };
-    }
+		eventSource.onerror = function() {
+			setTimeout(connectEventStream, 5000);
+		};
+	}
 
-    function formatTime(seconds) {
-        if (seconds <= 0) return 'EXPIRED';
-        const hours = Math.floor(seconds / 3600);
-        const minutes = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-        if (hours > 0) {
-            return `${hours}h ${minutes}m ${secs}s`;
-        }
-        return `${minutes}m ${secs}s`;
-    }
+	function formatTime(seconds) {
+		if (seconds <= 0) return 'EXPIRED';
+		const hours = Math.floor(seconds / 3600);
+		const minutes = Math.floor((seconds % 3600) / 60);
+		const secs = seconds % 60;
+		if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
+		return `${minutes}m ${secs}s`;
+	}
 
-    // containers
+	// containers
 
-    function refreshContainers() {
-        fetch('/remote-desktop/admin/api/containers', {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin'
-        })
-        .then(response => response.json())
-        .then(data => updateContainersTable(data.containers))
-        .catch(error => console.error('Error fetching containers:', error));
-    }
+	function refreshContainers() {
+		fetch('/remote-desktop/admin/api/containers', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(response => response.json())
+		.then(data => updateContainersTable(data.containers))
+		.catch(error => console.error('Error fetching containers:', error));
+	}
 
-    function refreshAll() {
-        refreshContainers();
-    }
+	function refreshAll() {
+		refreshContainers();
+	}
 
-    function updateContainersTable(containers) {
-        const tbody = document.getElementById('containers-table');
-        const killAllBtn = document.getElementById('kill-all-btn');
+	function updateContainersTable(containers) {
+		const tbody = document.getElementById('containers-table');
 
-        if (!containers || containers.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sessions</td></tr>';
-            killAllBtn.style.display = 'none';
-            return;
-        }
+		if (!containers || containers.length === 0) {
+			tbody.innerHTML = '<tr><td colspan="7" class="text-center">No sessions</td></tr>';
+			return;
+		}
 
-        killAllBtn.style.display = '';
+		activeContainers = {};
+		tbody.innerHTML = '';
+		containers.forEach(container => {
+			activeContainers[container.user_id] = container;
 
-        activeContainers = {};
-        tbody.innerHTML = '';
-        containers.forEach(container => {
-            activeContainers[container.user_id] = container;
+			const timeRemaining = container.timer ? container.timer.time_remaining : 0;
+			const statusClass = timeRemaining <= 0 ? 'status-expired' :
+							   timeRemaining < 300 ? 'status-warning' : 'status-active';
+			const status = timeRemaining <= 0 ? 'EXPIRED' :
+						  timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
 
-            const timeRemaining = container.timer ? container.timer.time_remaining : 0;
-            const statusClass = timeRemaining <= 0 ? 'status-expired' :
-                               timeRemaining < 300 ? 'status-warning' : 'status-active';
-            const status = timeRemaining <= 0 ? 'EXPIRED' :
-                          timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
+			const row = `
+				<tr>
+					<td><strong>${escapeHtml(container.username)}</strong></td>
+					<td><code>${escapeHtml(container.container_name)}</code></td>
+					<td>${escapeHtml(container.docker_context || '')}</td>
+					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
+					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
+					<td><span class="${statusClass}">${status}</span></td>
+					<td class="action-buttons">
+						<button class="btn btn-sm" onclick="peekVNC(${container.user_id})" title="Monitor">
+							<i class="fas fa-eye icon-monitor"></i>
+						</button>
+						<button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
+							<i class="fas fa-times icon-kill"></i>
+						</button>
+						${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
+							<button class="btn btn-sm" onclick="extendContainer(${container.user_id})" title="Extend">
+								<i class="fas fa-clock icon-extend"></i>
+							</button>
+						` : ''}
+					</td>
+				</tr>
+			`;
+			tbody.innerHTML += row;
+		});
+	}
 
-            const row = `
-                <tr>
-                    <td><strong>${escapeHtml(container.username)}</strong></td>
-                    <td>
-                        <code>${escapeHtml(container.container_name)}</code>
-                    </td>
-                    <td>${escapeHtml(container.docker_context || '')}</td>
-                    <td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
-                    <td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
-                    <td><span class="${statusClass}">${status}</span></td>
-                    <td class="action-buttons">
-                        <button class="btn btn-sm" onclick="peekVNC(${container.user_id})" title="Monitor">
-                            <i class="fas fa-eye icon-monitor"></i>
-                        </button>
-                        <button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
-                            <i class="fas fa-times icon-kill"></i>
-                        </button>
-                        ${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
-                            <button class="btn btn-sm" onclick="extendContainer(${container.user_id})" title="Extend">
-                                <i class="fas fa-clock icon-extend"></i>
-                            </button>
-                        ` : ''}
-                    </td>
-                </tr>
-            `;
-            tbody.innerHTML += row;
-        });
-    }
+	function peekVNC(userId) {
+		const container = activeContainers[userId];
+		if (!container || !container.vnc_url) {
+			CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'VNC unavailable', button: 'OK' });
+			return;
+		}
 
-    function peekVNC(userId) {
-        const container = activeContainers[userId];
-        if (!container || !container.vnc_url) {
-            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'VNC unavailable', button: 'OK' });
-            return;
-        }
+		const username = container.username || `User ${userId}`;
+		const windowName = `vnc_peek_${userId}`;
+		const vncWindow = window.open(container.vnc_url + '&viewonly=1', windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
 
-        const username = container.username || `User ${userId}`;
-        const windowName = `vnc_peek_${userId}`;
-        const windowFeatures = 'width=1200,height=800,scrollbars=yes,resizable=yes';
-        const vncWindow = window.open(container.vnc_url + '&viewonly=1', windowName, windowFeatures);
+		if (!vncWindow) {
+			CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
+		}
+	}
 
-        if (vncWindow) {
-            vncWindow.document.title = `[ADMIN PEEK] ${username}'s VNC Session`;
-            setTimeout(() => {
-                try {
-                    const adminIndicator = vncWindow.document.createElement('div');
-                    const label = document.createElement('span');
-                    label.textContent = `ADMIN MONITORING: ${username}`;
-                    const wrapper = document.createElement('div');
-                    wrapper.style.cssText = 'position: fixed; top: 10px; right: 10px; background: #dc3545; color: white; padding: 5px 10px; border-radius: 3px; font-family: Arial; font-size: 12px; z-index: 9999; opacity: 0.9;';
-                    wrapper.appendChild(label);
-                    adminIndicator.appendChild(wrapper);
-                    vncWindow.document.body.appendChild(adminIndicator);
-                } catch(e) {
-                    // cross-origin issues are expected
-                }
-            }, 1000);
-        } else {
-            CTFd.ui.ezal.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
-        }
-    }
+	function killContainer(userId) {
+		const container = activeContainers[userId];
+		const username = container ? container.username : `User ${userId}`;
+		if (!confirm(`Kill ${username}'s session?`)) return;
 
-    function killContainer(userId) {
-        const container = activeContainers[userId];
-        const username = container ? container.username : `User ${userId}`;
-        if (!confirm(`Kill ${username}'s session?`)) return;
+		const formData = new FormData();
+		formData.append('nonce', window.init.csrfNonce);
+		formData.append('user_id', userId);
 
-        const formData = new FormData();
-        formData.append('nonce', window.init.csrfNonce);
-        formData.append('user_id', userId);
+		fetch('/remote-desktop/admin/api/kill', {
+			method: 'POST',
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin',
+			body: formData
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.success) refreshAll();
+			else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Kill failed', button: 'OK' });
+		});
+	}
 
-        fetch('/remote-desktop/admin/api/kill', {
-            method: 'POST',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                CTFd.ui.ezal.ezAlert({ title: 'Success', body: `Killed ${username}`, button: 'OK' });
-                refreshAll();
-            } else {
-                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Kill failed', button: 'OK' });
-            }
-        })
-        .catch(error => console.error('Error killing container:', error));
-    }
+	function extendContainer(userId) {
+		const formData = new FormData();
+		formData.append('nonce', window.init.csrfNonce);
+		formData.append('user_id', userId);
 
-    function extendContainer(userId) {
-        const formData = new FormData();
-        formData.append('nonce', window.init.csrfNonce);
-        formData.append('user_id', userId);
+		fetch('/remote-desktop/admin/api/extend', {
+			method: 'POST',
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin',
+			body: formData
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.success) refreshAll();
+			else CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Extend failed', button: 'OK' });
+		});
+	}
 
-        fetch('/remote-desktop/admin/api/extend', {
-            method: 'POST',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Extended', button: 'OK' });
-                refreshAll();
-            } else {
-                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Extend failed', button: 'OK' });
-            }
-        })
-        .catch(error => console.error('Error extending container:', error));
-    }
+	// purge all
 
-    function triggerCleanup() {
-        const formData = new FormData();
-        formData.append('nonce', window.init.csrfNonce);
+	function killAllSessions() {
+		if (!confirm('Purge ALL active sessions? This cannot be undone.')) return;
 
-        fetch('/remote-desktop/api/cleanup', {
-            method: 'POST',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Cleanup started', button: 'OK' });
-                refreshAll();
-            }
-        })
-        .catch(error => console.error('Error triggering cleanup:', error));
-    }
+		const btn = document.getElementById('purge-all-btn');
+		btn.disabled = true;
 
-    function startAutoRefresh() {
-        stopAutoRefresh();
-        autoRefreshInterval = setInterval(refreshAll, 10000);
-    }
+		fetch('/remote-desktop/admin/api/kill-all', {
+			method: 'POST',
+			headers: {
+				'X-Requested-With': 'XMLHttpRequest',
+				'CSRF-Token': window.init.csrfNonce
+			},
+			credentials: 'same-origin'
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.success) {
+				CTFd.ui.ezal.ezAlert({ title: 'Success', body: `Killed ${data.killed} session(s)`, button: 'OK' });
+				refreshAll();
+			} else {
+				CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Purge failed', button: 'OK' });
+			}
+			btn.disabled = false;
+		})
+		.catch(() => { btn.disabled = false; });
+	}
 
-    function stopAutoRefresh() {
-        if (autoRefreshInterval) {
-            clearInterval(autoRefreshInterval);
-            autoRefreshInterval = null;
-        }
-    }
+	// stats
 
-    // kill all
+	let topUsersChart = null;
+	let dailyUsageChart = null;
 
-    function killAllSessions() {
-        if (!confirm('Kill ALL active sessions? This cannot be undone.')) return;
+	function initCharts() {
+		const topUsersEl = document.getElementById('chart-top-users');
+		const dailyUsageEl = document.getElementById('chart-daily-usage');
+		if (topUsersEl) topUsersChart = echarts.init(topUsersEl);
+		if (dailyUsageEl) dailyUsageChart = echarts.init(dailyUsageEl);
+	}
 
-        fetch('/remote-desktop/admin/api/kill-all', {
-            method: 'POST',
-            headers: {
-                'X-Requested-With': 'XMLHttpRequest',
-                'CSRF-Token': window.init.csrfNonce
-            },
-            credentials: 'same-origin'
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                CTFd.ui.ezal.ezAlert({ title: 'Success', body: `Killed ${data.killed} session(s)`, button: 'OK' });
-                refreshAll();
-            } else {
-                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Kill all failed', button: 'OK' });
-            }
-        })
-        .catch(error => console.error('Error killing all sessions:', error));
-    }
+	function formatDurationShort(seconds) {
+		if (seconds < 60) return Math.round(seconds) + 's';
+		if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+		const h = Math.floor(seconds / 3600);
+		const m = Math.round((seconds % 3600) / 60);
+		return h + 'h ' + m + 'm';
+	}
 
-    // usage stats
+	function refreshStats() {
+		const period = document.getElementById('stats-period').value;
 
-    let topUsersChart = null;
-    let dailyUsageChart = null;
+		fetch('/remote-desktop/admin/api/stats/summary', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			document.getElementById('stat-total-sessions').textContent = data.total_sessions;
+			document.getElementById('stat-avg-duration').textContent = formatDurationShort(data.avg_duration);
+			document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent;
+		});
 
-    function initCharts() {
-        const topUsersEl = document.getElementById('chart-top-users');
-        const dailyUsageEl = document.getElementById('chart-daily-usage');
-        if (topUsersEl) topUsersChart = echarts.init(topUsersEl);
-        if (dailyUsageEl) dailyUsageChart = echarts.init(dailyUsageEl);
-    }
+		fetch(`/remote-desktop/admin/api/stats/top-users?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!topUsersChart) return;
+			const users = (data.users || []).reverse();
+			topUsersChart.setOption({
+				tooltip: {
+					trigger: 'axis',
+					axisPointer: { type: 'shadow' },
+					formatter: function(params) {
+						const p = params[0];
+						return echarts.format.encodeHTML(p.name) + '<br/>' +
+							   formatDurationShort(p.value) + ' (' + (data.users.find(u => u.username === p.name) || {}).session_count + ' sessions)';
+					}
+				},
+				grid: { left: 100, right: 20, top: 10, bottom: 20 },
+				xAxis: { type: 'value', axisLabel: { formatter: v => formatDurationShort(v) } },
+				yAxis: { type: 'category', data: users.map(u => u.username) },
+				series: [{
+					type: 'bar',
+					data: users.map(u => u.total_duration),
+					itemStyle: { color: '#1f76b4' }
+				}]
+			});
+		});
 
-    function formatDurationShort(seconds) {
-        if (seconds < 60) return Math.round(seconds) + 's';
-        if (seconds < 3600) return Math.round(seconds / 60) + 'm';
-        const h = Math.floor(seconds / 3600);
-        const m = Math.round((seconds % 3600) / 60);
-        return h + 'h ' + m + 'm';
-    }
+		fetch(`/remote-desktop/admin/api/stats/usage?period=${period}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (!dailyUsageChart) return;
+			const days = data.days || [];
+			dailyUsageChart.setOption({
+				tooltip: {
+					trigger: 'axis',
+					formatter: function(params) {
+						const p = params[0];
+						return echarts.format.encodeHTML(p.name) + '<br/>' + p.value + ' sessions';
+					}
+				},
+				grid: { left: 50, right: 20, top: 10, bottom: 30 },
+				xAxis: { type: 'category', data: days.map(d => d.date), axisLabel: { rotate: 45 } },
+				yAxis: { type: 'value', minInterval: 1 },
+				series: [{
+					type: 'line',
+					data: days.map(d => d.sessions),
+					itemStyle: { color: '#28a745' },
+					lineStyle: { color: '#28a745' },
+					areaStyle: { color: 'rgba(40, 167, 69, 0.1)' }
+				}]
+			});
+		});
+	}
 
-    function refreshStats() {
-        const period = document.getElementById('stats-period').value;
+	function startAutoRefresh() {
+		if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+		autoRefreshInterval = setInterval(refreshAll, 10000);
+	}
 
-        fetch('/remote-desktop/admin/api/stats/summary', {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin'
-        })
-        .then(r => r.json())
-        .then(data => {
-            document.getElementById('stat-total-sessions').textContent = data.total_sessions;
-            document.getElementById('stat-avg-duration').textContent = formatDurationShort(data.avg_duration);
-            document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent;
-        })
-        .catch(error => console.error('Error fetching summary:', error));
+	window.addEventListener('resize', function() {
+		if (topUsersChart) topUsersChart.resize();
+		if (dailyUsageChart) dailyUsageChart.resize();
+	});
 
-        fetch(`/remote-desktop/admin/api/stats/top-users?period=${period}`, {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin'
-        })
-        .then(r => r.json())
-        .then(data => {
-            if (!topUsersChart) return;
-            const users = (data.users || []).reverse();
-            topUsersChart.setOption({
-                tooltip: {
-                    trigger: 'axis',
-                    axisPointer: { type: 'shadow' },
-                    formatter: function(params) {
-                        const p = params[0];
-                        return echarts.format.encodeHTML(p.name) + '<br/>' +
-                               formatDurationShort(p.value) + ' (' + (data.users.find(u => u.username === p.name) || {}).session_count + ' sessions)';
-                    }
-                },
-                grid: { left: 100, right: 20, top: 10, bottom: 20 },
-                xAxis: { type: 'value', axisLabel: { formatter: v => formatDurationShort(v) } },
-                yAxis: { type: 'category', data: users.map(u => u.username) },
-                series: [{
-                    type: 'bar',
-                    data: users.map(u => u.total_duration),
-                    itemStyle: { color: '#1f76b4' }
-                }]
-            });
-        })
-        .catch(error => console.error('Error fetching top users:', error));
+	document.addEventListener('DOMContentLoaded', function() {
+		connectEventStream();
+		refreshAll();
+		initCharts();
+		refreshStats();
+		startAutoRefresh();
+	});
 
-        fetch(`/remote-desktop/admin/api/stats/usage?period=${period}`, {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin'
-        })
-        .then(r => r.json())
-        .then(data => {
-            if (!dailyUsageChart) return;
-            const days = data.days || [];
-            dailyUsageChart.setOption({
-                tooltip: {
-                    trigger: 'axis',
-                    formatter: function(params) {
-                        const p = params[0];
-                        return echarts.format.encodeHTML(p.name) + '<br/>' + p.value + ' sessions';
-                    }
-                },
-                grid: { left: 50, right: 20, top: 10, bottom: 30 },
-                xAxis: { type: 'category', data: days.map(d => d.date), axisLabel: { rotate: 45 } },
-                yAxis: { type: 'value', minInterval: 1 },
-                series: [{
-                    type: 'line',
-                    data: days.map(d => d.sessions),
-                    itemStyle: { color: '#28a745' },
-                    lineStyle: { color: '#28a745' },
-                    areaStyle: { color: 'rgba(40, 167, 69, 0.1)' }
-                }]
-            });
-        })
-        .catch(error => console.error('Error fetching usage:', error));
-    }
-
-    document.addEventListener('DOMContentLoaded', function() {
-        connectEventStream();
-        refreshAll();
-        initCharts();
-        refreshStats();
-        startAutoRefresh();
-    });
-
-    window.addEventListener('beforeunload', function() {
-        if (eventSource) {
-            eventSource.close();
-        }
-        stopAutoRefresh();
-    });
+	window.addEventListener('beforeunload', function() {
+		if (eventSource) eventSource.close();
+		if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+	});
 </script>
 {% endblock %}
