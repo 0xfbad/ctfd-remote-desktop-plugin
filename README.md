@@ -78,7 +78,7 @@ The plugin creates its tables automatically on first load, no manual migration n
 3. Orchestrator picks least-loaded healthy context via weighted scoring
 4. Acquires the per-context creation semaphore (limits concurrent creates per host)
 5. Generates random VNC password via `secrets.token_urlsafe(6)[:8]`
-6. Calls `DockerHostManager.run_container()` which talks to the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping (0:5900, 0:6080), security hardening (`cap_drop=ALL`, `no-new-privileges`, pids limit), resource limits, and the VNC/resolution env vars
+6. Calls `DockerHostManager.run_container()` which talks to the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping (0:5900, 0:6080), security hardening (`cap_drop=ALL` + selective `cap_add`, pids limit), resource limits, and the VNC/resolution env vars
 7. Polls `container.reload()` for mapped ports (up to 5 attempts with 0.3s sleep)
 8. HTTP polls noVNC until it responds (configurable attempts, default 180)
 9. Builds direct URL like `http://{pub_hostname}:{port}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true`
@@ -110,8 +110,7 @@ Admins can also kill all active sessions at once with the Kill All button in the
 
 Every container gets hardened defaults
 
-- `cap_drop=["ALL"]` drops all Linux capabilities
-- `security_opt=["no-new-privileges:true"]` prevents setuid/setgid escalation
+- `cap_drop=["ALL"]` drops all Linux capabilities, then `cap_add` re-grants only the ones needed: CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE for startup user creation and su, NET_RAW and NET_ADMIN for wireshark/nmap, SETFCAP for granting dumpcap packet capture. Students get full sudo inside their container which is intentional for a CTF lab
 - `pids_limit` from settings (default 512) caps the process count to prevent fork bombs
 - `auto_remove=True` so Docker cleans up the filesystem when the container stops
 

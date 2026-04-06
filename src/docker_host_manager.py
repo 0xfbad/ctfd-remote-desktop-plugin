@@ -177,7 +177,7 @@ class DockerHostManager:
                 mem_limit=memory,
                 nano_cpus=nano_cpus,
                 cap_drop=["ALL"],
-                security_opt=["no-new-privileges:true"],
+                cap_add=["CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE", "NET_RAW", "NET_ADMIN", "SETFCAP"],
                 pids_limit=pids_limit,
             )
         except docker.errors.DockerException:
