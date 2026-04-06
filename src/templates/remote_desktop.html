@@ -45,6 +45,9 @@
         cursor: pointer;
         font-size: 14px;
         transition: background-color 0.3s;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
     }
     
     .control-btn:hover {
@@ -380,9 +383,8 @@ function checkStatus() {
             pollInterval = null;
             lastFailedHostname = '';
             if (startBtn) {
-                startBtn.innerHTML = '<span class="loading-spinner"></span>Loading desktop...';
+                startBtn.innerHTML = '<span class="loading-spinner"></span> Loading desktop...';
             }
-            showStatusMessage('Desktop ready! Loading...', 1000);
             setTimeout(() => {
                 window.location.reload();
             }, 1000);
@@ -408,9 +410,8 @@ function checkStatus() {
             }
 
             if (startBtn) {
-                startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
+                startBtn.innerHTML = `<span class="loading-spinner"></span> ${message}`;
             }
-            showStatusMessage(message, 0);
         }
     })
     .catch(error => {
@@ -434,7 +435,7 @@ function startSession() {
     const startBtn = document.getElementById('start-btn');
     if (startBtn) {
         startBtn.disabled = true;
-        startBtn.innerHTML = '<span class="loading-spinner"></span>Starting...';
+        startBtn.innerHTML = '<span class="loading-spinner"></span> Starting...';
     }
 
     const formData = new FormData();
@@ -452,7 +453,6 @@ function startSession() {
     .then(({ok, data}) => {
         if (ok && data.status === 'creating') {
             hideSessionError();
-            showStatusMessage('Creating container...', 0);
             pollCreationStatus();
         } else {
             if (startBtn) {
