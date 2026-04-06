@@ -138,90 +138,6 @@
         </div>
     </div>
 
-    <div class="row mt-3">
-        <div class="col-md-12">
-            <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h3 class="card-title mb-0">Settings</h3>
-                    <button class="btn btn-sm btn-outline-primary" onclick="saveSettings()">Save</button>
-                </div>
-                <div class="card-body">
-                    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
-                        <div class="custom-control custom-switch">
-                            <input type="checkbox" class="custom-control-input" id="setting-remote_desktop_enabled" checked>
-                            <label class="custom-control-label" for="setting-remote_desktop_enabled">
-                                <strong>Remote Desktop Enabled</strong>
-                                <br><small class="text-muted">When disabled, users cannot access the remote desktop page or create new sessions</small>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-md-4">
-                            <h5>Container</h5>
-                            <div class="form-group">
-                                <label>Docker Image</label>
-                                <input type="text" class="form-control" id="setting-docker_image">
-                            </div>
-                            <div class="form-group">
-                                <label>Memory Limit</label>
-                                <input type="text" class="form-control" id="setting-memory_limit">
-                            </div>
-                            <div class="form-group">
-                                <label>SHM Size</label>
-                                <input type="text" class="form-control" id="setting-shm_size">
-                            </div>
-                            <div class="form-group">
-                                <label>Resolution</label>
-                                <input type="text" class="form-control" id="setting-resolution">
-                            </div>
-                            <div class="form-group">
-                                <label>CPU Limit</label>
-                                <input type="text" class="form-control" id="setting-cpu_limit">
-                            </div>
-                            <div class="form-group">
-                                <label>Container Username Source</label>
-                                <select class="form-control" id="setting-username_source">
-                                    <option value="name">CTFd Display Name</option>
-                                    <option value="email">Email (before @)</option>
-                                </select>
-                                <small class="text-muted">Normalized to [a-z0-9], falls back to user{id} if empty</small>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <h5>Session Timers</h5>
-                            <div class="form-group">
-                                <label>Initial Duration (seconds)</label>
-                                <input type="number" class="form-control" id="setting-initial_duration">
-                            </div>
-                            <div class="form-group">
-                                <label>Extension Duration (seconds)</label>
-                                <input type="number" class="form-control" id="setting-extension_duration">
-                            </div>
-                            <div class="form-group">
-                                <label>Max Extensions</label>
-                                <input type="number" class="form-control" id="setting-max_extensions">
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <h5>Timeouts</h5>
-                            <div class="form-group">
-                                <label>VNC Ready Attempts</label>
-                                <input type="number" class="form-control" id="setting-vnc_ready_attempts">
-                            </div>
-                            <div class="form-group">
-                                <label>HTTP Request Timeout (seconds)</label>
-                                <input type="number" class="form-control" id="setting-http_request_timeout">
-                            </div>
-                            <div class="form-group">
-                                <label>Cleanup Interval (seconds)</label>
-                                <input type="number" class="form-control" id="setting-cleanup_interval">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
 </div>
 
 <!-- add context modal -->
@@ -421,13 +337,6 @@
     let maxEvents = 500;
     let activeContainers = {};
 
-    const settingKeys = [
-        'remote_desktop_enabled',
-        'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit', 'username_source',
-        'initial_duration', 'extension_duration', 'max_extensions',
-        'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'
-    ];
-
     function escapeHtml(text) {
         const div = document.createElement('div');
         div.textContent = text;
@@ -514,60 +423,6 @@
             return `${hours}h ${minutes}m ${secs}s`;
         }
         return `${minutes}m ${secs}s`;
-    }
-
-    // settings
-
-    function loadSettings() {
-        fetch('/remote-desktop/admin/api/settings', {
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
-            credentials: 'same-origin'
-        })
-        .then(response => response.json())
-        .then(data => {
-            const settings = data.settings || {};
-            settingKeys.forEach(key => {
-                const el = document.getElementById(`setting-${key}`);
-                if (el && settings[key] !== undefined) {
-                    if (el.type === 'checkbox') {
-                        el.checked = settings[key] === true || settings[key] === 'true' || settings[key] === 1;
-                    } else {
-                        el.value = settings[key];
-                    }
-                }
-            });
-        })
-        .catch(error => console.error('Error loading settings:', error));
-    }
-
-    function saveSettings() {
-        const payload = {};
-        settingKeys.forEach(key => {
-            const el = document.getElementById(`setting-${key}`);
-            if (el) {
-                payload[key] = el.type === 'checkbox' ? el.checked : el.value;
-            }
-        });
-
-        fetch('/remote-desktop/admin/api/settings', {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-                'CSRF-Token': window.init.csrfNonce
-            },
-            credentials: 'same-origin',
-            body: JSON.stringify(payload)
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                CTFd.ui.ezal.ezAlert({ title: 'Success', body: 'Settings saved', button: 'OK' });
-            } else {
-                CTFd.ui.ezal.ezAlert({ title: 'Error', body: data.error || 'Save failed', button: 'OK' });
-            }
-        })
-        .catch(error => console.error('Error saving settings:', error));
     }
 
     // contexts
@@ -1119,7 +974,6 @@
 
     document.addEventListener('DOMContentLoaded', function() {
         connectEventStream();
-        loadSettings();
         refreshAll();
         initCharts();
         refreshStats();
