@@ -6,7 +6,7 @@ import atexit
 import logging
 from CTFd.plugins import register_user_page_menu_bar, register_admin_plugin_menu_bar
 
-from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH
+from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, _get_host_gateway
 from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
@@ -46,7 +46,7 @@ def _seed_local_context(app):
         DesktopDockerContextModel(
             context_name=LOCAL_CONTEXT_NAME,
             hostname=None,
-            pub_hostname=socket.gethostname(),
+            pub_hostname=_get_host_gateway(),
             weight=1,
             enabled=True,
         )

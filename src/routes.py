@@ -549,9 +549,9 @@ def create_routes(container_manager, orchestrator):
     @admins_only
     @bypass_csrf_protection
     def admin_discover_contexts():
-        import socket as _socket
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from .models import DesktopDockerContextModel
+        from .docker_host_manager import _get_host_gateway
 
         try:
             found = discover_contexts()
@@ -564,7 +564,7 @@ def create_routes(container_manager, orchestrator):
 
                 ep = ctx["endpoint"]
                 if ep.startswith("unix://"):
-                    suggested = _socket.gethostname()
+                    suggested = _get_host_gateway()
                 elif "://" in ep:
                     stripped = ep.split("://", 1)[-1]
                     if "@" in stripped:
