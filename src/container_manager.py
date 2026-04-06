@@ -88,6 +88,7 @@ class ContainerManager:
             container_username = f"user{user_id}"
 
         context_name = None
+        container_name = None
 
         try:
             with self.lock:
@@ -102,14 +103,14 @@ class ContainerManager:
 
             self.host_manager.acquire_semaphore(context_name)
 
+            container_name = f"rd-session-{user_id}-{int(time.time())}"
+
             try:
                 with self.lock:
                     self.creation_status[user_id] = {
                         "status": "starting_container",
                         "message": f"Starting container on {display_hostname}...",
                     }
-
-                container_name = f"rd-session-{user_id}-{int(time.time())}"
                 vnc_password = secrets.token_urlsafe(6)[:8]
 
                 docker_image = self._get_setting("docker_image")
@@ -119,6 +120,12 @@ class ContainerManager:
                 cpu_limit = self._get_setting("cpu_limit")
                 nano_cpus = int(float(cpu_limit) * 1e9)
 
+                initial_duration = self._get_setting("initial_duration")
+                extension_duration = self._get_setting("extension_duration")
+                max_extensions = self._get_setting("max_extensions")
+                # hard ceiling so containers can't outlive the max possible session
+                max_lifetime = int(initial_duration + (extension_duration * max_extensions) + 300)
+
                 result = self.host_manager.run_container(
                     context_name=context_name,
                     image=docker_image,
@@ -127,6 +134,7 @@ class ContainerManager:
                         "VNC_PASSWORD": vnc_password,
                         "RESOLUTION": resolution,
                         "CTFD_USERNAME": container_username,
+                        "MAX_LIFETIME": str(max_lifetime),
                     },
                     ports=["5900/tcp", "6080/tcp"],
                     shm_size=shm_size,
@@ -206,6 +214,13 @@ class ContainerManager:
             )
 
         except Exception as e:
+            if container_name and context_name:
+                try:
+                    self.host_manager.stop_container(context_name, container_name)
+                    logger.info(f"cleaned up container {container_name} after creation failure")
+                except Exception as stop_error:
+                    logger.error(f"failed to stop container during cleanup: {stop_error}")
+
             if context_name:
                 try:
                     self.orchestrator.release_slot(context_name)
