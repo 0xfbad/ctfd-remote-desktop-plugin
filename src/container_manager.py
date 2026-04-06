@@ -108,7 +108,7 @@ class ContainerManager:
                         "message": f"Starting container on {display_hostname}...",
                     }
 
-                container_name = f"kali-desktop-{user_id}-{int(time.time())}"
+                container_name = f"rd-session-{user_id}-{int(time.time())}"
                 vnc_password = secrets.token_urlsafe(6)[:8]
 
                 docker_image = self._get_setting("docker_image")
@@ -254,6 +254,9 @@ class ContainerManager:
         existing_row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if existing_row:
             return {"success": False, "error": "Session already exists"}
+
+        if not self.orchestrator.has_healthy_context():
+            return {"success": False, "error": "No servers are available right now. Please try again later or contact an administrator."}
 
         with self.lock:
             self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}

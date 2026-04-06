@@ -212,7 +212,7 @@
 <div class="workspace-container" id="workspace-container">
     <div class="workspace-header">
         <div>
-            <strong>Kali Linux Desktop</strong>
+            <strong>Remote Desktop</strong>
             <small class="text-muted ml-2">{{ formatted_time }}</small>
         </div>
         <div>
@@ -244,7 +244,7 @@
         <div class="no-session-screen" id="no-session-screen">
             <i class="fas fa-desktop" style="font-size: 64px; margin-bottom: 20px; color: #6c757d;"></i>
             <h3>No Active Session</h3>
-            <p>Click Start to begin a new Kali Linux desktop environment</p>
+            <p>Click Start to launch a remote desktop session</p>
         </div>
         <div id="status-message" class="status-message hidden"></div>
     </div>
@@ -340,7 +340,7 @@ function checkStatus() {
             startBtn.disabled = false;
             startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
         }
-        showStatusMessage('Container creation timed out. Please try again.', 5000);
+        showStatusMessage('Session is taking longer than expected. Please try again.', 0);
         return;
     }
 
@@ -371,23 +371,12 @@ function checkStatus() {
             const errorMsg = data.error || 'Unknown error';
             const failedHost = data.hostname || lastFailedHostname || 'unknown host';
 
-            if (errorMsg.includes('No healthy hosts available')) {
-                if (startBtn) {
-                    startBtn.disabled = false;
-                    startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
-                }
-                if (!errorAlreadyShown) {
-                    alert('Failed: ' + errorMsg);
-                    errorAlreadyShown = true;
-                }
-                lastFailedHostname = '';
-            } else {
-                lastFailedHostname = failedHost;
-                showStatusMessage(`Failed to start on ${failedHost}, retrying...`, 0);
-                setTimeout(() => {
-                    startSession();
-                }, 1000);
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
             }
+            lastFailedHostname = '';
+            showStatusMessage('Something went wrong on our end. Please try again in a moment.', 0);
         } else {
             const message = data.message || 'Creating container...';
 
@@ -437,28 +426,17 @@ function startSession() {
         credentials: 'same-origin',
         body: formData
     })
-    .then(response => {
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        return response.json();
-    })
-    .then(data => {
-        if (data.status === 'creating') {
+    .then(response => response.json().then(data => ({ok: response.ok, data})))
+    .then(({ok, data}) => {
+        if (ok && data.status === 'creating') {
             showStatusMessage('Creating container...', 0);
             pollCreationStatus();
-        } else if (data.error) {
-            if (startBtn) {
-                startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
-            }
-            showStatusMessage('Error: ' + data.error, 5000);
         } else {
             if (startBtn) {
                 startBtn.disabled = false;
                 startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
             }
-            showStatusMessage('Unexpected response format', 5000);
+            showStatusMessage(data.error || 'Something went wrong on our end. Please try again in a moment.', 0);
         }
     })
     .catch(error => {
@@ -467,7 +445,7 @@ function startSession() {
             startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
         }
         console.error('Create session error:', error);
-        showStatusMessage('Error starting session: ' + error.message, 5000);
+        showStatusMessage('Something went wrong on our end. Please try again in a moment.', 0);
     });
 }
 
