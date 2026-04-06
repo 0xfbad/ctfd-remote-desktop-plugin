@@ -23,17 +23,40 @@ def parse_size(s):
     return int(s)
 
 
-def _resolve_endpoint(context_name, hostname):
-    context_file = os.path.expanduser(f"~/.docker/contexts/meta/{context_name}/meta.json")
-    if os.path.exists(context_file):
+def _scan_context_meta(context_name=None):
+    """Read docker context metadata from ~/.docker/contexts/meta/.
+    If context_name is given, return that context's meta dict or None.
+    Otherwise return all contexts as a list of meta dicts."""
+    contexts_dir = os.path.expanduser("~/.docker/contexts/meta")
+    if not os.path.isdir(contexts_dir):
+        return None if context_name else []
+
+    results = []
+    for entry in os.listdir(contexts_dir):
+        meta_path = os.path.join(contexts_dir, entry, "meta.json")
+        if not os.path.isfile(meta_path):
+            continue
         try:
-            with open(context_file, "r") as f:
+            with open(meta_path) as f:
                 meta = json.load(f)
-                endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
-                if endpoint:
-                    return endpoint
-        except Exception as e:
-            logger.warning(f"could not read context meta for '{context_name}': {e}")
+            if context_name:
+                if meta.get("Name") == context_name:
+                    return meta
+            else:
+                results.append(meta)
+        except Exception:
+            continue
+
+    return None if context_name else results
+
+
+def _resolve_endpoint(context_name, hostname):
+    # docker stores context dirs by hash, not name, so scan for a match
+    meta = _scan_context_meta(context_name)
+    if meta:
+        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")
+        if endpoint:
+            return endpoint
 
     if hostname:
         if "@" in hostname:
@@ -44,6 +67,33 @@ def _resolve_endpoint(context_name, hostname):
         return f"unix://{LOCAL_SOCKET_PATH}"
 
     return None
+
+
+def discover_contexts():
+    """Scan the host for available docker contexts."""
+    discovered = []
+    for meta in _scan_context_meta():
+        name = meta.get("Name", "")
+        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host", "")
+        if name:
+            discovered.append({"name": name, "endpoint": endpoint})
+
+    if not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered):
+        if os.path.exists(LOCAL_SOCKET_PATH):
+            discovered.append({"name": LOCAL_CONTEXT_NAME, "endpoint": f"unix://{LOCAL_SOCKET_PATH}"})
+
+    return discovered
+
+
+def ping_endpoint(endpoint, timeout=3):
+    """Quick connectivity check for a docker endpoint."""
+    try:
+        client = docker.DockerClient(base_url=endpoint, timeout=timeout)
+        client.ping()
+        client.close()
+        return True
+    except Exception:
+        return False
 
 
 class _ThreadLocalClients(threading.local):
