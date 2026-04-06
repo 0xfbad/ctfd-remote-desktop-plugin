@@ -7,7 +7,7 @@ from collections import defaultdict
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.plugins import bypass_csrf_protection
-from CTFd.utils.user import get_current_user, is_verified
+from CTFd.utils.user import get_current_user, is_admin, is_verified
 from .event_logger import event_logger
 from .docker_host_manager import LOCAL_CONTEXT_NAME, discover_contexts, ping_endpoint
 
@@ -29,7 +29,7 @@ def create_routes(container_manager, orchestrator):
 
         user = get_current_user()
 
-        if not user.is_admin() and not is_verified():
+        if not is_admin() and not is_verified():
             return render_template("remote_desktop.html", page_blocked="unverified")
 
         try:
@@ -120,7 +120,7 @@ def create_routes(container_manager, orchestrator):
 
         user = get_current_user()
 
-        if not user.is_admin() and not is_verified():
+        if not is_admin() and not is_verified():
             return jsonify({"error": "Email verification required"}), 403
 
         try:
@@ -279,7 +279,7 @@ def create_routes(container_manager, orchestrator):
     def trigger_cleanup():
         try:
             user = get_current_user()
-            if not user.is_admin():
+            if not is_admin():
                 return jsonify({"error": "Admin access required"}), 403
 
             container_manager.periodic_cleanup()
