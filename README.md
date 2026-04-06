@@ -27,6 +27,17 @@ git clone <repo-url>
 
 CTFd picks up plugins on startup so you'll need to restart after cloning
 
+### Quick setup
+
+Run the setup script from the CTFd root directory. It handles docker-compose volumes, permissions, and nginx config automatically, and skips anything already configured.
+
+```bash
+bash CTFd/plugins/ctfd-remote-desktop/setup.sh
+docker compose up -d
+```
+
+If you prefer to do it manually or need to understand what the script does, read on.
+
 ### Docker access
 
 CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container. Everything needs to be mounted to paths it can read, not under `/root`.
@@ -60,6 +71,45 @@ services:
 The socket mount gives local Docker access, the SSH mount lets the Docker SDK tunnel to remote hosts, and the docker config mount has the context metadata files the plugin reads to find your configured contexts. Everything is mounted read-only.
 
 If you're only using remote contexts and don't need a local daemon you can skip the socket and `group_add`, but you still need the SSH and docker config mounts
+
+### VNC proxy (nginx)
+
+VNC sessions are proxied through nginx so users never connect directly to container ports. This means remote Docker hosts don't need to be publicly accessible and everything goes through your existing HTTPS setup.
+
+The setup script adds the required nginx location blocks automatically. If your nginx uses a custom config file (like `https.conf` instead of `http.conf`), you may need to add them manually. The blocks needed are:
+
+```nginx
+# inside your server block, before location /
+
+location ~ ^/remote-desktop/vnc/(?<vnc_user_id>\d+)/(?<vnc_path>.+)$ {
+  resolver 127.0.0.11 valid=30s;
+  auth_request /remote-desktop/vnc/auth;
+  auth_request_set $vnc_host $upstream_http_x_vnc_host;
+  auth_request_set $vnc_port $upstream_http_x_vnc_port;
+
+  proxy_pass http://$vnc_host:$vnc_port/$vnc_path$is_args$args;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+  proxy_read_timeout 86400s;
+  proxy_send_timeout 86400s;
+  proxy_buffering off;
+  proxy_cache off;
+  add_header Cache-Control "no-store";
+}
+
+location = /remote-desktop/vnc/auth {
+  internal;
+  proxy_pass http://app_servers;
+  proxy_pass_request_body off;
+  proxy_set_header Content-Length "";
+  proxy_set_header X-VNC-User-ID $vnc_user_id;
+  proxy_set_header Cookie $http_cookie;
+}
+```
+
+The `resolver 127.0.0.11` is Docker's internal DNS, required because nginx uses dynamic `proxy_pass` with variables from the auth response headers. The `auth_request` subrequest hits CTFd to validate the session and get the backend container address. The `Cache-Control: no-store` prevents browsers from caching VNC pages with embedded passwords across sessions
 
 ### Docker contexts
 
@@ -227,9 +277,14 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 - `GET /admin/api/stats/top-users?period=week|month|all` top 15 users by duration
 - `GET /admin/api/stats/usage?period=week|month|all` daily session counts
 
+**VNC Proxy**
+
+- `GET /vnc/auth` internal nginx auth_request endpoint, returns backend host/port in headers
+- `GET /vnc/<user_id>/<path>` proxied through nginx to container (not handled by Flask)
+
 **Contexts**
 
-- `GET /admin/api/contexts` list with live status and `is_local` flag
+- `GET /admin/api/contexts` list with live status, `is_local` flag, and docker socket reachability
 - `GET /admin/api/contexts/discover` scan host for importable contexts with reachability check
 - `POST /admin/api/contexts` add
 - `PUT /admin/api/contexts/<id>` update
