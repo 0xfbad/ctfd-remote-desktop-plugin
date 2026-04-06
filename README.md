@@ -1,16 +1,16 @@
 # Remote Desktop Plugin
 
-CTFd plugin that provisions on-demand Kali desktops across a pool of Docker hosts, students click a button and get a browser VNC session with per-container auth and automatic cleanup
+CTFd plugin that provisions on-demand Kali desktops across a pool of Docker hosts, users click a button and get a browser VNC session with per-container auth and automatic cleanup
 
 ## How it works
 
-When a student requests a session the plugin picks the least-loaded healthy Docker context, hits the Docker API over an SSH tunnel via the docker SDK, runs the container with dynamic port mapping, generates a random VNC password, and builds a direct noVNC URL with the password embedded as a query param so the browser auto-connects with no dialog. The whole thing runs in a gevent greenlet so it doesn't block the request thread, and the frontend polls for creation status updates
+When a user requests a session the plugin picks the least-loaded healthy Docker context, hits the Docker API over an SSH tunnel via the docker SDK, runs the container with dynamic port mapping, generates a random VNC password, and builds a direct noVNC URL with the password embedded as a query param so the browser auto-connects with no dialog. The whole thing runs in a gevent greenlet so it doesn't block the request thread, and the frontend polls for creation status updates
 
-Students connect directly to the container's noVNC port on the runner host, no reverse proxy in the path. Admins can peek at any student's desktop from the dashboard using the same stored password
+Users connect directly to the container's noVNC port on the runner host, no reverse proxy in the path. Admins can peek at any user's desktop from the dashboard using the same stored password
 
 ## Access control
 
-The user-facing page at `/remote-desktop` checks two things before letting a student through. First, the `remote_desktop_enabled` setting must be on, if an admin flips it off in the dashboard settings all users see a full-page message saying the feature has been disabled by an administrator. Second, if CTFd has email verification enabled (`verify_emails` in CTFd config), unverified users get a message telling them to verify their email with a button linking to `/confirm`, matching how CTFd's own challenges page gates access. Admins bypass the verification check but still see the disabled page when the feature is turned off
+The user-facing page at `/remote-desktop` checks two things before letting a user through. First, the `remote_desktop_enabled` setting must be on, if an admin flips it off in the dashboard settings all users see a full-page message saying the feature has been disabled by an administrator. Second, if CTFd has email verification enabled (`verify_emails` in CTFd config), unverified users get a message telling them to verify their email with a button linking to `/confirm`, matching how CTFd's own challenges page gates access. Admins bypass the verification check but still see the disabled page when the feature is turned off
 
 Both checks also gate the `/api/create` endpoint so session creation can't be triggered by hitting the API directly. Existing sessions are unaffected when the feature gets disabled mid-use, they continue running and expire naturally through the periodic cleanup job
 
@@ -29,18 +29,22 @@ CTFd picks up plugins on startup so you'll need to restart after cloning
 
 ### Docker access
 
-The CTFd container needs access to Docker, both for the local socket and for remote hosts over SSH. Add these volumes to your CTFd service in `docker-compose.yml`
+The CTFd container needs access to Docker, both for the local socket and for remote hosts over SSH. Add these to your CTFd service in `docker-compose.yml`
 
 ```yaml
 services:
   ctfd:
+    group_add:
+      - "DOCKER_GID"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/.ssh:/root/.ssh:ro
       - ~/.docker:/root/.docker:ro
 ```
 
-The docker socket lets the SDK talk to the local daemon, the SSH keys let it tunnel to remote hosts, and the docker config directory has the context metadata files the plugin reads to resolve endpoints
+Replace `DOCKER_GID` with the GID of the docker group on the host, you can find it with `stat -c '%g' /var/run/docker.sock`. CTFd runs as a non-root user inside the container so without `group_add` you'll get `PermissionError` when the plugin tries to talk to the socket
+
+The docker socket lets the SDK talk to the local daemon, the SSH keys let it tunnel to remote hosts, and the docker config directory has the context metadata files the plugin reads to resolve endpoints. Docker stores context metadata in hash-named directories under `~/.docker/contexts/meta/`, the plugin scans all of them and matches by the `Name` field inside each `meta.json`
 
 If you're only using remote contexts and don't need a local daemon you can skip the socket mount, but you still need the SSH and docker config mounts
 
@@ -57,11 +61,11 @@ docker context create server1 --docker "host=ssh://user@server1.example.com"
 docker context create server2 --docker "host=ssh://user@server2.example.com"
 ```
 
-Then add them through the Docker Contexts section on the admin config page (`/admin/config` under the Remote Desktop tab), each context needs a name matching what you created above, an optional SSH hostname (used as fallback if the context meta file is missing), a public hostname (what students see in their VNC URLs), and a weight for load balancing
+Then go to the Docker Contexts section on the admin config page (`/admin/config` under the Remote Desktop tab) and click Import Contexts. The plugin scans `~/.docker/contexts/meta/` for available contexts and checks if the local Docker socket is accessible, then shows what it found with a connectivity status for each. Set the public hostname (what users see in VNC URLs) and click Import. You can adjust weight and other settings after importing by clicking Edit on the context in the table
 
 ### Container image
 
-The image needs to be pre-pulled on every Docker host before students can use it. Pull it manually on each host or use a CI pipeline to push it out
+The image needs to be pre-pulled on every Docker host before users can use it. Pull it manually on each host or use a CI pipeline to push it out
 
 The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), and `RESOLUTION` env vars, and serve the noVNC web client at `/vnc.html` with a WebSocket endpoint at `/websockify`
 
@@ -100,7 +104,7 @@ On startup the plugin runs a reconciliation pass that checks every DB record aga
 
 ## Session history
 
-Every session that ends gets a row in `desktop_session_history` recording user_id, username, docker_context, started_at, ended_at, duration, end_reason, and extensions_used. The end_reason field tracks how the session ended: `user_destroyed` when the student clicks destroy, `expired` when the timer runs out, `admin_killed` when an admin kills it from the dashboard, or `reconciliation` when the startup check finds a stale record
+Every session that ends gets a row in `desktop_session_history` recording user_id, username, docker_context, started_at, ended_at, duration, end_reason, and extensions_used. The end_reason field tracks how the session ended: `user_destroyed` when the user clicks destroy, `expired` when the timer runs out, `admin_killed` when an admin kills it from the dashboard, or `reconciliation` when the startup check finds a stale record
 
 The admin dashboard has a Usage Stats section that queries this history. Summary cards show total sessions, average duration, and peak concurrent sessions (calculated with a sweep-line algorithm over all start/end intervals). A top users chart shows the 15 heaviest users by total duration, and a daily usage chart shows session counts over time. Both charts filter by a shared period dropdown (past week, past month, all time)
 
@@ -110,7 +114,7 @@ Admins can also kill all active sessions at once with the Kill All button in the
 
 Every container gets hardened defaults
 
-- `cap_drop=["ALL"]` drops all Linux capabilities, then `cap_add` re-grants only the ones needed: CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE for startup user creation and su, NET_RAW and NET_ADMIN for wireshark/nmap, SETFCAP for granting dumpcap packet capture. Students get full sudo inside their container which is intentional for a CTF lab
+- `cap_drop=["ALL"]` drops all Linux capabilities, then `cap_add` re-grants only the ones needed: CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE for startup user creation and su, NET_RAW and NET_ADMIN for wireshark/nmap, SETFCAP for granting dumpcap packet capture. Users get full sudo inside their container which is intentional for a CTF lab
 - `pids_limit` from settings (default 512) caps the process count to prevent fork bombs
 - `auto_remove=True` so Docker cleans up the filesystem when the container stops
 
@@ -118,14 +122,14 @@ Every container gets hardened defaults
 
 The plugin sanitizes CTFd display names down to `[a-z0-9]` (lowercase, strip everything non-alphanumeric, truncate to 32 chars) before passing them to the container as `CTFD_USERNAME`. The `username_source` setting controls what gets sanitized
 
-- `name` (default): uses the CTFd display name, so a student named `Alice B.` becomes `aliceb`
-- `email`: uses the local part of the student's email, so `jdoe@ucsc.edu` becomes `jdoe`
+- `name` (default): uses the CTFd display name, so a user named `Alice B.` becomes `aliceb`
+- `email`: uses the local part of the user's email, so `jdoe@ucsc.edu` becomes `jdoe`
 
 If sanitization produces an empty string (a name like `;-;` strips to nothing) the plugin falls back to `user{id}`, for example `user42`. This is computed at container creation time, the raw display name is still used in logs and the admin dashboard
 
 ## VNC auth
 
-The plugin generates a random 8-char password per container and passes it as `VNC_PASSWORD` to the container. The container's startup script writes a VNC passwd file and launches Xvnc with `-SecurityTypes VncAuth`. The plugin then builds a direct URL with the password as a query param, noVNC reads it and sends it to VNC automatically so the student connects with zero interaction
+The plugin generates a random 8-char password per container and passes it as `VNC_PASSWORD` to the container. The container's startup script writes a VNC passwd file and launches Xvnc with `-SecurityTypes VncAuth`. The plugin then builds a direct URL with the password as a query param, noVNC reads it and sends it to VNC automatically so the user connects with zero interaction
 
 VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:8]` gives 48 bits of entropy which is plenty for preventing port-scan drive-bys in a classroom setting. The password shows up in the browser URL bar and history, fine for a lab environment
 
@@ -139,7 +143,7 @@ A `config.json` at the root registers the plugin's settings panel inline on CTFd
 
 ### DockerHostManager
 
-Manages docker SDK clients for each configured docker context, uses thread-local client caching with a generation counter so each thread gets its own `DockerClient` instance and stale clients from old configs get dropped transparently when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, tries resolving the endpoint from the docker context meta file at `~/.docker/contexts/meta/{name}/meta.json` first, falls back to `ssh://{hostname}` from the DB record, and as a final fallback connects via the local Docker socket at `/var/run/docker.sock` if it exists. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of students hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
+Manages docker SDK clients for each configured docker context, uses thread-local client caching with a generation counter so each thread gets its own `DockerClient` instance and stale clients from old configs get dropped transparently when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, resolves each endpoint by scanning all directories under `~/.docker/contexts/meta/` and matching by the `Name` field inside each `meta.json` (Docker stores these in hash-named directories, not by context name). Falls back to `ssh://{hostname}` from the DB record if no meta match is found, and as a final fallback connects via the local Docker socket at `/var/run/docker.sock` if it exists. Also exposes `discover_contexts()` which scans the same metadata directories and the local socket to find all available contexts for import. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of users hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
 
 ### Orchestrator
 
@@ -159,7 +163,7 @@ All configuration is stored in the database via `DesktopSettingsModel` and manag
 
 ### Docker contexts
 
-Managed through the admin dashboard, each context has a name (matching a docker context on the host or just a label), an optional SSH hostname, a public hostname (what students see in VNC URLs), a weight for load balancing, and an enabled flag. A `local` context is auto-seeded on first boot when the Docker socket is available. Add, edit, delete, test connectivity, and reload connections all from the UI without restarting CTFd
+Managed through the admin dashboard. Click Import Contexts to scan the host for available docker contexts, each discovered context shows its endpoint and whether it's reachable. Set a public hostname (what users see in VNC URLs) and import. After importing you can edit weight, public hostname, and enabled status. A `local` context is auto-seeded on first boot when the Docker socket is available. Test connectivity, reload connections, and delete contexts all from the UI without restarting CTFd
 
 ### Default settings
 
@@ -173,7 +177,7 @@ Managed through the admin dashboard, each context has a name (matching a docker 
 | cpu_limit | 2 | max cpu cores per container |
 | initial_duration | 3600 | how long a session lasts in seconds before it expires |
 | extension_duration | 1800 | how many seconds each extension adds |
-| max_extensions | 3 | how many times a student can extend their session |
+| max_extensions | 3 | how many times a user can extend their session |
 | vnc_ready_attempts | 180 | number of http polls to wait for novnc to come up, each attempt is 0.5s apart |
 | http_request_timeout | 3 | timeout in seconds for each novnc readiness poll |
 | cleanup_interval | 300 | how often the scheduler scans for expired sessions in seconds |
@@ -215,6 +219,7 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 **Contexts**
 
 - `GET /admin/api/contexts` list with live status and `is_local` flag
+- `GET /admin/api/contexts/discover` scan host for importable contexts with reachability check
 - `POST /admin/api/contexts` add
 - `PUT /admin/api/contexts/<id>` update
 - `DELETE /admin/api/contexts/<id>` delete
@@ -253,9 +258,11 @@ The health check job runs every 30 seconds, pinging each context and automatical
 
 On startup the plugin queries all `DesktopContainerInfoModel` rows and checks each against Docker to see if the container is still running. Containers that are gone get a history entry written and their DB records deleted. Containers that are still alive get their orchestrator slots reserved so the load balancer has accurate counts from the start. If the Docker host is unreachable the record gets treated as stale and removed
 
-This means a CTFd restart doesn't kill active student sessions, they survive and get picked back up automatically
+This means a CTFd restart doesn't kill active user sessions, they survive and get picked back up automatically
 
 ## Troubleshooting
+
+**Docker socket permission denied**: CTFd runs as a non-root user inside the container. If you see `PermissionError(13)` in the logs, add `group_add: ["DOCKER_GID"]` to the CTFd service in docker-compose.yml where DOCKER_GID is the output of `stat -c '%g' /var/run/docker.sock` on the host
 
 **Sessions not creating**: check that Docker contexts are configured and the image is pulled on all hosts, use the Test button in the admin context UI to verify connectivity and image availability
 
