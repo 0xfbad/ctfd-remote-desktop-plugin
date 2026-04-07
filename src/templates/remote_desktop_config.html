@@ -56,6 +56,14 @@
                     <option value="email">Email (before @)</option>
                 </select>
             </div>
+            <div class="form-group">
+                <label>Cap Drop <span class="cfg-help" data-tip="Linux capabilities to drop from containers, comma-separated. Use ALL to drop everything then selectively add back with Cap Add. Changes only affect new sessions.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-cap_drop">
+            </div>
+            <div class="form-group">
+                <label>Cap Add <span class="cfg-help" data-tip="Linux capabilities to add to containers, comma-separated. These are granted on top of whatever remains after Cap Drop. Must include caps matching any file capabilities on binaries in the image (e.g. nmap needs NET_RAW, NET_ADMIN, NET_BIND_SERVICE) or those binaries won't be executable. Changes only affect new sessions.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-cap_add">
+            </div>
         </div>
         <div class="col-md-4">
             <h5>Session Timers</h5>
@@ -252,7 +260,7 @@
 (function() {
     var rdSettingKeys = [
         'remote_desktop_enabled', 'require_verified', 'command_logging_enabled',
-        'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit', 'username_source',
+        'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit', 'username_source', 'cap_drop', 'cap_add',
         'initial_duration', 'extension_duration', 'max_extensions',
         'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'
     ];

@@ -244,6 +244,8 @@ class DockerHostManager:
 
         client = self._get_client(context_name)
         pids_limit = get_setting("pids_limit")
+        cap_drop = [c.strip() for c in get_setting("cap_drop").split(",") if c.strip()]
+        cap_add = [c.strip() for c in get_setting("cap_add").split(",") if c.strip()]
 
         port_bindings = {p: None for p in ports}
 
@@ -259,19 +261,8 @@ class DockerHostManager:
                 shm_size=shm_size,
                 mem_limit=memory,
                 nano_cpus=nano_cpus,
-                cap_drop=["ALL"],
-                cap_add=[
-                    "CHOWN",
-                    "SETUID",
-                    "SETGID",
-                    "FOWNER",
-                    "DAC_OVERRIDE",
-                    "NET_RAW",
-                    "NET_ADMIN",
-                    "SETFCAP",
-                    "AUDIT_WRITE",
-                    "SYS_CHROOT",
-                ],
+                cap_drop=cap_drop,
+                cap_add=cap_add,
                 pids_limit=pids_limit,
             )
         except docker.errors.DockerException:

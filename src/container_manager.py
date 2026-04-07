@@ -13,7 +13,7 @@ from .docker_host_manager import parse_size
 
 logger = logging.getLogger(__name__)
 
-_ALNUM_RE = re.compile(r"[^a-z0-9]")
+_USERNAME_RE = re.compile(r"[^a-z0-9_-]")
 _RESERVED_NAMES = {
     "root",
     "daemon",
@@ -42,7 +42,9 @@ _RESERVED_NAMES = {
 
 
 def _sanitize_username(raw, user_id=None):
-    name = _ALNUM_RE.sub("", raw.lower())[:32]
+    name = _USERNAME_RE.sub("", raw.lower())
+    # linux usernames must start with a letter or underscore
+    name = name.lstrip("0123456789-")[:32]
     if not name or name in _RESERVED_NAMES:
         return f"user{user_id}" if user_id else "user"
     return name
@@ -208,6 +210,12 @@ class ContainerManager:
 
             vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
 
+            # check if destroy was called while we were setting up
+            with self.lock:
+                status = self.creation_status.get(user_id)
+                if status and status.get("status") == "cancelled":
+                    raise Exception("creation cancelled by user")
+
             row = DesktopContainerInfoModel(
                 container_id=container_id,
                 user_id=user_id,
@@ -227,8 +235,12 @@ class ContainerManager:
                 extensions_used=0,
                 max_extensions=max_extensions,
             )
-            db.session.add(row)
-            db.session.commit()
+            try:
+                db.session.add(row)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                raise
 
             with self.lock:
                 self.creation_status[user_id] = {
@@ -366,7 +378,12 @@ class ContainerManager:
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
 
         with self.lock:
-            self.creation_status.pop(user_id, None)
+            status = self.creation_status.get(user_id)
+            if status and status.get("status") not in (None, "failed", "ready"):
+                # creation is in-flight, signal the background greenlet to abort
+                self.creation_status[user_id] = {"status": "cancelled"}
+            else:
+                self.creation_status.pop(user_id, None)
 
         if row is None:
             return {"success": False, "error": "No active container found"}
@@ -447,10 +464,15 @@ class ContainerManager:
 
     def get_all_containers(self):
         rows = DesktopContainerInfoModel.query.all()
-        containers = []
+        if not rows:
+            return []
 
+        user_ids = [row.user_id for row in rows]
+        users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
+
+        containers = []
         for row in rows:
-            user = Users.query.filter_by(id=row.user_id).first()
+            user = users_by_id.get(row.user_id)
             timer_status = self.get_session_timer_status(row.user_id)
 
             container_data = {
@@ -545,6 +567,20 @@ class ContainerManager:
 
     def periodic_cleanup(self):
         with self.app.app_context():
+            # purge stale creation_status entries for users with no active session
+            with self.lock:
+                active_user_ids = {
+                    r.user_id
+                    for r in DesktopContainerInfoModel.query.with_entities(DesktopContainerInfoModel.user_id).all()
+                }
+                stale = [
+                    uid
+                    for uid, s in self.creation_status.items()
+                    if s.get("status") in ("failed", "ready", "cancelled") and uid not in active_user_ids
+                ]
+                for uid in stale:
+                    del self.creation_status[uid]
+
             rows = DesktopContainerInfoModel.query.filter_by(timer_started=True).all()
 
             expired_user_ids = []

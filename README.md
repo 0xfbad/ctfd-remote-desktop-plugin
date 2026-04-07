@@ -248,19 +248,19 @@ Exit codes in the command feed and per-user history have human-readable tooltips
 
 Every container gets hardened defaults
 
-- `cap_drop=["ALL"]` drops all Linux capabilities, then `cap_add` re-grants only the ones needed: CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE for startup user creation and su, NET_RAW and NET_ADMIN for wireshark/nmap, SETFCAP for granting dumpcap packet capture, AUDIT_WRITE for sudo audit logging, SYS_CHROOT for sshd privilege separation
+- `cap_drop` and `cap_add` are configurable from the admin settings UI. By default all capabilities are dropped and a specific set is added back. If binaries in the container image have file capabilities set (check with `getcap`), every capability in the file's set must appear in `cap_add` or the kernel will refuse to execute the binary. Changes only affect new sessions
 - `pids_limit` from settings (default 512) caps the process count to prevent fork bombs
 - `auto_remove=True` so Docker cleans up the filesystem when the container stops
 - SSH access is locked to the session user via `AllowUsers` and `PermitRootLogin no` in sshd_config
 
 ## Container usernames
 
-The plugin sanitizes CTFd display names down to `[a-z0-9]` (lowercase, strip everything non-alphanumeric, truncate to 32 chars) before passing them to the container as `CTFD_USERNAME`. The `username_source` setting controls what gets sanitized
+The plugin sanitizes CTFd display names into valid Linux usernames before passing them to the container as `CTFD_USERNAME`. Keeps lowercase letters, digits, underscores, and hyphens, strips leading digits and hyphens (Linux usernames must start with a letter or underscore), then truncates to 32 characters. The `username_source` setting controls the input
 
-- `name` (default): uses the CTFd display name, so a user named `Alice B.` becomes `aliceb`
+- `name` (default): uses the CTFd display name, so `Alice B.` becomes `aliceb`, `john_doe` becomes `john_doe`
 - `email`: uses the local part of the user's email, so `jdoe@ucsc.edu` becomes `jdoe`
 
-If sanitization produces an empty string (a name like `;-;` strips to nothing) or matches a reserved system name (root, daemon, sshd, nobody, etc) the plugin falls back to `user{id}`, for example `user42`. This prevents someone from registering as "root" on CTFd and getting a container where their linux username is root. The raw display name is still used in logs and the admin dashboard
+Falls back to `user{id}` (e.g. `user42`) when sanitization produces an empty string (`;-;`), an all-numeric name (`12345`, which conflicts with Linux UID lookup), or a reserved system name (root, daemon, sshd, nobody, etc). The raw display name is still used in logs and the admin dashboard
 
 ## Authentication
 
@@ -424,6 +424,8 @@ This means a CTFd restart doesn't kill active user sessions, they survive and ge
 **Sessions lost after restart**: this shouldn't happen anymore since state is in the database, if it does check the CTFd logs for reconciliation messages, you should see something like "reconciled containers on startup: N recovered, M stale records removed"
 
 **Containers piling up on one host**: the orchestrator uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
+
+**Tool won't run, "Operation not permitted" on exec**: the binary likely has file capabilities set (e.g. nmap has `cap_net_bind_service,cap_net_admin,cap_net_raw=eip`). If any capability in the file's set is missing from the container's bounding set, the kernel blocks the exec entirely. Run `getcap /path/to/binary` inside the container to see what it needs, then add the missing caps to the Cap Add setting in the admin UI
 
 **Too many open files / container crash after ~1 hour**: the CTFd container's default fd limit (typically 1024) can be exhausted by leaked sockets. If you're hitting this, raise the limit by adding `ulimits: { nofile: { soft: 65536, hard: 65536 } }` to the ctfd service in docker-compose.yml
 

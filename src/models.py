@@ -83,6 +83,8 @@ SETTING_DEFAULTS = {
     "require_verified": True,
     "command_logging_enabled": False,
     "command_log_interval": 30,
+    "cap_drop": "ALL",
+    "cap_add": "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_ADMIN,NET_BIND_SERVICE,SETFCAP,AUDIT_WRITE,SYS_CHROOT",
 }
 
 
