@@ -6,10 +6,8 @@ from docker_host_manager import _resolve_endpoint
 def test_meta_file_endpoint():
     meta = {"Endpoints": {"docker": {"Host": "ssh://user@host:22"}}}
 
-    with patch("docker_host_manager.os.path.expanduser", return_value="/fake/meta.json"):
-        with patch("docker_host_manager.os.path.exists", return_value=True):
-            with patch("builtins.open", mock_open(read_data=json.dumps(meta))):
-                result = _resolve_endpoint("test-ctx", hostname=None)
+    with patch("docker_host_manager._scan_context_meta", return_value=meta):
+        result = _resolve_endpoint("test-ctx", hostname=None)
 
     assert result == "ssh://user@host:22"
 
@@ -45,10 +43,8 @@ def test_local_socket_fallback():
 def test_meta_file_takes_priority_over_hostname():
     meta = {"Endpoints": {"docker": {"Host": "tcp://localhost:2375"}}}
 
-    with patch("docker_host_manager.os.path.expanduser", return_value="/fake/meta.json"):
-        with patch("docker_host_manager.os.path.exists", return_value=True):
-            with patch("builtins.open", mock_open(read_data=json.dumps(meta))):
-                result = _resolve_endpoint("ctx", hostname="other-host")
+    with patch("docker_host_manager._scan_context_meta", return_value=meta):
+        result = _resolve_endpoint("ctx", hostname="other-host")
 
     assert result == "tcp://localhost:2375"
 

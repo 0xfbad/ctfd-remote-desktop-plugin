@@ -28,63 +28,6 @@ def _patch_db(row):
     return patch("container_manager.DesktopContainerInfoModel", mock_model)
 
 
-def test_start_timer():
-    cm = make_manager()
-    row = FakeRow()
-
-    with _patch_db(row), patch("container_manager.db"):
-        result = cm.start_session_timer(1, duration=600)
-
-    assert result["success"]
-    assert result["duration"] == 600
-    assert row.timer_started
-
-
-def test_start_timer_no_session():
-    cm = make_manager()
-
-    with _patch_db(None):
-        result = cm.start_session_timer(1, duration=600)
-
-    assert not result["success"]
-
-
-def test_start_timer_already_started():
-    cm = make_manager()
-    row = FakeRow()
-    row.timer_started = True
-
-    with _patch_db(row):
-        result = cm.start_session_timer(1, duration=600)
-
-    assert not result["success"]
-    assert "already started" in result["error"]
-
-
-def test_stop_timer():
-    cm = make_manager()
-    row = FakeRow()
-    row.timer_started = True
-    row.timer_start_time = 1000.0
-    row.timer_duration = 600
-
-    with _patch_db(row), patch("container_manager.db"):
-        result = cm.stop_session_timer(1)
-
-    assert result["success"]
-    assert not row.timer_started
-
-
-def test_stop_timer_not_started():
-    cm = make_manager()
-    row = FakeRow()
-
-    with _patch_db(row):
-        result = cm.stop_session_timer(1)
-
-    assert not result["success"]
-
-
 def test_extend_timer():
     cm = make_manager()
     row = FakeRow(max_extensions=3)

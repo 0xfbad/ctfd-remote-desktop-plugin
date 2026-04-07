@@ -3,7 +3,7 @@ from container_manager import ContainerManager
 
 
 def make_manager():
-    cm = ContainerManager(MagicMock(), MagicMock())
+    cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
     return cm
 
 
