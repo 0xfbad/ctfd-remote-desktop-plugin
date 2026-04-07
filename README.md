@@ -384,7 +384,7 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 
 CTFd runs under gunicorn with gevent workers. Container creation uses `gevent.spawn()` to avoid blocking request threads during Docker API calls and startup polling. State protection uses `threading.Lock` since greenlets within the same worker share memory
 
-The docker SDK maintains SSH tunnels per client instance, thread-local caching means each thread gets its own connection so there's no contention on a shared client. Per-context semaphores limit concurrent container creation (default 2) so a burst of requests doesn't overwhelm the Docker daemon
+Docker clients are cached per context in a shared process-level dict protected by the host manager lock. One client per context is reused across all greenlets. When a client hits a connection error it gets closed and evicted so the next call creates a fresh one. Config reloads (context add/remove from the admin UI) bump a generation counter that triggers a full close-and-recreate cycle on next access. Per-context semaphores limit concurrent container creation (default 2) so a burst of requests doesn't overwhelm the Docker daemon
 
 All shared state is guarded by component-level locks: ContainerManager.lock for creation_status, Orchestrator.lock for container counts and health, EventLogger.lock for the events deque and listeners list. Lock acquisition is never nested so there's no deadlock risk
 
@@ -424,6 +424,8 @@ This means a CTFd restart doesn't kill active user sessions, they survive and ge
 **Sessions lost after restart**: this shouldn't happen anymore since state is in the database, if it does check the CTFd logs for reconciliation messages, you should see something like "reconciled containers on startup: N recovered, M stale records removed"
 
 **Containers piling up on one host**: the orchestrator uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
+
+**Too many open files / container crash after ~1 hour**: the CTFd container's default fd limit (typically 1024) can be exhausted by leaked sockets. If you're hitting this, raise the limit by adding `ulimits: { nofile: { soft: 65536, hard: 65536 } }` to the ctfd service in docker-compose.yml
 
 **Timer showing wrong values**: MySQL/MariaDB `FLOAT` is 32-bit, only ~7 significant digits, which rounds Unix timestamps by thousands of seconds. The plugin auto-detects FLOAT columns on startup and upgrades them to DOUBLE via ALTER TABLE. If you see stale timer values on an existing session, destroy it and start a new one since the old row's timestamps were already rounded when written
 

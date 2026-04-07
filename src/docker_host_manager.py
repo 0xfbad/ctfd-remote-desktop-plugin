@@ -114,43 +114,46 @@ def ping_endpoint(endpoint, timeout=3):
         return False
 
 
-class _ThreadLocalClients(threading.local):
-    def __init__(self):
-        super().__init__()
-        self.clients = {}
-        self.generation = -1
-
-
 class DockerHostManager:
     def __init__(self):
         self._context_configs = {}  # {context_name: endpoint_url}
         self._pub_hostnames = {}  # {context_name: pub_hostname}
-        self._thread_local = _ThreadLocalClients()
+        self._clients = {}  # {context_name: DockerClient}
         self._config_generation = 0
+        self._client_generation = -1
         self._lock = threading.Lock()
         self._semaphores = {}
 
     def _get_client(self, context_name):
-        tl = self._thread_local
+        with self._lock:
+            if self._client_generation != self._config_generation:
+                for old in self._clients.values():
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                self._clients = {}
+                self._client_generation = self._config_generation
 
-        if tl.generation != self._config_generation:
-            tl.clients = {}
-            tl.generation = self._config_generation
+            if context_name in self._clients:
+                return self._clients[context_name]
 
-        clients = tl.clients
-        if context_name in clients:
-            return clients[context_name]
+            url = self._context_configs.get(context_name)
+            if not url:
+                raise Exception(f"no client for context '{context_name}'")
 
-        url = self._context_configs.get(context_name)
-        if not url:
-            raise Exception(f"no client for context '{context_name}'")
+            client = docker.DockerClient(base_url=url)
+            self._clients[context_name] = client
+            return client
 
-        client = docker.DockerClient(base_url=url)
-        clients[context_name] = client
-        return client
-
-    def _clear_thread_local_client(self, context_name):
-        self._thread_local.clients.pop(context_name, None)
+    def _clear_client(self, context_name):
+        with self._lock:
+            old = self._clients.pop(context_name, None)
+        if old:
+            try:
+                old.close()
+            except Exception:
+                pass
 
     def _init_semaphores(self):
         from .models import get_setting
@@ -231,7 +234,7 @@ class DockerHostManager:
             client.ping()
             return True
         except Exception:
-            self._clear_thread_local_client(context_name)
+            self._clear_client(context_name)
             return False
 
     def run_container(
@@ -272,7 +275,7 @@ class DockerHostManager:
                 pids_limit=pids_limit,
             )
         except docker.errors.DockerException:
-            self._clear_thread_local_client(context_name)
+            self._clear_client(context_name)
             raise
 
         # poll for port mappings (container might take a moment to bind)
@@ -314,7 +317,7 @@ class DockerHostManager:
                 # container already gone (auto-removed)
                 logger.debug(f"container {container_name} already removed")
             except docker.errors.DockerException:
-                self._clear_thread_local_client(context_name)
+                self._clear_client(context_name)
                 raise
         except Exception as e:
             logger.error(f"error stopping container {container_name}: {e}")
@@ -359,10 +362,10 @@ class DockerHostManager:
         except docker.errors.NotFound:
             return -1, ""
         except docker.errors.DockerException:
-            self._clear_thread_local_client(context_name)
+            self._clear_client(context_name)
             return -1, ""
         except Exception:
-            self._clear_thread_local_client(context_name)
+            self._clear_client(context_name)
             return -1, ""
 
     def is_container_running(self, context_name, container_id):
@@ -373,5 +376,5 @@ class DockerHostManager:
         except docker.errors.NotFound:
             return False
         except docker.errors.DockerException:
-            self._clear_thread_local_client(context_name)
+            self._clear_client(context_name)
             raise
