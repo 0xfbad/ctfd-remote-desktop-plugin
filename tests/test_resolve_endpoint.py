@@ -1,4 +1,3 @@
-import json
 from unittest.mock import mock_open, patch
 from docker_host_manager import _resolve_endpoint
 
