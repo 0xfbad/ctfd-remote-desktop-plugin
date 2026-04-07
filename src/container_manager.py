@@ -208,8 +208,6 @@ class ContainerManager:
 
             vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
 
-            max_extensions = self._get_setting("max_extensions")
-
             row = DesktopContainerInfoModel(
                 container_id=container_id,
                 user_id=user_id,
@@ -223,9 +221,9 @@ class ContainerManager:
                 docker_context=context_name,
                 pub_hostname=pub_hostname,
                 created_at=time.time(),
-                timer_started=False,
-                timer_start_time=None,
-                timer_duration=0,
+                timer_started=True,
+                timer_start_time=time.time(),
+                timer_duration=float(initial_duration),
                 extensions_used=0,
                 max_extensions=max_extensions,
             )
@@ -458,12 +456,16 @@ class ContainerManager:
             container_data = {
                 "user_id": row.user_id,
                 "username": user.name if user else "Unknown",
+                "is_admin": user.type == "admin" if user else False,
+                "is_hidden": getattr(user, "hidden", False) if user else False,
+                "is_banned": getattr(user, "banned", False) if user else False,
                 "container_name": row.container_name,
                 "container_id": row.container_id,
                 "docker_context": row.docker_context,
                 "created_at": row.created_at,
                 "vnc_port": row.vnc_port,
                 "novnc_port": row.novnc_port,
+                "vnc_password": row.vnc_password,
                 "vnc_url": row.vnc_url,
                 "timer": {
                     "active": timer_status.get("started", False),
@@ -477,42 +479,6 @@ class ContainerManager:
             containers.append(container_data)
 
         return containers
-
-    def start_session_timer(self, user_id, duration=None):
-        if duration is None:
-            duration = self._get_setting("initial_duration")
-
-        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
-        if not row:
-            return {"success": False, "error": "No active session"}
-
-        if row.timer_started:
-            return {"success": False, "error": "Timer already started"}
-
-        row.timer_started = True
-        row.timer_start_time = time.time()
-        row.timer_duration = duration
-        row.extensions_used = 0
-        db.session.commit()
-
-        logger.info(f"started timer for user {user_id}: {duration}s")
-        return {"success": True, "duration": duration}
-
-    def stop_session_timer(self, user_id):
-        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
-        if not row:
-            return {"success": False, "error": "No active session"}
-
-        if not row.timer_started:
-            return {"success": False, "error": "Timer not started"}
-
-        row.timer_started = False
-        row.timer_start_time = None
-        row.timer_duration = 0
-        db.session.commit()
-
-        logger.info(f"stopped timer for user {user_id}")
-        return {"success": True}
 
     def extend_session_timer(self, user_id, new_duration=None):
         user = Users.query.filter_by(id=user_id).first()

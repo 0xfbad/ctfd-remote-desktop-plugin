@@ -656,6 +656,26 @@
 		255: 'exit out of range',
 	};
 
+	function userBadges(obj) {
+		let b = '';
+		if (obj.is_admin) b += ' <i class="fas fa-shield-alt" style="color:#adb5bd" title="Admin"></i>';
+		if (obj.is_hidden) b += ' <i class="fas fa-eye-slash" style="color:#adb5bd" title="Hidden"></i>';
+		if (obj.is_banned) b += ' <i class="fas fa-ban" style="color:#adb5bd" title="Banned"></i>';
+		return b;
+	}
+
+	const _userFlags = {};
+
+	function userLink(obj, fallbackId) {
+		const uid = obj.user_id || fallbackId;
+		if (uid && (obj.is_admin || obj.is_hidden || obj.is_banned)) {
+			_userFlags[uid] = {is_admin: obj.is_admin, is_hidden: obj.is_hidden, is_banned: obj.is_banned};
+		}
+		const flags = _userFlags[uid] || obj;
+		const name = escapeHtml(obj.username || `User ${uid}`);
+		return `<a href="/admin/users/${parseInt(uid)}">${name}</a>${userBadges(flags)}`;
+	}
+
 	function exitCodeTitle(code) {
 		if (code === null || code === undefined) return '';
 		if (EXIT_CODE_LABELS[code]) return EXIT_CODE_LABELS[code];
@@ -711,9 +731,14 @@
 				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
 			case 'session_error':
 				return event.message;
-			case 'admin_action':
+			case 'admin_action': {
+				const target = m.target_id ? `<a href="/admin/users/${m.target_id}">${escapeHtml(m.target)}</a>` : m.target;
 				if (m.killed_count !== undefined) return `purged ${m.killed_count} sessions`;
-				return m.admin_name ? `by ${m.admin_name}` : '';
+				if (m.action === 'kill') return `killed ${target}'s session`;
+				if (m.action === 'extend') return `extended ${target}'s session`;
+				if (m.action === 'peek') return `monitoring ${target}'s session`;
+				return '';
+			}
 			case 'host_unhealthy':
 				return [m.context_name, m.reason].filter(Boolean).join(': ');
 			case 'host_healthy': {
@@ -727,7 +752,12 @@
 		}
 	}
 
+	const seenEventIds = new Set();
+
 	function addEventToFeed(event) {
+		if (event.id && seenEventIds.has(event.id)) return;
+		if (event.id) seenEventIds.add(event.id);
+
 		const feed = document.getElementById('event-feed');
 		const empty = document.getElementById('event-feed-empty');
 		if (empty) empty.remove();
@@ -736,12 +766,13 @@
 		const badgeClass = EVENT_BADGE_CLASS[event.type] || 'badge-secondary';
 		const label = EVENT_LABELS[event.type] || event.type;
 		const details = formatEventDetails(event);
+		const detailsText = details.replace(/<[^>]*>/g, '');
 
 		row.innerHTML = `
 			<td class="log-time">${escapeHtml(formatTimestamp(event.timestamp))}</td>
-			<td class="log-user">${event.username ? `<a href="/admin/users/${event.user_id}">${escapeHtml(event.username)}</a>` : ''}</td>
+			<td class="log-user">${event.username ? userLink({user_id: event.user_id, username: event.username}, event.user_id) : ''}</td>
 			<td><span class="badge ${badgeClass}">${escapeHtml(label)}</span></td>
-			<td class="log-detail cell-clip" title="${escapeHtml(details)}">${escapeHtml(details)}</td>
+			<td class="log-detail cell-clip" title="${escapeHtml(detailsText)}">${details}</td>
 		`;
 
 		feed.insertBefore(row, feed.firstChild);
@@ -811,15 +842,18 @@
 		containers.forEach(container => {
 			activeContainers[container.user_id] = container;
 
+			const timerActive = container.timer && container.timer.active;
 			const timeRemaining = container.timer ? container.timer.time_remaining : 0;
-			const statusClass = timeRemaining <= 0 ? 'status-expired' :
+			const statusClass = !timerActive ? 'status-warning' :
+							   timeRemaining <= 0 ? 'status-expired' :
 							   timeRemaining < 300 ? 'status-warning' : 'status-active';
-			const status = timeRemaining <= 0 ? 'EXPIRED' :
+			const status = !timerActive ? 'STARTING' :
+						  timeRemaining <= 0 ? 'EXPIRED' :
 						  timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
 
 			const row = `
 				<tr>
-					<td class="log-user"><a href="/admin/users/${parseInt(container.user_id)}">${escapeHtml(container.username)}</a></td>
+					<td class="log-user">${userLink(container)}</td>
 					<td class="cell-clip-sm" title="${escapeHtml(container.container_name)}"><code>${escapeHtml(container.container_name)}</code></td>
 					<td>${escapeHtml(container.docker_context || '')}</td>
 					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
@@ -853,10 +887,15 @@
 
 		const username = container.username || `User ${userId}`;
 		const windowName = `vnc_peek_${userId}`;
-		const vncWindow = window.open(container.vnc_url + '&viewonly=1', windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
+		const vncWindow = window.open(container.vnc_url + '&view_only=true', windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
 
 		if (!vncWindow) {
 			CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
+		} else {
+			const fd = new FormData();
+			fd.append('nonce', CTFd.config.csrfNonce);
+			fd.append('user_id', userId);
+			fetch('/remote-desktop/dashboard/api/peek', {method: 'POST', credentials: 'same-origin', body: fd});
 		}
 	}
 
@@ -1201,7 +1240,7 @@
 				const exitTip = exitCodeTitle(log.exit_code);
 				return `<tr>
 					<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
-					<td class="log-user"><a href="/admin/users/${log.user_id}">${escapeHtml(log.username)}</a></td>
+					<td class="log-user">${userLink(log, log.user_id)}</td>
 					<td class="cell-clip" title="${escapeHtml(log.command)}"><code>${escapeHtml(log.command)}</code></td>
 					<td><span class="badge ${exitBadge}" ${exitTip ? `title="${exitTip}"` : ''}>${exitText}</span></td>
 				</tr>`;
@@ -1256,7 +1295,7 @@
 			}
 			tbody.innerHTML = users.map(u => `
 				<tr>
-					<td class="log-user"><a href="/admin/users/${parseInt(u.user_id)}">${escapeHtml(u.username)}</a></td>
+					<td class="log-user">${userLink(u)}</td>
 					<td><a href="#" class="cmd-history-link" data-userid="${parseInt(u.user_id)}" data-username="${escapeHtml(u.username)}">${u.total_commands.toLocaleString()}</a></td>
 					<td>${u.avg_per_session}</td>
 					<td>${u.unique_tools}</td>

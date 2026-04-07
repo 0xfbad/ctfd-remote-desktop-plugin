@@ -80,6 +80,7 @@ SETTING_DEFAULTS = {
     "pids_limit": 512,
     "max_concurrent_creates": 2,
     "username_source": "name",
+    "require_verified": True,
     "command_logging_enabled": False,
     "command_log_interval": 30,
 }

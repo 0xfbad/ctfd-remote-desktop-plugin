@@ -367,9 +367,7 @@
 let sessionTimer = null;
 let timeRemaining = 0;
 let continuationsUsed = 0;
-const maxContinuations = 3;
-let lastFailedHostname = '';
-let errorAlreadyShown = false;
+let maxContinuations = {{ max_extensions | default(3) }};
 let expirationWarningShown = false;
 const terminalUrl = {{ (terminal_url if terminal_url else '') | tojson }};
 let terminalLoaded = false;
@@ -414,14 +412,6 @@ function updateTimerDisplay() {
         display.textContent = formatTime(timeRemaining);
         display.classList.toggle('expired', timeRemaining <= 0);
     }
-}
-
-function startTimer() {
-    syncTimerFromStatus();
-}
-
-function stopTimer() {
-    terminateSession();
 }
 
 function updateAddTimeButton(showCount) {
@@ -470,7 +460,7 @@ function checkStatus() {
         if (data.status === 'ready' && data.session) {
             clearInterval(pollInterval);
             pollInterval = null;
-            lastFailedHostname = '';
+
             if (startBtn) {
                 startBtn.innerHTML = '<span class="loading-spinner"></span> Loading...';
             }
@@ -482,12 +472,12 @@ function checkStatus() {
                 startBtn.disabled = false;
                 startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
             }
-            lastFailedHostname = '';
+
             showSessionError(data.error || 'Unknown error');
         } else {
             const message = data.message || 'Creating container...';
             const hostnameMatch = message.match(/(?:to|on|for)\s+(\w+)/i);
-            if (hostnameMatch) lastFailedHostname = hostnameMatch[1];
+
             if (startBtn) {
                 startBtn.innerHTML = `<span class="loading-spinner"></span> ${message}`;
             }
@@ -503,7 +493,7 @@ function pollCreationStatus() {
 }
 
 function startSession() {
-    errorAlreadyShown = false;
+
     const startBtn = document.getElementById('start-btn');
     if (startBtn) {
         startBtn.disabled = true;
@@ -621,6 +611,7 @@ function syncWithServer() {
         if (data.session && data.session.timer) {
             timeRemaining = data.session.timer.time_remaining;
             continuationsUsed = data.session.timer.extensions_used;
+            maxContinuations = data.session.timer.max_extensions;
 
             if (timeRemaining > 300) expirationWarningShown = false;
 

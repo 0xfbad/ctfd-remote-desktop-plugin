@@ -15,6 +15,20 @@ from .docker_host_manager import LOCAL_CONTEXT_NAME, discover_contexts, ping_end
 logger = logging.getLogger(__name__)
 
 
+def _user_info(user, fallback_id=None):
+    """Build a dict with username and role flags for dashboard display."""
+    if not user:
+        return {"username": f"User {fallback_id}"}
+    info = {"username": user.name}
+    if user.type == "admin":
+        info["is_admin"] = True
+    if getattr(user, "hidden", False):
+        info["is_hidden"] = True
+    if getattr(user, "banned", False):
+        info["is_banned"] = True
+    return info
+
+
 def create_routes(container_manager, orchestrator):
     remote_desktop_bp = Blueprint("remote_desktop", __name__, template_folder="templates")
 
@@ -30,7 +44,7 @@ def create_routes(container_manager, orchestrator):
 
         user = get_current_user()
 
-        if not is_admin() and not is_verified():
+        if get_setting("require_verified") and not is_admin() and not is_verified():
             return render_template("remote_desktop.html", page_blocked="unverified")
 
         try:
@@ -38,12 +52,8 @@ def create_routes(container_manager, orchestrator):
             creation_status = container_manager.get_creation_status(user.id)
 
             vnc_url = ""
-            formatted_time = ""
             if container_info:
                 vnc_url = container_info.get("vnc_url", "")
-                created_timestamp = container_info["created_at"]
-                created_dt = datetime.datetime.fromtimestamp(created_timestamp)
-                formatted_time = created_dt.strftime("%B %d, %Y at %I:%M %p")
 
             template_container_info = None
             ssh_info = None
@@ -88,9 +98,9 @@ def create_routes(container_manager, orchestrator):
                 container_info=template_container_info,
                 vnc_url=vnc_url,
                 terminal_url=terminal_url,
-                formatted_time=formatted_time,
                 creation_status=creation_status,
                 ssh_info=ssh_info,
+                max_extensions=get_setting("max_extensions"),
             )
         except Exception as e:
             logger.error(f"error rendering remote desktop page: {e}")
@@ -112,10 +122,6 @@ def create_routes(container_manager, orchestrator):
             if timer_status.get("expired"):
                 container_manager.destroy_container(user.id, reason="expired")
                 return jsonify({"session": None})
-
-            if timer_status.get("success") and not timer_status.get("started"):
-                container_manager.start_session_timer(user.id)
-                timer_status = container_manager.get_session_timer_status(user.id)
 
             vnc_url = container_info.get("vnc_url", "")
 
@@ -150,7 +156,7 @@ def create_routes(container_manager, orchestrator):
 
         user = get_current_user()
 
-        if not is_admin() and not is_verified():
+        if get_setting("require_verified") and not is_admin() and not is_verified():
             return jsonify({"error": "Email verification required"}), 403
 
         try:
@@ -202,7 +208,6 @@ def create_routes(container_manager, orchestrator):
             if not status:
                 container_info = container_manager.get_container_info(user.id)
                 if container_info:
-                    container_manager.start_session_timer(user.id)
                     timer_status = container_manager.get_session_timer_status(user.id)
                     vnc_url = container_info.get("vnc_url", "")
                     return jsonify(
@@ -226,7 +231,6 @@ def create_routes(container_manager, orchestrator):
                 return jsonify({"status": "none"})
 
             if status.get("status") == "ready":
-                container_manager.start_session_timer(user.id)
                 container_info = container_manager.get_container_info(user.id)
                 timer_status = container_manager.get_session_timer_status(user.id)
                 vnc_url = container_info.get("vnc_url", "")
@@ -331,6 +335,15 @@ def create_routes(container_manager, orchestrator):
     def admin_get_containers():
         try:
             containers = container_manager.get_all_containers()
+            behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
+            if not behind_proxy:
+                host = request.host.split(":")[0]
+                for c in containers:
+                    if c.get("novnc_port"):
+                        pw = c.get("vnc_password", "")
+                        c["vnc_url"] = (
+                            f"http://{host}:{c['novnc_port']}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true"
+                        )
             return jsonify({"containers": containers})
         except Exception as e:
             logger.error(f"admin API error getting containers: {e}")
@@ -366,11 +379,11 @@ def create_routes(container_manager, orchestrator):
 
             event_logger.log_event(
                 "admin_action",
-                f"admin {admin_user.name} manually killed session for {target_username}",
-                user_id=user_id,
-                username=target_username,
+                f"admin {admin_user.name} killed session for {target_username}",
+                user_id=admin_user.id,
+                username=admin_user.name,
                 level="warning",
-                metadata={"admin_id": admin_user.id, "admin_name": admin_user.name},
+                metadata={"action": "kill", "target_id": user_id, "target": target_username},
             )
 
             result = container_manager.destroy_container(user_id, reason="admin_killed")
@@ -383,6 +396,29 @@ def create_routes(container_manager, orchestrator):
         except Exception as e:
             logger.error(f"admin API error killing container: {e}")
             return jsonify({"error": str(e)}), 500
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_peek_session():
+        admin_user = get_current_user()
+        user_id = request.form.get("user_id")
+        if not user_id:
+            return jsonify({"error": "user_id required"}), 400
+
+        user_id = int(user_id)
+        target_user = Users.query.filter_by(id=user_id).first()
+        target_username = target_user.name if target_user else f"User {user_id}"
+
+        event_logger.log_event(
+            "admin_action",
+            f"admin {admin_user.name} viewing session for {target_username}",
+            user_id=admin_user.id,
+            username=admin_user.name,
+            level="info",
+            metadata={"action": "peek", "target_id": user_id, "target": target_username},
+        )
+        return jsonify({"success": True})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/extend", methods=["POST"])
     @admins_only
@@ -407,10 +443,10 @@ def create_routes(container_manager, orchestrator):
             event_logger.log_event(
                 "admin_action",
                 f"admin {admin_user.name} extended session for {target_username}",
-                user_id=user_id,
-                username=target_username,
+                user_id=admin_user.id,
+                username=admin_user.name,
                 level="info",
-                metadata={"admin_id": admin_user.id, "admin_name": admin_user.name},
+                metadata={"action": "extend", "target_id": user_id, "target": target_username},
             )
 
             result = container_manager.extend_session_timer(user_id)
@@ -727,7 +763,7 @@ def create_routes(container_manager, orchestrator):
             for log in logs:
                 if log.user_id not in user_map:
                     u = Users.query.filter_by(id=log.user_id).first()
-                    user_map[log.user_id] = u.name if u else f"User {log.user_id}"
+                    user_map[log.user_id] = _user_info(u, log.user_id)
 
             return jsonify(
                 {
@@ -735,7 +771,7 @@ def create_routes(container_manager, orchestrator):
                         {
                             "id": log.id,
                             "user_id": log.user_id,
-                            "username": user_map.get(log.user_id, f"User {log.user_id}"),
+                            **user_map.get(log.user_id, {"username": f"User {log.user_id}"}),
                             "timestamp": log.timestamp,
                             "command": log.command,
                             "exit_code": log.exit_code,
@@ -792,11 +828,11 @@ def create_routes(container_manager, orchestrator):
             for row in rows:
                 if row.user_id not in user_map:
                     user = Users.query.filter_by(id=row.user_id).first()
-                    user_map[row.user_id] = user.name if user else f"User {row.user_id}"
+                    user_map[row.user_id] = _user_info(user, row.user_id)
 
                 entry = user_stats[row.user_id]
                 entry["total"] += 1
-                entry["username"] = user_map[row.user_id]
+                entry["user_info"] = user_map[row.user_id]
                 entry["sessions"].add(row.container_id)
 
                 tool = row.command.strip().split()[0] if row.command.strip() else ""
@@ -809,7 +845,7 @@ def create_routes(container_manager, orchestrator):
                 users.append(
                     {
                         "user_id": uid,
-                        "username": s["username"],
+                        **s["user_info"],
                         "total_commands": s["total"],
                         "avg_per_session": round(s["total"] / len(s["sessions"]), 1) if s["sessions"] else 0,
                         "unique_tools": len(s["commands"]),

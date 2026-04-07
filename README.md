@@ -10,13 +10,13 @@ All VNC and terminal traffic goes through nginx via `auth_request` so the Docker
 
 ## Connection modes
 
-The workspace UI has three connection modes selectable from tabs in the bottom bar
+The workspace UI has three connection modes selectable from tabs in the bottom bar. The no-session page shows environment info and a Start button. Active sessions show the content area with a slim bottom bar containing the timer, extend (with usage counter), stop, mode tabs with tooltips, and a fullscreen toggle that hides the CTFd navbar and goes browser fullscreen
 
 - **Desktop** (noVNC) - full graphical XFCE desktop in the browser, proxied through nginx. Best for GUI tools like Ghidra, Wireshark, or Burp Suite
 - **Terminal** (ttyd) - browser-based shell, also proxied through nginx. Lower overhead than the full desktop for command-line work
-- **SSH** - direct connection from the user's own terminal. Shows a copyable `ssh user@host -p port` command and the session password. Uses the same password as VNC. Requires the mapped SSH port to be reachable from the user's machine (won't work if high ports are firewalled)
+- **SSH** - direct connection from the user's own terminal. Shows a copyable `ssh user@host -p port` command and the session password using CTFd's native Bootstrap form components. Requires the mapped SSH port to be reachable from the user's machine (won't work if high ports are firewalled)
 
-Desktop and Terminal go through the same nginx auth_request flow so they work anywhere the web UI is accessible. SSH is a fallback for users who want native terminal experience with local tool integration
+Desktop and Terminal go through the same nginx auth_request flow so they work anywhere the web UI is accessible. SSH is a fallback for users who want native terminal experience with local tool integration. The timer starts immediately when the container is ready, not on first user poll
 
 ## Access control
 
@@ -236,6 +236,14 @@ The admin dashboard has a Usage Stats section that queries this history. Summary
 
 Admins can also kill all active sessions at once with the Kill All button in the sessions card header. It iterates every active session and destroys them with reason `admin_killed`, logging a single admin event
 
+### Activity feed
+
+The activity stream shows real-time events via SSE with deduplication (each event has a unique ID so reconnects don't produce duplicates). Events include orchestrator state on session requests (host scores, container counts), session destruction details (reason, duration, extensions, command count), and admin actions. Admin events show the admin in the User column and the target user linked in the Details column (e.g. "killed fbad's session", "monitoring fbad's session"). Host health events include failure reasons ("connection failed", "image not found") and image details on recovery (image ID, size, build date). Users are annotated with role icons: shield for admins, eye-slash for hidden, ban for banned
+
+### Command feed
+
+Exit codes in the command feed and per-user history have human-readable tooltips (e.g. 127 = "command not found", 130 = "ctrl-c", 139 = "segfault"). Long commands and paths are CSS-clipped with full text on hover. Per-user stats show total commands, average commands per session, and unique tools used
+
 ## Container security
 
 Every container gets hardened defaults
@@ -313,6 +321,7 @@ Managed through the admin dashboard. Click Import Contexts to scan the host for 
 | pids_limit | 512 | max number of processes per container, prevents fork bombs |
 | max_concurrent_creates | 2 | how many containers can be created simultaneously on a single host |
 | username_source | name | what to derive the container linux username from, `name` uses the CTFd display name, `email` uses the local part before the @ |
+| require_verified | true | only allow verified users to access remote desktop, has no effect unless email verification is enabled in CTFd settings |
 
 ## API endpoints
 

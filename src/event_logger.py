@@ -12,9 +12,31 @@ class EventLogger:
         self.events = deque(maxlen=max_events)
         self.lock = Lock()
         self.listeners = []
+        self._next_id = 1
 
     def log_event(self, event_type, message, user_id=None, username=None, level="info", metadata=None):
+        with self.lock:
+            event_id = self._next_id
+            self._next_id += 1
+
+        user_flags = {}
+        if user_id:
+            try:
+                from CTFd.models import Users
+
+                user = Users.query.filter_by(id=user_id).first()
+                if user:
+                    if user.type == "admin":
+                        user_flags["is_admin"] = True
+                    if getattr(user, "hidden", False):
+                        user_flags["is_hidden"] = True
+                    if getattr(user, "banned", False):
+                        user_flags["is_banned"] = True
+            except Exception:
+                pass
+
         event = {
+            "id": event_id,
             "timestamp": time.time(),
             "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "type": event_type,
@@ -22,6 +44,7 @@ class EventLogger:
             "message": message,
             "user_id": user_id,
             "username": username,
+            **user_flags,
             "metadata": metadata or {},
         }
 
