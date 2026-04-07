@@ -37,15 +37,20 @@ class Orchestrator:
 
             if is_connected:
                 has_image = self.host_manager.check_image(name, docker_image)
+                image_info = self.host_manager.get_image_info(name, docker_image) if has_image else None
             else:
                 has_image = False
+                image_info = None
 
             healthy = is_connected and has_image
             new_health[name] = healthy
             new_weights[name] = ctx.weight
 
             if healthy:
-                events.append(("host_healthy", f"context {name} is healthy", "info", {"context_name": name}))
+                meta = {"context_name": name}
+                if image_info:
+                    meta["image"] = image_info
+                events.append(("host_healthy", f"context {name} is healthy", "info", meta))
             else:
                 reason = "connection failed" if not is_connected else "image not found"
                 events.append(
@@ -119,15 +124,15 @@ class Orchestrator:
                 self.container_counts[context_name] -= 1
                 logger.debug(f"released slot on {context_name}, now {self.container_counts[context_name]}")
 
-    def mark_unhealthy(self, context_name):
+    def mark_unhealthy(self, context_name, reason="unreachable"):
         with self.lock:
             self.health[context_name] = False
-            logger.warning(f"context {context_name} marked unhealthy")
+            logger.warning(f"context {context_name} marked unhealthy: {reason}")
             event_logger.log_event(
                 "host_unhealthy",
-                f"context {context_name} marked unhealthy",
+                f"context {context_name} marked unhealthy: {reason}",
                 level="warning",
-                metadata={"context_name": context_name},
+                metadata={"context_name": context_name, "reason": reason},
             )
 
     def mark_healthy(self, context_name):

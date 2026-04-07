@@ -208,5 +208,56 @@ NGINXBLOCK
     added "vnc proxy location"
 fi
 
+if grep -q "remote-desktop/terminal/" "$NGINX_CONF"; then
+    skip "terminal proxy location"
+else
+    cat > /tmp/_rd_terminal_nginx_block.conf << 'NGINXBLOCK'
+
+    # web terminal proxy with auth_request (ttyd)
+    location ~ ^/remote-desktop/terminal/(?<terminal_user_id>\d+)/(?<terminal_path>.*)$ {
+      resolver 127.0.0.11 valid=30s;
+      auth_request /remote-desktop/terminal/auth;
+      auth_request_set $terminal_host $upstream_http_x_terminal_host;
+      auth_request_set $terminal_port $upstream_http_x_terminal_port;
+
+      proxy_pass http://$terminal_host:$terminal_port/$terminal_path$is_args$args;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_read_timeout 86400s;
+      proxy_send_timeout 86400s;
+      proxy_buffering off;
+      proxy_cache off;
+      add_header Cache-Control "no-store";
+    }
+
+    # internal auth subrequest for terminal proxy
+    location = /remote-desktop/terminal/auth {
+      internal;
+      proxy_pass http://app_servers;
+      proxy_pass_request_body off;
+      proxy_set_header Content-Length "";
+      proxy_set_header X-Terminal-User-ID $terminal_user_id;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header Cookie $http_cookie;
+    }
+
+NGINXBLOCK
+    for conf in "$NGINX_CONF" "${NGINX_CONF%/*}/https.conf"; do
+        [ -f "$conf" ] || continue
+        if grep -q "remote-desktop/terminal/" "$conf"; then
+            continue
+        fi
+        sed -i '/location \/ {/r /tmp/_rd_terminal_nginx_block.conf' "$conf"
+    done
+    rm -f /tmp/_rd_terminal_nginx_block.conf
+    added "terminal proxy location"
+fi
+
 echo ""
 echo -e "${GREEN}done${NC} - restart containers to apply: docker compose up -d"

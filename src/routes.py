@@ -46,6 +46,8 @@ def create_routes(container_manager, orchestrator):
                 formatted_time = created_dt.strftime("%B %d, %Y at %I:%M %p")
 
             template_container_info = None
+            ssh_info = None
+            terminal_url = ""
             if container_info:
                 template_container_info = {
                     "container_id": container_info["container_id"],
@@ -56,12 +58,39 @@ def create_routes(container_manager, orchestrator):
                     "created_at": container_info["created_at"],
                 }
 
+                # when no reverse proxy is in front, the nginx proxy paths
+                # won't work. use direct URLs to the container's mapped ports.
+                behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
+                if not behind_proxy:
+                    host = request.host.split(":")[0]
+                    pw = container_info["vnc_password"]
+                    vnc_url = (
+                        f"http://{host}:{container_info['novnc_port']}"
+                        f"/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true"
+                    )
+                    if container_info.get("ttyd_port"):
+                        terminal_url = f"http://{host}:{container_info['ttyd_port']}/"
+                else:
+                    if container_info.get("ttyd_port"):
+                        terminal_url = f"/remote-desktop/terminal/{user.id}/"
+
+                browser_host = request.host.split(":")[0] if not behind_proxy else container_info["pub_hostname"]
+                if container_info.get("ssh_port"):
+                    ssh_info = {
+                        "host": browser_host,
+                        "port": container_info["ssh_port"],
+                        "username": container_manager._resolve_username(user),
+                        "password": container_info["vnc_password"],
+                    }
+
             return render_template(
                 "remote_desktop.html",
                 container_info=template_container_info,
                 vnc_url=vnc_url,
+                terminal_url=terminal_url,
                 formatted_time=formatted_time,
                 creation_status=creation_status,
+                ssh_info=ssh_info,
             )
         except Exception as e:
             logger.error(f"error rendering remote desktop page: {e}")
@@ -523,6 +552,36 @@ def create_routes(container_manager, orchestrator):
         resp.headers["X-VNC-Port"] = str(row.novnc_port)
         return resp
 
+    @remote_desktop_bp.route("/remote-desktop/terminal/auth", methods=["GET"])
+    @authed_only
+    @bypass_csrf_protection
+    def terminal_auth():
+        """nginx auth_request subrequest for ttyd web terminal proxy.
+        Same pattern as vnc_auth but returns the ttyd port."""
+        from .models import DesktopContainerInfoModel
+
+        user_id = request.headers.get("X-Terminal-User-ID")
+        if not user_id:
+            return "", 400
+
+        user_id = int(user_id)
+        current_user = get_current_user()
+        if current_user.id != user_id and not is_admin():
+            return "", 403
+
+        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+        if not row or not row.ttyd_port:
+            return "", 404
+
+        check_hostname = container_manager.host_manager.get_check_hostname(row.docker_context)
+        if not check_hostname:
+            return "", 502
+
+        resp = Response("", 200)
+        resp.headers["X-Terminal-Host"] = check_hostname
+        resp.headers["X-Terminal-Port"] = str(row.ttyd_port)
+        return resp
+
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/per-host", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
@@ -727,7 +786,7 @@ def create_routes(container_manager, orchestrator):
             period = request.args.get("period", "all")
             rows = _cmd_log_query(period).all()
 
-            user_stats = defaultdict(lambda: {"total": 0, "errors": 0, "commands": set(), "username": ""})
+            user_stats = defaultdict(lambda: {"total": 0, "sessions": set(), "commands": set(), "username": ""})
 
             user_map = {}
             for row in rows:
@@ -738,8 +797,7 @@ def create_routes(container_manager, orchestrator):
                 entry = user_stats[row.user_id]
                 entry["total"] += 1
                 entry["username"] = user_map[row.user_id]
-                if row.exit_code and row.exit_code != 0:
-                    entry["errors"] += 1
+                entry["sessions"].add(row.container_id)
 
                 tool = row.command.strip().split()[0] if row.command.strip() else ""
                 if tool.startswith("sudo") and len(row.command.strip().split()) > 1:
@@ -753,8 +811,7 @@ def create_routes(container_manager, orchestrator):
                         "user_id": uid,
                         "username": s["username"],
                         "total_commands": s["total"],
-                        "error_count": s["errors"],
-                        "error_rate": round(s["errors"] / s["total"] * 100, 1) if s["total"] else 0,
+                        "avg_per_session": round(s["total"] / len(s["sessions"]), 1) if s["sessions"] else 0,
                         "unique_tools": len(s["commands"]),
                     }
                 )

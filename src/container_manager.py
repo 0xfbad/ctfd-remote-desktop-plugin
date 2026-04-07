@@ -14,10 +14,38 @@ from .docker_host_manager import parse_size
 logger = logging.getLogger(__name__)
 
 _ALNUM_RE = re.compile(r"[^a-z0-9]")
+_RESERVED_NAMES = {
+    "root",
+    "daemon",
+    "bin",
+    "sys",
+    "sync",
+    "games",
+    "man",
+    "lp",
+    "mail",
+    "news",
+    "uucp",
+    "proxy",
+    "www",
+    "backup",
+    "list",
+    "irc",
+    "gnats",
+    "nobody",
+    "systemd",
+    "sshd",
+    "messagebus",
+    "avahi",
+    "polkitd",
+}
 
 
-def _sanitize_username(raw):
-    return _ALNUM_RE.sub("", raw.lower())[:32]
+def _sanitize_username(raw, user_id=None):
+    name = _ALNUM_RE.sub("", raw.lower())[:32]
+    if not name or name in _RESERVED_NAMES:
+        return f"user{user_id}" if user_id else "user"
+    return name
 
 
 class ContainerManager:
@@ -38,11 +66,8 @@ class ContainerManager:
         source = self._get_setting("username_source")
 
         if source == "email" and user.email:
-            username = _sanitize_username(user.email.split("@")[0])
-        else:
-            username = _sanitize_username(user.name)
-
-        return username or f"user{user.id}"
+            return _sanitize_username(user.email.split("@")[0], user.id)
+        return _sanitize_username(user.name, user.id)
 
     def wait_for_vnc_ready(self, hostname, novnc_port, max_attempts=None, progress_callback=None):
         if max_attempts is None:
@@ -145,7 +170,7 @@ class ContainerManager:
                     name=container_name,
                     hostname=display_hostname,
                     env=container_env,
-                    ports=["5900/tcp", "6080/tcp"],
+                    ports=["22/tcp", "5900/tcp", "6080/tcp", "7682/tcp"],
                     shm_size=shm_size,
                     memory=memory_limit,
                     nano_cpus=nano_cpus,
@@ -154,10 +179,14 @@ class ContainerManager:
                 self.host_manager.release_semaphore(context_name)
 
             container_id = result["container_id"]
+            ssh_port = result["ports"].get("22/tcp")
             vnc_port = result["ports"]["5900/tcp"]
             novnc_port = result["ports"]["6080/tcp"]
+            ttyd_port = result["ports"].get("7682/tcp")
 
-            logger.info(f"container {container_name} created - VNC:{vnc_port} noVNC:{novnc_port}")
+            logger.info(
+                f"container {container_name} created - SSH:{ssh_port} VNC:{vnc_port} noVNC:{novnc_port} ttyd:{ttyd_port}"
+            )
 
             with self.lock:
                 self.creation_status[user_id] = {
@@ -187,6 +216,8 @@ class ContainerManager:
                 container_name=container_name,
                 vnc_port=vnc_port,
                 novnc_port=novnc_port,
+                ssh_port=ssh_port,
+                ttyd_port=ttyd_port,
                 vnc_password=vnc_password,
                 vnc_url=vnc_url,
                 docker_context=context_name,
@@ -217,6 +248,8 @@ class ContainerManager:
                 metadata={
                     "context": context_name,
                     "container_name": container_name,
+                    "ssh_port": ssh_port,
+                    "ttyd_port": ttyd_port,
                     "vnc_port": vnc_port,
                     "novnc_port": novnc_port,
                 },
@@ -286,8 +319,24 @@ class ContainerManager:
         with self.lock:
             self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
 
+        host_status = self.orchestrator.get_status()
         event_logger.log_event(
-            "session_requested", "requested remote desktop session", user_id=user_id, username=username, level="info"
+            "session_requested",
+            "requested remote desktop session",
+            user_id=user_id,
+            username=username,
+            level="info",
+            metadata={
+                "hosts": {
+                    h["context_name"]: {
+                        "containers": h["active_containers"],
+                        "weight": h["weight"],
+                        "healthy": h["healthy"],
+                        "score": round(h["weight"] / (h["active_containers"] + 1), 2) if h["healthy"] else 0,
+                    }
+                    for h in host_status
+                },
+            },
         )
 
         app = current_app._get_current_object()
@@ -355,13 +404,26 @@ class ContainerManager:
         self.orchestrator.release_slot(context_name)
 
         if log_destruction:
+            duration = ended_at - history.started_at
+            cmd_count = (
+                CommandLogModel.query.filter_by(user_id=user_id).count()
+                if self._get_setting("command_logging_enabled")
+                else None
+            )
             event_logger.log_event(
                 "session_destroyed",
                 "remote desktop session destroyed",
                 user_id=user_id,
                 username=username,
                 level="info",
-                metadata={"context": context_name, "container_name": container_name},
+                metadata={
+                    "context": context_name,
+                    "container_name": container_name,
+                    "reason": reason,
+                    "duration": round(duration),
+                    "extensions_used": history.extensions_used,
+                    "commands": cmd_count,
+                },
             )
 
         return {"success": True}
@@ -376,6 +438,8 @@ class ContainerManager:
             "container_name": row.container_name,
             "vnc_port": row.vnc_port,
             "novnc_port": row.novnc_port,
+            "ssh_port": row.ssh_port,
+            "ttyd_port": row.ttyd_port,
             "docker_context": row.docker_context,
             "pub_hostname": row.pub_hostname,
             "vnc_password": row.vnc_password,

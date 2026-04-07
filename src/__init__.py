@@ -97,8 +97,42 @@ def _reconcile_containers(app, host_manager, orchestrator):
         logger.info(f"reconciled containers on startup: {kept} recovered, {removed} stale records removed")
 
 
+def _ensure_columns(app):
+    """add columns and fix types that create_all won't update on existing tables"""
+    from CTFd.models import db
+    from sqlalchemy import inspect, text
+
+    with app.app_context():
+        insp = inspect(db.engine)
+        cols = {c["name"]: c for c in insp.get_columns("desktop_container_info")}
+        for col in ("ssh_port", "ttyd_port"):
+            if col not in cols:
+                db.session.execute(text(f"ALTER TABLE desktop_container_info ADD COLUMN {col} INTEGER"))
+                logger.info(f"added {col} column to desktop_container_info")
+
+        # float(32-bit) rounds unix timestamps, need double
+        float_fixes = {
+            "desktop_container_info": ["created_at", "timer_start_time", "timer_duration"],
+            "desktop_session_history": ["started_at", "ended_at", "duration"],
+        }
+        for table, columns in float_fixes.items():
+            try:
+                table_cols = {c["name"]: c for c in insp.get_columns(table)}
+                for col in columns:
+                    col_info = table_cols.get(col)
+                    if col_info and str(col_info["type"]).upper() == "FLOAT":
+                        nullable = "NULL" if col_info.get("nullable", True) else "NOT NULL"
+                        db.session.execute(text(f"ALTER TABLE {table} MODIFY {col} DOUBLE {nullable}"))
+                        logger.info(f"upgraded {table}.{col} from FLOAT to DOUBLE")
+            except Exception as e:
+                logger.debug(f"float upgrade check for {table}: {e}")
+
+        db.session.commit()
+
+
 def load(app):
     app.db.create_all()
+    _ensure_columns(app)
 
     host_manager = DockerHostManager()
     orchestrator = Orchestrator(host_manager)

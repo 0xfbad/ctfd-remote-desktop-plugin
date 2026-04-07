@@ -6,7 +6,17 @@ CTFd plugin that provisions on-demand desktops across a pool of Docker hosts, us
 
 When a user requests a session the plugin picks the least-loaded healthy Docker context, hits the Docker API over an SSH tunnel via the docker SDK, runs the container with dynamic port mapping, generates a random VNC password, and builds a noVNC URL that routes through nginx. The whole thing runs in a gevent greenlet so it doesn't block the request thread, and the frontend polls for creation status updates
 
-All VNC traffic goes through nginx via `auth_request` so the Docker hosts don't need to be publicly accessible. nginx makes an internal subrequest to CTFd to validate the session and get the backend address, then proxies directly to the container for both HTTP assets and the WebSocket connection. Admins can peek at any user's desktop from the dashboard using the same stored password
+All VNC and terminal traffic goes through nginx via `auth_request` so the Docker hosts don't need to be publicly accessible. nginx makes an internal subrequest to CTFd to validate the session and get the backend address, then proxies directly to the container for both HTTP assets and the WebSocket connection. Admins can peek at any user's desktop from the dashboard using the same stored password
+
+## Connection modes
+
+The workspace UI has three connection modes selectable from tabs in the bottom bar
+
+- **Desktop** (noVNC) - full graphical XFCE desktop in the browser, proxied through nginx. Best for GUI tools like Ghidra, Wireshark, or Burp Suite
+- **Terminal** (ttyd) - browser-based shell, also proxied through nginx. Lower overhead than the full desktop for command-line work
+- **SSH** - direct connection from the user's own terminal. Shows a copyable `ssh user@host -p port` command and the session password. Uses the same password as VNC. Requires the mapped SSH port to be reachable from the user's machine (won't work if high ports are firewalled)
+
+Desktop and Terminal go through the same nginx auth_request flow so they work anywhere the web UI is accessible. SSH is a fallback for users who want native terminal experience with local tool integration
 
 ## Access control
 
@@ -85,15 +95,16 @@ The socket mount gives local Docker access, the SSH mount lets the Docker SDK tu
 
 If you're only using remote contexts and don't need a local daemon you can skip the socket and `group_add`, but you still need the SSH and docker config mounts
 
-### VNC proxy (nginx)
+### Proxy setup (nginx)
 
-VNC sessions are proxied through nginx so users never need direct access to container ports, everything goes through your existing HTTPS setup
+VNC and terminal sessions are proxied through nginx so users never need direct access to container ports, everything goes through your existing HTTPS setup
 
 The setup script adds the required nginx location blocks to both `conf/nginx/http.conf` and `conf/nginx/https.conf` if they exist. If you have a custom config, add the blocks manually. CTFd ships with `http.conf` but production deployments typically use a separate `https.conf` with TLS termination, make sure the blocks go into whichever file nginx is actually loading (check the volume mount in docker-compose.yml). The blocks needed are:
 
 ```nginx
 # inside your server block, before location /
 
+# VNC desktop proxy
 location ~ ^/remote-desktop/vnc/(?<vnc_user_id>\d+)/(?<vnc_path>.+)$ {
   resolver 127.0.0.11 valid=30s;
   auth_request /remote-desktop/vnc/auth;
@@ -120,9 +131,37 @@ location = /remote-desktop/vnc/auth {
   proxy_set_header X-VNC-User-ID $vnc_user_id;
   proxy_set_header Cookie $http_cookie;
 }
+
+# web terminal proxy (ttyd)
+location ~ ^/remote-desktop/terminal/(?<terminal_user_id>\d+)/(?<terminal_path>.*)$ {
+  resolver 127.0.0.11 valid=30s;
+  auth_request /remote-desktop/terminal/auth;
+  auth_request_set $terminal_host $upstream_http_x_terminal_host;
+  auth_request_set $terminal_port $upstream_http_x_terminal_port;
+
+  proxy_pass http://$terminal_host:$terminal_port/$terminal_path$is_args$args;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  proxy_set_header Host $host;
+  proxy_read_timeout 86400s;
+  proxy_send_timeout 86400s;
+  proxy_buffering off;
+  proxy_cache off;
+  add_header Cache-Control "no-store";
+}
+
+location = /remote-desktop/terminal/auth {
+  internal;
+  proxy_pass http://app_servers;
+  proxy_pass_request_body off;
+  proxy_set_header Content-Length "";
+  proxy_set_header X-Terminal-User-ID $terminal_user_id;
+  proxy_set_header Cookie $http_cookie;
+}
 ```
 
-`resolver 127.0.0.11` is Docker's internal DNS, required because nginx can't resolve hostnames at runtime in a dynamic `proxy_pass` without it. `Cache-Control: no-store` prevents the browser from caching vnc.html with an old session's password baked into the query params
+`resolver 127.0.0.11` is Docker's internal DNS, required because nginx can't resolve hostnames at runtime in a dynamic `proxy_pass` without it. `Cache-Control: no-store` prevents the browser from caching vnc.html with an old session's password baked into the query params. Both proxy blocks follow the same auth_request pattern, the terminal one uses `X-Terminal-User-ID` and `X-Terminal-Host/Port` headers instead of the VNC equivalents
 
 ### Docker contexts
 
@@ -141,13 +180,15 @@ Then go to the Docker Contexts section on the admin config page (`/admin/config`
 
 The image needs to be pre-pulled on every Docker host before users can use it. Pull it manually on each host or use a CI pipeline to push it out
 
-The image needs to expose VNC on port 5900 and noVNC on port 6080, accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), `RESOLUTION`, and `MAX_LIFETIME` env vars, and serve the noVNC web client at `/vnc.html` with a WebSocket endpoint at `/websockify`
+The image needs to expose VNC on port 5900, noVNC on port 6080, ttyd on port 7682, and SSH on port 22. It should accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), `RESOLUTION`, and `MAX_LIFETIME` env vars. noVNC serves the web client at `/vnc.html` with a WebSocket endpoint at `/websockify`. ttyd serves a browser-based terminal. The SSH server should set the user's password to match `VNC_PASSWORD` so one credential works across all connection modes
 
 `MAX_LIFETIME` is the absolute ceiling in seconds, calculated as `initial_duration + (extension_duration * max_extensions) + 300`. The container image can use it to run something like `sleep $MAX_LIFETIME && kill 1` as a safety net if the plugin's cleanup job doesn't reach it. The container's hostname is set to the Docker context name (e.g. `local`, `server1`)
 
 ### Database
 
 The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, `desktop_session_history` for completed session records, and `desktop_settings` for configuration. On first startup it seeds all settings with defaults and creates a `local` Docker context if the socket is available, so the admin UI is immediately usable without any manual context setup
+
+When upgrading from a version without terminal/SSH support, the plugin auto-adds `ssh_port` and `ttyd_port` columns to `desktop_container_info` via ALTER TABLE on startup. Existing sessions won't have values for these columns, so the Terminal and SSH tabs won't appear until the next session is created with the updated container image
 
 ## Container lifecycle
 
@@ -158,7 +199,7 @@ The plugin creates its tables automatically on first load, no manual migration n
 3. Orchestrator picks least-loaded healthy context via weighted scoring
 4. Acquires the per-context creation semaphore (limits concurrent creates per host)
 5. Generates random VNC password via `secrets.token_urlsafe(6)[:8]`
-6. Calls `DockerHostManager.run_container()` which talks to the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping (0:5900, 0:6080), security hardening (`cap_drop=ALL` + selective `cap_add`, pids limit), resource limits, and the VNC/resolution env vars
+6. Calls `DockerHostManager.run_container()` which talks to the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping (0:22, 0:5900, 0:6080, 0:7682), security hardening (`cap_drop=ALL` + selective `cap_add`, pids limit), resource limits, and the VNC/resolution env vars
 7. Polls `container.reload()` for mapped ports (up to 5 attempts with 0.3s sleep)
 8. HTTP polls noVNC via the internal `check_hostname` until it responds (configurable attempts, default 180). For local socket contexts this is the docker host gateway IP, for SSH contexts it's the pub_hostname
 9. Builds a relative VNC URL like `/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true` that routes through the nginx proxy
@@ -199,9 +240,10 @@ Admins can also kill all active sessions at once with the Kill All button in the
 
 Every container gets hardened defaults
 
-- `cap_drop=["ALL"]` drops all Linux capabilities, then `cap_add` re-grants only the ones needed: CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE for startup user creation and su, NET_RAW and NET_ADMIN for wireshark/nmap, SETFCAP for granting dumpcap packet capture. Users get full sudo inside their container which is intentional for a CTF lab
+- `cap_drop=["ALL"]` drops all Linux capabilities, then `cap_add` re-grants only the ones needed: CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE for startup user creation and su, NET_RAW and NET_ADMIN for wireshark/nmap, SETFCAP for granting dumpcap packet capture, AUDIT_WRITE for sudo audit logging, SYS_CHROOT for sshd privilege separation
 - `pids_limit` from settings (default 512) caps the process count to prevent fork bombs
 - `auto_remove=True` so Docker cleans up the filesystem when the container stops
+- SSH access is locked to the session user via `AllowUsers` and `PermitRootLogin no` in sshd_config
 
 ## Container usernames
 
@@ -210,11 +252,11 @@ The plugin sanitizes CTFd display names down to `[a-z0-9]` (lowercase, strip eve
 - `name` (default): uses the CTFd display name, so a user named `Alice B.` becomes `aliceb`
 - `email`: uses the local part of the user's email, so `jdoe@ucsc.edu` becomes `jdoe`
 
-If sanitization produces an empty string (a name like `;-;` strips to nothing) the plugin falls back to `user{id}`, for example `user42`. This is computed at container creation time, the raw display name is still used in logs and the admin dashboard
+If sanitization produces an empty string (a name like `;-;` strips to nothing) or matches a reserved system name (root, daemon, sshd, nobody, etc) the plugin falls back to `user{id}`, for example `user42`. This prevents someone from registering as "root" on CTFd and getting a container where their linux username is root. The raw display name is still used in logs and the admin dashboard
 
-## VNC auth
+## Authentication
 
-The plugin generates a random 8-char password per container and passes it as `VNC_PASSWORD` to the container. The container's startup script writes a VNC passwd file and launches Xvnc with `-SecurityTypes VncAuth`. The VNC URL has the password as a query param so noVNC auto-connects with no dialog
+The plugin generates a random 8-char password per container and passes it as `VNC_PASSWORD` to the container. The container's startup script writes a VNC passwd file, launches Xvnc with `-SecurityTypes VncAuth`, and sets the Linux user's password to the same value for SSH access. One credential works across all three connection modes
 
 VNC passwords are capped at 8 chars by the protocol, `secrets.token_urlsafe(6)[:8]` gives 48 bits of entropy which is plenty for preventing port-scan drive-bys in a classroom setting. The password shows up in the browser URL bar and history, fine for a lab environment. The nginx VNC location must have `Cache-Control: no-store` or the browser will cache vnc.html with the old password and auth will fail after recreating a session
 
@@ -307,10 +349,12 @@ All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-
 - `GET /admin/api/stats/duration-distribution?period=` histogram of session lengths
 - `GET /admin/api/stats/extensions?period=` extension usage counts and end reason breakdown
 
-**VNC Proxy**
+**Proxy Auth**
 
-- `GET /vnc/auth` internal nginx auth_request endpoint, returns backend host/port in headers
-- `GET /vnc/<user_id>/<path>` proxied through nginx to container (not handled by Flask)
+- `GET /vnc/auth` internal nginx auth_request for VNC desktop, returns backend host/port in `X-VNC-Host`/`X-VNC-Port` headers
+- `GET /vnc/<user_id>/<path>` proxied through nginx to container's noVNC (not handled by Flask)
+- `GET /terminal/auth` internal nginx auth_request for web terminal, returns backend host/port in `X-Terminal-Host`/`X-Terminal-Port` headers
+- `GET /terminal/<user_id>/<path>` proxied through nginx to container's ttyd (not handled by Flask)
 
 **Contexts**
 
@@ -372,4 +416,8 @@ This means a CTFd restart doesn't kill active user sessions, they survive and ge
 
 **Containers piling up on one host**: the orchestrator uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
 
-**Timer showing wrong values**: MySQL `FLOAT` is 32-bit, only ~7 significant digits, which rounds Unix timestamps by thousands of seconds. The model uses `db.Float(precision=53)` which maps to `DOUBLE` but if you're upgrading from an older version the column types won't change automatically. Run `ALTER TABLE desktop_container_info MODIFY created_at DOUBLE NOT NULL` and do the same for `timer_start_time`, `timer_duration`, and the history table's `started_at`, `ended_at`, `duration`
+**Timer showing wrong values**: MySQL/MariaDB `FLOAT` is 32-bit, only ~7 significant digits, which rounds Unix timestamps by thousands of seconds. The plugin auto-detects FLOAT columns on startup and upgrades them to DOUBLE via ALTER TABLE. If you see stale timer values on an existing session, destroy it and start a new one since the old row's timestamps were already rounded when written
+
+## Local development
+
+When running CTFd directly on port 8000 without nginx, the plugin detects the absence of `X-Forwarded-For` / `X-Real-IP` headers and generates direct URLs to the container's mapped ports (e.g. `http://localhost:32788/vnc.html?...`) instead of the nginx proxy paths. Desktop and Terminal iframes point straight at the container, SSH connection info uses the browser hostname. No nginx config needed for local testing

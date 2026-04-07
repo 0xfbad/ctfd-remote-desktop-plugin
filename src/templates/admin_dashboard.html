@@ -78,6 +78,20 @@
 		color: #6c757d;
 	}
 
+	.cell-clip {
+		max-width: 400px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.cell-clip-sm {
+		max-width: 200px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
 	.badge-evt-requested { background-color: #cce5ff; color: #004085; }
 	.badge-evt-created { background-color: #d4edda; color: #155724; }
 	.badge-evt-destroyed { background-color: #e2e3e5; color: #383d41; }
@@ -458,7 +472,7 @@
 			<div class="col-md-12">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Per-User Commands <span class="cfg-help" data-tip="Command counts and error rates by user. High error rates may indicate someone struggling or brute-forcing. Click the total to see their full history.">?</span></h3>
+						<h3 class="card-title">Per-User Commands <span class="cfg-help" data-tip="Command counts and activity by user. Click the total to see their full history.">?</span></h3>
 						<select id="period-cmd-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdPerUser()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
@@ -472,7 +486,7 @@
 									<tr>
 										<th><b>User</b></th>
 										<th><b>Total</b></th>
-										<th><b>Error Rate</b></th>
+										<th><b>Avg/Session</b></th>
 										<th><b>Unique Tools</b></th>
 									</tr>
 								</thead>
@@ -592,6 +606,63 @@
 		'host_healthy': 'Host Up',
 	};
 
+	const EXIT_CODE_LABELS = {
+		0: 'success',
+		1: 'error',
+		2: 'builtin misuse',
+		64: 'usage error',
+		65: 'data error',
+		66: 'input not found',
+		67: 'user not found',
+		68: 'host not found',
+		69: 'unavailable',
+		70: 'internal error',
+		71: 'os error',
+		73: 'can\'t create output',
+		74: 'i/o error',
+		75: 'temp failure',
+		77: 'permission denied',
+		78: 'config error',
+		100: 'apt error',
+		102: 'apt broken packages',
+		126: 'not executable',
+		127: 'command not found',
+		128: 'invalid exit arg',
+		129: 'hangup',
+		130: 'ctrl-c',
+		131: 'quit (core dump)',
+		132: 'illegal instruction',
+		133: 'breakpoint trap',
+		134: 'aborted',
+		135: 'bus error',
+		136: 'floating point error',
+		137: 'killed (OOM?)',
+		138: 'user signal 1',
+		139: 'segfault',
+		140: 'user signal 2',
+		141: 'broken pipe',
+		142: 'alarm timeout',
+		143: 'terminated',
+		144: 'stack fault',
+		145: 'child exited',
+		146: 'continued',
+		147: 'stopped',
+		148: 'ctrl-z',
+		149: 'bg read from tty',
+		150: 'bg write to tty',
+		152: 'cpu time exceeded',
+		153: 'file size exceeded',
+		159: 'bad syscall',
+		255: 'exit out of range',
+	};
+
+	function exitCodeTitle(code) {
+		if (code === null || code === undefined) return '';
+		if (EXIT_CODE_LABELS[code]) return EXIT_CODE_LABELS[code];
+		if (code > 128 && code < 165) return `signal ${code - 128}`;
+		return '';
+	}
+
 	const EVENT_BADGE_CLASS = {
 		'session_requested': 'badge-evt-requested',
 		'session_created': 'badge-evt-created',
@@ -604,15 +675,38 @@
 		'host_healthy': 'badge-evt-host-up',
 	};
 
+	function formatDuration(secs) {
+		if (!secs && secs !== 0) return '';
+		const m = Math.floor(secs / 60), s = secs % 60;
+		if (m >= 60) return `${Math.floor(m / 60)}h ${m % 60}m`;
+		return m > 0 ? `${m}m ${s}s` : `${s}s`;
+	}
+
 	function formatEventDetails(event) {
 		const m = event.metadata || {};
 		switch (event.type) {
-			case 'session_requested':
+			case 'session_requested': {
+				if (!m.hosts) return '';
+				const parts = [];
+				for (const [name, h] of Object.entries(m.hosts)) {
+					const status = h.healthy ? `${h.containers} active, score ${h.score}` : 'unhealthy';
+					parts.push(`${name}: ${status}`);
+				}
+				return parts.join(' | ');
+			}
+			case 'session_created':
+				return [m.context, m.container_name].filter(Boolean).join(' / ');
+			case 'session_destroyed': {
+				const parts = [m.context, m.container_name].filter(Boolean).join(' / ');
+				const extra = [];
+				if (m.reason) extra.push(m.reason);
+				if (m.duration) extra.push(formatDuration(m.duration));
+				if (m.extensions_used) extra.push(`${m.extensions_used} ext`);
+				if (m.commands !== null && m.commands !== undefined) extra.push(`${m.commands} cmds`);
+				return extra.length ? `${parts} (${extra.join(', ')})` : parts;
+			}
 			case 'session_expired':
 				return '';
-			case 'session_created':
-			case 'session_destroyed':
-				return [m.context, m.container_name].filter(Boolean).join(' / ');
 			case 'session_extended':
 				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
 			case 'session_error':
@@ -621,8 +715,13 @@
 				if (m.killed_count !== undefined) return `purged ${m.killed_count} sessions`;
 				return m.admin_name ? `by ${m.admin_name}` : '';
 			case 'host_unhealthy':
-			case 'host_healthy':
-				return m.context_name || '';
+				return [m.context_name, m.reason].filter(Boolean).join(': ');
+			case 'host_healthy': {
+				if (!m.context_name) return '';
+				const img = m.image;
+				if (img) return `${m.context_name}: image ${img.id} (${img.size_mb}MB, built ${img.created})`;
+				return `${m.context_name}: reachable`;
+			}
 			default:
 				return event.message || '';
 		}
@@ -642,7 +741,7 @@
 			<td class="log-time">${escapeHtml(formatTimestamp(event.timestamp))}</td>
 			<td class="log-user">${event.username ? `<a href="/admin/users/${event.user_id}">${escapeHtml(event.username)}</a>` : ''}</td>
 			<td><span class="badge ${badgeClass}">${escapeHtml(label)}</span></td>
-			<td class="log-detail">${escapeHtml(details)}</td>
+			<td class="log-detail cell-clip" title="${escapeHtml(details)}">${escapeHtml(details)}</td>
 		`;
 
 		feed.insertBefore(row, feed.firstChild);
@@ -721,7 +820,7 @@
 			const row = `
 				<tr>
 					<td class="log-user"><a href="/admin/users/${parseInt(container.user_id)}">${escapeHtml(container.username)}</a></td>
-					<td><code>${escapeHtml(container.container_name)}</code></td>
+					<td class="cell-clip-sm" title="${escapeHtml(container.container_name)}"><code>${escapeHtml(container.container_name)}</code></td>
 					<td>${escapeHtml(container.docker_context || '')}</td>
 					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
 					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
@@ -1099,11 +1198,12 @@
 				const exitBadge = log.exit_code === 0 ? 'badge-success' :
 								  log.exit_code !== null ? 'badge-danger' : 'badge-secondary';
 				const exitText = log.exit_code !== null ? log.exit_code : '-';
+				const exitTip = exitCodeTitle(log.exit_code);
 				return `<tr>
 					<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
 					<td class="log-user"><a href="/admin/users/${log.user_id}">${escapeHtml(log.username)}</a></td>
-					<td><code>${escapeHtml(log.command)}</code></td>
-					<td><span class="badge ${exitBadge}">${exitText}</span></td>
+					<td class="cell-clip" title="${escapeHtml(log.command)}"><code>${escapeHtml(log.command)}</code></td>
+					<td><span class="badge ${exitBadge}" ${exitTip ? `title="${exitTip}"` : ''}>${exitText}</span></td>
 				</tr>`;
 			}).join('');
 		});
@@ -1158,7 +1258,7 @@
 				<tr>
 					<td class="log-user"><a href="/admin/users/${parseInt(u.user_id)}">${escapeHtml(u.username)}</a></td>
 					<td><a href="#" class="cmd-history-link" data-userid="${parseInt(u.user_id)}" data-username="${escapeHtml(u.username)}">${u.total_commands.toLocaleString()}</a></td>
-					<td>${u.error_rate}%</td>
+					<td>${u.avg_per_session}</td>
 					<td>${u.unique_tools}</td>
 				</tr>
 			`).join('');
@@ -1262,12 +1362,14 @@
 			} else {
 				tbody.innerHTML = logs.map(log => {
 					const exitClass = log.exit_code === 0 ? 'text-success' : (log.exit_code !== null ? 'text-danger' : '');
+					const exitTip = exitCodeTitle(log.exit_code);
+					const exitDisplay = log.exit_code !== null ? log.exit_code : '-';
 					return `<tr>
 						<td class="text-nowrap">${escapeHtml(formatTimestamp(log.timestamp))}</td>
-						<td><code style="word-break: break-all;">${escapeHtml(log.command)}</code></td>
-						<td class="${exitClass}">${log.exit_code !== null ? log.exit_code : '-'}</td>
+						<td class="cell-clip" title="${escapeHtml(log.command)}"><code>${escapeHtml(log.command)}</code></td>
+						<td class="${exitClass}" ${exitTip ? `title="${exitTip}"` : ''}>${exitDisplay}${exitTip ? ` <small class="text-muted">(${exitTip})</small>` : ''}</td>
 						<td>${log.duration !== null ? log.duration + 's' : '-'}</td>
-						<td><small class="text-muted">${escapeHtml(log.cwd || '')}</small></td>
+						<td class="cell-clip-sm" title="${escapeHtml(log.cwd || '')}"><small class="text-muted">${escapeHtml(log.cwd || '')}</small></td>
 					</tr>`;
 				}).join('');
 			}

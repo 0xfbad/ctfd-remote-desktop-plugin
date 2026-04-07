@@ -257,7 +257,18 @@ class DockerHostManager:
                 mem_limit=memory,
                 nano_cpus=nano_cpus,
                 cap_drop=["ALL"],
-                cap_add=["CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE", "NET_RAW", "NET_ADMIN", "SETFCAP"],
+                cap_add=[
+                    "CHOWN",
+                    "SETUID",
+                    "SETGID",
+                    "FOWNER",
+                    "DAC_OVERRIDE",
+                    "NET_RAW",
+                    "NET_ADMIN",
+                    "SETFCAP",
+                    "AUDIT_WRITE",
+                    "SYS_CHROOT",
+                ],
                 pids_limit=pids_limit,
             )
         except docker.errors.DockerException:
@@ -315,6 +326,25 @@ class DockerHostManager:
             return True
         except Exception:
             return False
+
+    def get_image_info(self, context_name, image):
+        """Return image metadata dict or None if not found."""
+        try:
+            client = self._get_client(context_name)
+            img = client.images.get(image)
+            attrs = img.attrs or {}
+            size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
+            created = attrs.get("Created", "")[:19].replace("T", " ")
+            # images built with reproducible timestamps (nix, bazel) report 1980-01-01,
+            # fall back to LastTagTime which is when it was last built/pulled locally
+            if created.startswith("1980"):
+                last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
+                if last_tag:
+                    created = last_tag[:19].replace("T", " ")
+            short_id = img.short_id.replace("sha256:", "")
+            return {"size_mb": size_mb, "created": created, "id": short_id}
+        except Exception:
+            return None
 
     def exec_in_container(self, context_name, container_name_or_id, cmd):
         """Execute a command inside a running container. Returns (exit_code, output_str).

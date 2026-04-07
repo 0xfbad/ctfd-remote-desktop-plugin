@@ -5,105 +5,162 @@
 <style>
     .workspace-container {
         position: fixed;
-        top: 0;
+        top: var(--navbar-height, 56px);
         left: 0;
         right: 0;
         bottom: 0;
-        z-index: 1000;
+        z-index: 1050;
         background: #000;
         display: flex;
         flex-direction: column;
+        transition: top 0.15s;
     }
-    
-    .workspace-header {
-        background: #343a40;
+
+    .workspace-container.fullscreen {
+        top: 0;
+    }
+
+
+    .workspace-bar {
+        background: #2b3035;
         color: white;
-        padding: 10px 20px;
+        padding: 0 12px;
         display: flex;
         justify-content: space-between;
         align-items: center;
-        border-bottom: 1px solid #495057;
-    }
-    
-    .workspace-controls {
-        background: #343a40;
-        color: white;
-        padding: 10px 20px;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        gap: 15px;
         border-top: 1px solid #495057;
+        height: 36px;
+        flex-shrink: 0;
     }
-    
-    .control-btn {
-        background: #495057;
-        color: white;
-        border: none;
-        padding: 8px 16px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 14px;
-        transition: background-color 0.3s;
-        display: inline-flex;
+
+    .bar-left, .bar-right {
+        display: flex;
         align-items: center;
-        justify-content: center;
         gap: 6px;
     }
-    
-    .control-btn:hover {
-        background: #6c757d;
+
+    .bar-btn {
+        background: none;
+        color: #adb5bd;
+        border: none;
+        padding: 4px 10px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: background 0.15s, color 0.15s;
+        height: 28px;
     }
-    
-    .control-btn.start {
-        background: #28a745;
+
+    .bar-btn:hover {
+        background: #495057;
+        color: white;
     }
-    
-    .control-btn.start:hover {
-        background: #218838;
-    }
-    
-    .control-btn.stop {
+
+    .bar-btn.stop:hover {
         background: #dc3545;
+        color: white;
     }
-    
-    .control-btn.stop:hover {
-        background: #c82333;
-    }
-    
-    .control-btn.add-time {
-        background: #007bff;
-    }
-    
-    .control-btn.add-time:hover {
-        background: #0056b3;
-    }
-    
-    .control-btn:disabled {
-        background: #495057 !important;
+
+    .bar-btn:disabled {
+        opacity: 0.4;
         cursor: not-allowed;
-        opacity: 0.6;
     }
-    
-    .timer-display {
+
+    .bar-btn:disabled:hover {
+        background: none;
+        color: #adb5bd;
+    }
+
+    .bar-timer {
         font-family: monospace;
-        font-size: 18px;
-        font-weight: bold;
-        color: #ffc107;
-        min-width: 80px;
+        font-size: 13px;
+        font-weight: 600;
+        color: #e9ecef;
+        min-width: 48px;
         text-align: center;
+        padding: 0 6px;
+        user-select: none;
     }
-    
-    .timer-expired {
+
+    .bar-timer.expired {
         color: #dc3545;
     }
-    
+
+    [data-tip] {
+        position: relative;
+    }
+
+    [data-tip]:hover::after {
+        content: attr(data-tip);
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 50%;
+        transform: translateX(-50%);
+        background: #1a1e21;
+        color: #e9ecef;
+        padding: 4px 8px;
+        border-radius: 3px;
+        font-size: 11px;
+        white-space: nowrap;
+        z-index: 100;
+        pointer-events: none;
+        opacity: 1;
+    }
+
+    .bar-left > [data-tip]:first-child:hover::after {
+        left: 0;
+        transform: none;
+    }
+
+    .bar-divider {
+        width: 1px;
+        height: 18px;
+        background: #495057;
+        margin: 0 4px;
+    }
+
+    .mode-tabs {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        background: #1a1e21;
+        border-radius: 4px;
+        padding: 2px;
+    }
+
+    .mode-tab {
+        background: none;
+        color: #6c757d;
+        border: none;
+        padding: 3px 12px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        transition: all 0.15s;
+        height: 24px;
+    }
+
+    .mode-tab:hover {
+        color: #adb5bd;
+    }
+
+    .mode-tab.active {
+        background: #495057;
+        color: white;
+    }
+
     .workspace-content {
         flex: 1;
         position: relative;
         overflow: hidden;
     }
-    
+
     .no-session-screen {
         display: flex;
         flex-direction: column;
@@ -113,96 +170,52 @@
         color: white;
         text-align: center;
     }
-    
+
     .start-session-btn {
-        padding: 15px 30px;
-        font-size: 18px;
-        background: #007bff;
+        padding: 12px 28px;
+        font-size: 16px;
+        background: var(--theme-color, var(--bs-primary, #007bff));
         color: white;
         border: none;
-        border-radius: 8px;
+        border-radius: 6px;
         cursor: pointer;
         margin-top: 20px;
-        transition: background-color 0.3s;
+        transition: filter 0.2s;
     }
-    
+
     .start-session-btn:hover {
-        background: #0056b3;
+        filter: brightness(0.85);
     }
-    
+
     .start-session-btn:disabled {
         background: #6c757d;
         cursor: not-allowed;
     }
-    
+
     .loading-spinner {
-        width: 20px;
-        height: 20px;
+        width: 14px;
+        height: 14px;
         border: 2px solid #ffffff;
         border-top: 2px solid transparent;
         border-radius: 50%;
         animation: spin 1s linear infinite;
         display: inline-block;
-        margin-right: 8px;
+        margin-right: 6px;
     }
-    
+
     @keyframes spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
     }
-    
-    .terminate-btn {
-        background: #dc3545;
-        color: white;
-        border: none;
-        padding: 8px 16px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 14px;
-    }
 
-    .terminate-btn:hover {
-        background: #c82333;
-    }
 
-    .help-icon {
-        position: relative;
-        display: inline-block;
-        color: #6c757d;
-        cursor: help;
-        margin-left: 10px;
-        font-size: 14px;
-    }
-
-    .help-icon .help-tooltip {
-        display: none;
-        position: absolute;
-        top: 100%;
-        left: 0;
-        margin-top: 8px;
-        background: #1a1a1a;
-        border: 1px solid #495057;
-        border-radius: 6px;
-        padding: 12px 14px;
-        width: 280px;
-        font-size: 13px;
-        line-height: 1.5;
-        color: #adb5bd;
-        z-index: 100;
-        font-weight: normal;
-    }
-
-    .help-icon:hover .help-tooltip {
-        display: block;
-    }
-    
     .vnc-frame {
         width: 100%;
         height: 100%;
         border: none;
         background: #000;
     }
-    
+
     .status-message {
         position: absolute;
         top: 50%;
@@ -214,10 +227,21 @@
         border-radius: 4px;
         z-index: 10;
     }
-    
+
     .hidden {
         display: none !important;
     }
+
+    /* ssh connection panel */
+    .ssh-panel {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        overflow-y: auto;
+    }
+
+
 </style>
 {% endblock %}
 
@@ -245,38 +269,71 @@
 </div>
 {% elif container_info %}
 <div class="workspace-container" id="workspace-container">
-    <div class="workspace-header">
-        <div>
-            <strong>Remote Desktop</strong>
-            <small class="text-muted ml-2">{{ formatted_time }}</small>
-            <span class="help-icon">
-                <i class="fas fa-question-circle"></i>
-                <span class="help-tooltip">
-                    This environment is ephemeral, nothing is saved between sessions. Avoid logging into anything sensitive. If something breaks, just stop and start a new session.
-                </span>
-            </span>
-        </div>
-        <div>
-            <button class="terminate-btn" onclick="terminateSession()">
-                <i class="fas fa-power-off"></i> Terminate Session
-            </button>
-        </div>
-    </div>
-    <div class="workspace-content">
+    <div class="workspace-content" id="workspace-content">
         <iframe id="vnc-frame" class="vnc-frame" src="{{ vnc_url }}" allow="fullscreen"></iframe>
+        {% if terminal_url %}
+        <iframe id="terminal-frame" class="vnc-frame hidden" src="" allow="fullscreen"></iframe>
+        {% endif %}
+        {% if ssh_info %}
+        <div id="ssh-panel" class="ssh-panel hidden">
+            <div class="container" style="max-width: 540px;">
+                <div class="card">
+                    <div class="card-body py-4 px-4">
+                        <h5 class="card-title mb-1"><i class="fas fa-terminal me-2"></i>SSH Connection</h5>
+                        <p class="text-muted small mb-4">Run this in a terminal on your machine (not inside the desktop)</p>
+                        <div class="mb-3">
+                            <label class="form-label small">Command</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control font-monospace" id="ssh-cmd" value="ssh {{ ssh_info.username }}@{{ ssh_info.host }} -p {{ ssh_info.port }}" readonly>
+                                <button class="btn btn-outline-secondary" onclick="copyField('ssh-cmd', this)" title="Copy"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                        <div class="mb-0">
+                            <label class="form-label small">Password</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control font-monospace" id="ssh-pass" value="{{ ssh_info.password }}" readonly>
+                                <button class="btn btn-outline-secondary" onclick="copyField('ssh-pass', this)" title="Copy"><i class="fas fa-copy"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
         <div id="status-message" class="status-message hidden"></div>
     </div>
-    <div class="workspace-controls">
-        <button class="control-btn start" onclick="startSession()" id="start-btn" disabled>
-            <i class="fas fa-play"></i> Start
-        </button>
-        <div class="timer-display" id="timer-display">--:--</div>
-        <button class="control-btn stop" onclick="stopSession()" id="stop-btn">
-            <i class="fas fa-stop"></i> Stop
-        </button>
-        <button class="control-btn add-time" onclick="addTime()" id="add-time-btn">
-            <i class="fas fa-plus"></i> Extend Time
-        </button>
+    <div class="workspace-bar">
+        <div class="bar-left">
+            <div class="bar-timer" id="timer-display" data-tip="Time remaining in session">--:--</div>
+            <div class="bar-divider"></div>
+            <button class="bar-btn" onclick="addTime()" id="add-time-btn" data-tip="Add more time to your session">
+                <i class="fas fa-plus"></i> Extend
+            </button>
+            <button class="bar-btn stop" onclick="stopSession()" id="stop-btn" data-tip="End session, all work will be lost">
+                <i class="fas fa-stop"></i> Stop
+            </button>
+        </div>
+        <div class="bar-right">
+            <div class="mode-tabs" id="mode-tabs">
+                <button class="mode-tab active" data-mode="desktop" data-tip="Full graphical desktop for GUI tools" onclick="switchMode('desktop', this)">
+                    <i class="fas fa-desktop"></i> Desktop
+                </button>
+                {% if terminal_url %}
+                <button class="mode-tab" data-mode="terminal" data-tip="Browser-based shell, lighter than full desktop" onclick="switchMode('terminal', this)">
+                    <i class="fas fa-terminal"></i> Terminal
+                </button>
+                {% endif %}
+                {% if ssh_info %}
+                <button class="mode-tab" data-mode="ssh" data-tip="Connect from your own terminal" onclick="switchMode('ssh', this)">
+                    <i class="fas fa-plug"></i> SSH
+                </button>
+                {% endif %}
+            </div>
+            <div class="bar-divider"></div>
+            <button class="bar-btn" onclick="toggleFullscreen()" id="fullscreen-btn" data-tip="Fullscreen">
+                <i class="fas fa-expand"></i>
+            </button>
+        </div>
     </div>
 </div>
 {% else %}
@@ -285,14 +342,17 @@
         <div class="no-session-screen" id="no-session-screen">
             <i class="fas fa-desktop" style="font-size: 64px; margin-bottom: 20px; color: #6c757d;"></i>
             <h3>No Active Session</h3>
-            <p id="session-prompt">Click Start to launch a remote desktop session</p>
+            <p id="session-prompt" style="color: #6c757d;">Launch an on-demand environment with preloaded tools</p>
             <div style="margin-top: 24px; max-width: 720px; text-align: left; color: #adb5bd; line-height: 1.6;">
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-info-circle" style="color: #6c757d; margin-right: 6px;"></i>This is an ephemeral environment, nothing is saved between sessions.</p>
-                <p style="margin: 0 0 8px 0;"><i class="fas fa-toolbox" style="color: #6c757d; margin-right: 6px;"></i>Most tools you'll need are preloaded.</p>
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-shield-alt" style="color: #6c757d; margin-right: 6px;"></i>Avoid logging into anything sensitive.</p>
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-redo" style="color: #6c757d; margin-right: 6px;"></i>If something breaks, just stop and start a new session.</p>
+                <p style="margin: 0 0 8px 0;"><i class="fas fa-desktop" style="color: #6c757d; margin-right: 6px;"></i>Desktop, Terminal, and SSH modes available from the bottom bar once your session starts.</p>
                 <p style="margin: 0; color: #e06070;"><i class="fas fa-clock" style="color: #e06070; margin-right: 6px;"></i>Sessions expire after a set time to save resources and keep your environment fresh.</p>
             </div>
+            <button class="start-session-btn" onclick="startSession()" id="start-btn" style="background: #28a745;">
+                <i class="fas fa-play"></i> Start Remote Desktop
+            </button>
             <div id="session-error" style="display:none; margin-top: 16px; padding: 12px 20px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; text-align: center;">
                 <p id="session-error-msg" style="color: #721c24; margin: 0;"></p>
                 <p id="session-error-detail" style="color: #856404; font-size: 12px; margin: 6px 0 0 0;"></p>
@@ -300,23 +360,10 @@
         </div>
         <div id="status-message" class="status-message hidden"></div>
     </div>
-    <div class="workspace-controls">
-        <button class="control-btn start" onclick="startSession()" id="start-btn">
-            <i class="fas fa-play"></i> Start
-        </button>
-        <div class="timer-display" id="timer-display">--:--</div>
-        <button class="control-btn stop" onclick="stopSession()" id="stop-btn" disabled>
-            <i class="fas fa-stop"></i> Stop
-        </button>
-        <button class="control-btn add-time" onclick="addTime()" id="add-time-btn" disabled>
-            <i class="fas fa-plus"></i> Extend Time
-        </button>
-    </div>
 </div>
 {% endif %}
 
 <script>
-let debugMode = false;
 let sessionTimer = null;
 let timeRemaining = 0;
 let continuationsUsed = 0;
@@ -324,19 +371,16 @@ const maxContinuations = 3;
 let lastFailedHostname = '';
 let errorAlreadyShown = false;
 let expirationWarningShown = false;
+const terminalUrl = {{ (terminal_url if terminal_url else '') | tojson }};
+let terminalLoaded = false;
 
 function showStatusMessage(message, timeout = 3000) {
     const statusDiv = document.getElementById('status-message');
-    if (!statusDiv) {
-        return;
-    }
+    if (!statusDiv) return;
     statusDiv.textContent = message;
     statusDiv.classList.remove('hidden');
-
     if (timeout > 0) {
-        setTimeout(() => {
-            statusDiv.classList.add('hidden');
-        }, timeout);
+        setTimeout(() => { statusDiv.classList.add('hidden'); }, timeout);
     }
 }
 
@@ -368,7 +412,7 @@ function updateTimerDisplay() {
     const display = document.getElementById('timer-display');
     if (display) {
         display.textContent = formatTime(timeRemaining);
-        display.classList.toggle('timer-expired', timeRemaining <= 0);
+        display.classList.toggle('expired', timeRemaining <= 0);
     }
 }
 
@@ -380,18 +424,20 @@ function stopTimer() {
     terminateSession();
 }
 
-function updateAddTimeButton() {
+function updateAddTimeButton(showCount) {
     const addTimeBtn = document.getElementById('add-time-btn');
-    if (addTimeBtn) {
-        const hasActiveSession = document.getElementById('vnc-frame') !== null;
-
-        if (!hasActiveSession || continuationsUsed >= maxContinuations) {
-            addTimeBtn.disabled = true;
-            addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend Time';
-        } else {
-            addTimeBtn.disabled = false;
-            addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend Time';
-        }
+    if (!addTimeBtn) return;
+    const hasActiveSession = document.getElementById('vnc-frame') !== null;
+    const maxed = continuationsUsed >= maxContinuations;
+    addTimeBtn.disabled = !hasActiveSession || maxed;
+    addTimeBtn.setAttribute('data-tip', maxed ? `All ${maxContinuations} extensions used` : 'Add more time to your session');
+    if (showCount) {
+        addTimeBtn.innerHTML = `<i class="fas fa-check"></i> ${continuationsUsed}/${maxContinuations} used`;
+        setTimeout(() => {
+            addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        }, 1500);
+    } else {
+        addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
     }
 }
 
@@ -408,7 +454,7 @@ function checkStatus() {
         pollInterval = null;
         if (startBtn) {
             startBtn.disabled = false;
-            startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
         }
         showSessionError('session timed out');
         return;
@@ -416,9 +462,7 @@ function checkStatus() {
 
     fetch('/remote-desktop/api/creation-status', {
         method: 'GET',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
         credentials: 'same-origin'
     })
     .then(response => response.json())
@@ -428,55 +472,39 @@ function checkStatus() {
             pollInterval = null;
             lastFailedHostname = '';
             if (startBtn) {
-                startBtn.innerHTML = '<span class="loading-spinner"></span> Loading desktop...';
+                startBtn.innerHTML = '<span class="loading-spinner"></span> Loading...';
             }
-            setTimeout(() => {
-                window.location.reload();
-            }, 1000);
+            allowNavigation();
+            setTimeout(() => { window.location.reload(); }, 1000);
         } else if (data.status === 'failed') {
             clearInterval(pollInterval);
             pollInterval = null;
-
-            const errorMsg = data.error || 'Unknown error';
-            const failedHost = data.hostname || lastFailedHostname || 'unknown host';
-
             if (startBtn) {
                 startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
             }
             lastFailedHostname = '';
-            showSessionError(errorMsg);
+            showSessionError(data.error || 'Unknown error');
         } else {
             const message = data.message || 'Creating container...';
-
             const hostnameMatch = message.match(/(?:to|on|for)\s+(\w+)/i);
-            if (hostnameMatch) {
-                lastFailedHostname = hostnameMatch[1];
-            }
-
+            if (hostnameMatch) lastFailedHostname = hostnameMatch[1];
             if (startBtn) {
                 startBtn.innerHTML = `<span class="loading-spinner"></span> ${message}`;
             }
         }
     })
-    .catch(error => {
-        console.error('Poll error:', error);
-    });
+    .catch(error => { console.error('Poll error:', error); });
 }
 
 function pollCreationStatus() {
     pollStartTime = Date.now();
-
     checkStatus();
-
-    pollInterval = setInterval(() => {
-        checkStatus();
-    }, 2000);
+    pollInterval = setInterval(checkStatus, 2000);
 }
 
 function startSession() {
     errorAlreadyShown = false;
-
     const startBtn = document.getElementById('start-btn');
     if (startBtn) {
         startBtn.disabled = true;
@@ -488,9 +516,7 @@ function startSession() {
 
     fetch('/remote-desktop/api/create', {
         method: 'POST',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
         credentials: 'same-origin',
         body: formData
     })
@@ -502,7 +528,7 @@ function startSession() {
         } else {
             if (startBtn) {
                 startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
             }
             showSessionError(data.error);
         }
@@ -510,7 +536,7 @@ function startSession() {
     .catch(error => {
         if (startBtn) {
             startBtn.disabled = false;
-            startBtn.innerHTML = '<i class="fas fa-play"></i> Start';
+            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
         }
         console.error('Create session error:', error);
         showSessionError('request failed');
@@ -519,52 +545,42 @@ function startSession() {
 
 function stopSession() {
     if (!confirm('Are you sure you want to stop your session?')) return;
-    
+
+    allowNavigation();
+
     const stopBtn = document.getElementById('stop-btn');
     if (stopBtn) {
         stopBtn.disabled = true;
-        stopBtn.innerHTML = '<span class="loading-spinner"></span>Stopping...';
+        stopBtn.innerHTML = '<span class="loading-spinner"></span> Stopping...';
     }
-    
+
     const formData = new FormData();
     formData.append('nonce', window.init.csrfNonce);
-    
+
     fetch('/remote-desktop/api/destroy', {
         method: 'POST',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
         credentials: 'same-origin',
         body: formData
     })
     .then(response => response.json())
-    .then(data => {
-        window.location.reload();
-    })
-    .catch(error => {
-        if (stopBtn) {
-            stopBtn.disabled = false;
-            stopBtn.innerHTML = '<i class="fas fa-stop"></i> Stop';
-        }
-        alert('Error stopping session');
-    });
+    .then(() => { window.location.reload(); })
+    .catch(() => { window.location.reload(); });
 }
 
 function addTime() {
     const addTimeBtn = document.getElementById('add-time-btn');
     if (addTimeBtn) {
         addTimeBtn.disabled = true;
-        addTimeBtn.innerHTML = '<span class="loading-spinner"></span>Adding...';
+        addTimeBtn.innerHTML = '<span class="loading-spinner"></span> Adding...';
     }
-    
+
     const formData = new FormData();
     formData.append('nonce', window.init.csrfNonce);
-    
+
     fetch('/remote-desktop/api/extend', {
         method: 'POST',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
         credentials: 'same-origin',
         body: formData
     })
@@ -574,28 +590,11 @@ function addTime() {
             timeRemaining = data.timer.time_remaining;
             continuationsUsed = data.timer.extensions_used;
             expirationWarningShown = false;
-            updateTimerDisplay();
-            updateAddTimeButton();
-
-            if (addTimeBtn) {
-                addTimeBtn.disabled = false;
-                updateAddTimeButton();
-            }
-        } else if (data.error) {
-            if (addTimeBtn) {
-                addTimeBtn.disabled = false;
-                updateAddTimeButton();
-            }
-            alert('Error: ' + data.error);
         }
+        updateTimerDisplay();
+        updateAddTimeButton(true);
     })
-    .catch(error => {
-        if (addTimeBtn) {
-            addTimeBtn.disabled = false;
-            updateAddTimeButton();
-        }
-        alert('Error extending session');
-    });
+    .catch(() => { updateAddTimeButton(); });
 }
 
 function updateCountdown() {
@@ -604,7 +603,7 @@ function updateCountdown() {
 
     if (timeRemaining <= 300 && timeRemaining > 0 && !expirationWarningShown) {
         expirationWarningShown = true;
-        alert('Your session will expire in less than 5 minutes. Consider extending your session using the "Extend Time" button.');
+        alert('Your session will expire in less than 5 minutes. Consider extending your session.');
     }
 
     if (timeRemaining <= 0) {
@@ -613,40 +612,11 @@ function updateCountdown() {
     }
 }
 
-function terminateSession() {
-    if (!confirm('Are you sure? All unsaved work will be lost.')) {
-        return;
-    }
-    
-    const formData = new FormData();
-    formData.append('nonce', window.init.csrfNonce);
-    
-    fetch('/remote-desktop/api/destroy', {
-        method: 'POST',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
-        credentials: 'same-origin',
-        body: formData
-    })
-    .then(response => response.json())
-    .then(data => {
-        setTimeout(() => {
-            window.location.reload();
-        }, 1000);
-    })
-    .catch(error => {
-        window.location.reload();
-    });
-}
-
 
 function syncWithServer() {
     fetch('/remote-desktop/api/status', {
         method: 'GET',
-        headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-        },
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
         credentials: 'same-origin'
     })
     .then(response => response.json())
@@ -655,9 +625,7 @@ function syncWithServer() {
             timeRemaining = data.session.timer.time_remaining;
             continuationsUsed = data.session.timer.extensions_used;
 
-            if (timeRemaining > 300) {
-                expirationWarningShown = false;
-            }
+            if (timeRemaining > 300) expirationWarningShown = false;
 
             updateTimerDisplay();
             updateAddTimeButton();
@@ -666,18 +634,15 @@ function syncWithServer() {
                 sessionTimer = setInterval(updateCountdown, 1000);
             }
 
-            const startBtn = document.getElementById('start-btn');
             const stopBtn = document.getElementById('stop-btn');
             const addTimeBtn = document.getElementById('add-time-btn');
-
-            if (startBtn) startBtn.disabled = true;
             if (stopBtn) stopBtn.disabled = false;
             if (addTimeBtn) {
                 addTimeBtn.disabled = continuationsUsed >= data.session.timer.max_extensions;
             }
 
-            if (document.getElementById('vnc-frame')) {
-            } else {
+            if (!document.getElementById('vnc-frame')) {
+                allowNavigation();
                 window.location.reload();
             }
         } else if (!data.session) {
@@ -686,22 +651,101 @@ function syncWithServer() {
                     clearInterval(sessionTimer);
                     sessionTimer = null;
                 }
+                allowNavigation();
                 window.location.reload();
             }
         }
     })
-    .catch(error => {
-        console.error('Sync error:', error);
+    .catch(error => { console.error('Sync error:', error); });
+}
+
+// mode switching
+function switchMode(mode, tabEl) {
+    document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+    tabEl.classList.add('active');
+
+    const vncFrame = document.getElementById('vnc-frame');
+    const terminalFrame = document.getElementById('terminal-frame');
+    const sshPanel = document.getElementById('ssh-panel');
+
+    // hide all panels
+    if (vncFrame) vncFrame.classList.add('hidden');
+    if (terminalFrame) terminalFrame.classList.add('hidden');
+    if (sshPanel) sshPanel.classList.add('hidden');
+
+    if (mode === 'desktop') {
+        if (vncFrame) vncFrame.classList.remove('hidden');
+    } else if (mode === 'terminal') {
+        if (terminalFrame) {
+            // lazy-load the terminal iframe on first switch
+            if (!terminalLoaded && terminalUrl) {
+                terminalFrame.src = terminalUrl;
+                terminalLoaded = true;
+            }
+            terminalFrame.classList.remove('hidden');
+        }
+    } else if (mode === 'ssh') {
+        if (sshPanel) sshPanel.classList.remove('hidden');
+    }
+}
+
+// fullscreen
+let isFullscreen = false;
+
+function setFullscreen(on) {
+    isFullscreen = on;
+    const btn = document.getElementById('fullscreen-btn');
+    const container = document.getElementById('workspace-container');
+    const navbar = document.querySelector('.navbar');
+    if (container) container.classList.toggle('fullscreen', on);
+    if (navbar) navbar.style.display = on ? 'none' : '';
+    if (btn) btn.innerHTML = on
+        ? '<i class="fas fa-compress"></i>'
+        : '<i class="fas fa-expand"></i>';
+}
+
+function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().then(() => setFullscreen(true)).catch(() => {});
+    } else {
+        document.exitFullscreen().then(() => setFullscreen(false)).catch(() => {});
+    }
+}
+
+document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement) setFullscreen(false);
+});
+
+// ssh helpers
+function copyField(elementId, btn) {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    const text = el.value || el.textContent;
+    navigator.clipboard.writeText(text.trim()).then(() => {
+        btn.innerHTML = '<i class="fas fa-check"></i>';
+        setTimeout(() => { btn.innerHTML = '<i class="fas fa-copy"></i>'; }, 1500);
     });
 }
 
-window.addEventListener('beforeunload', function(e) {
-    if (document.getElementById('vnc-frame')) {
-        e.preventDefault();
-    }
-});
+
+function onBeforeUnload(e) {
+    e.preventDefault();
+}
+
+{% if container_info %}
+window.addEventListener('beforeunload', onBeforeUnload);
+{% endif %}
+
+function allowNavigation() {
+    window.removeEventListener('beforeunload', onBeforeUnload);
+}
 
 document.addEventListener('DOMContentLoaded', function() {
+    const navbar = document.querySelector('.navbar');
+    if (navbar) {
+        document.documentElement.style.setProperty('--navbar-height', navbar.offsetHeight + 'px');
+    }
+
     {% if creation_status and creation_status.get('status') not in ['failed', 'ready', 'none', None] %}
     const creationStatus = {{ creation_status | tojson }};
 

@@ -18,6 +18,8 @@ class DesktopContainerInfoModel(db.Model):
     container_name = db.Column(db.String(512), nullable=False)
     vnc_port = db.Column(db.Integer, nullable=False)
     novnc_port = db.Column(db.Integer, nullable=False)
+    ssh_port = db.Column(db.Integer, nullable=True)
+    ttyd_port = db.Column(db.Integer, nullable=True)
     vnc_password = db.Column(db.String(256), nullable=False)
     vnc_url = db.Column(db.Text, nullable=False)
     docker_context = db.Column(db.String(512), nullable=False)
