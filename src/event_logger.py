@@ -39,7 +39,7 @@ class EventLogger:
         event = {
             "id": event_id,
             "timestamp": time.time(),
-            "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "datetime": datetime.now().strftime("%b %-d, %Y %-I:%M:%S %p"),
             "type": event_type,
             "level": level,
             "message": message,

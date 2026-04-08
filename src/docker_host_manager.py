@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import logging
+from datetime import datetime
 
 import docker
 import paramiko
@@ -328,13 +329,19 @@ class DockerHostManager:
             img = client.images.get(image)
             attrs = img.attrs or {}
             size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
-            created = attrs.get("Created", "")[:19].replace("T", " ")
+            raw = attrs.get("Created", "")[:19]
             # images built with reproducible timestamps (nix, bazel) report 1980-01-01,
             # fall back to LastTagTime which is when it was last built/pulled locally
-            if created.startswith("1980"):
+            if raw.startswith("1980"):
                 last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                 if last_tag:
-                    created = last_tag[:19].replace("T", " ")
+                    raw = last_tag[:19]
+            try:
+                created = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").strftime(
+                    "%b %-d, %Y %-I:%M:%S %p"
+                )
+            except (ValueError, AttributeError):
+                created = raw.replace("T", " ")
             short_id = img.short_id.replace("sha256:", "")
             return {"size_mb": size_mb, "created": created, "id": short_id}
         except Exception:

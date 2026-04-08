@@ -313,7 +313,7 @@
 							</thead>
 							<tbody id="event-feed">
 								<tr id="event-feed-empty">
-									<td colspan="4" class="text-center text-muted py-3">No activity yet</td>
+									<td colspan="4" class="text-center text-muted">No activity yet</td>
 								</tr>
 							</tbody>
 						</table>
@@ -500,7 +500,7 @@
 								</thead>
 								<tbody id="cmd-feed">
 									<tr id="cmd-feed-empty">
-										<td colspan="4" class="text-center text-muted py-3">No commands yet</td>
+										<td colspan="4" class="text-center text-muted">No commands yet</td>
 									</tr>
 								</tbody>
 							</table>
@@ -626,13 +626,14 @@
 
 	function formatTimestamp(timestamp) {
 		const date = new Date(timestamp * 1000);
-		return date.toLocaleString(undefined, {
-			month: '2-digit',
-			day: '2-digit',
-			hour: '2-digit',
+		return date.toLocaleString('en-US', {
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric',
+			hour: 'numeric',
 			minute: '2-digit',
 			second: '2-digit',
-			hour12: false
+			hour12: true
 		});
 	}
 
@@ -774,7 +775,12 @@
 			case 'session_error':
 				return event.message;
 			case 'admin_action': {
-				const target = m.target_id ? `<a href="/admin/users/${m.target_id}">${escapeHtml(m.target)}</a>` : m.target;
+					if (m.target_id && (m.target_is_admin || m.target_is_hidden || m.target_is_banned)) {
+						_userFlags[m.target_id] = {is_admin: m.target_is_admin, is_hidden: m.target_is_hidden, is_banned: m.target_is_banned};
+					}
+					const target = m.target_id
+						? '<a href="/admin/users/' + m.target_id + '">' + escapeHtml(m.target || '') + '</a>' + userBadges(_userFlags[m.target_id] || {})
+						: escapeHtml(m.target || '');
 				if (m.killed_count !== undefined) return `purged ${m.killed_count} sessions`;
 				if (m.action === 'kill') return `killed ${target}'s session`;
 				if (m.action === 'extend') return `extended ${target}'s session`;
@@ -877,7 +883,7 @@
 		const tbody = document.getElementById('containers-table');
 
 		if (!containers || containers.length === 0) {
-			tbody.innerHTML = '<tr><td colspan="7" class="text-center">No active sessions</td></tr>';
+			tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No active sessions</td></tr>';
 			return;
 		}
 
@@ -1101,8 +1107,12 @@
 					axisPointer: { type: 'shadow' },
 					formatter: function(params) {
 						const p = params[0];
-						return echarts.format.encodeHTML(p.name) + '<br/>' +
-							   formatDurationShort(p.value) + ' (' + (data.users.find(u => u.username === p.name) || {}).session_count + ' sessions)';
+						const user = data.users.find(u => u.username === p.name) || {};
+						const uid = user.user_id;
+						const nameHtml = uid
+							? '<a href="/admin/users/' + uid + '" style="color:inherit;text-decoration:underline">' + escapeHtml(p.name) + '</a>' + userBadges(user)
+							: escapeHtml(p.name);
+						return nameHtml + '<br/>' + formatDurationShort(p.value) + ' (' + (user.session_count || 0) + ' sessions)';
 					}
 				},
 				toolbox: { feature: { saveAsImage: {} } },
@@ -1406,7 +1416,7 @@
 			const tbody = document.getElementById('cmd-users-table');
 			const users = data.users || [];
 			if (!users.length) {
-				tbody.innerHTML = '<tr><td colspan="4" class="text-center">No command data</td></tr>';
+				tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No command data</td></tr>';
 				return;
 			}
 			tbody.innerHTML = users.map(u => `
@@ -1496,7 +1506,9 @@
 	function showCmdHistory(userId, username) {
 		cmdHistoryUserId = userId;
 		cmdHistoryOffset = 0;
-		document.getElementById('cmd-history-username').textContent = username;
+		const flags = _userFlags[userId] || {};
+		document.getElementById('cmd-history-username').innerHTML =
+			'<a href="/admin/users/' + parseInt(userId) + '">' + escapeHtml(username) + '</a>' + userBadges(flags);
 		loadCmdHistory();
 		$('#cmdHistoryModal').modal('show');
 	}
@@ -1513,7 +1525,7 @@
 			const total = data.total || 0;
 
 			if (!logs.length) {
-				tbody.innerHTML = '<tr><td colspan="5" class="text-center">No commands</td></tr>';
+				tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No commands</td></tr>';
 			} else {
 				tbody.innerHTML = logs.map(log => {
 					const exitClass = log.exit_code === 0 ? 'text-success' : (log.exit_code !== null ? 'text-danger' : '');
@@ -1553,11 +1565,21 @@
 	});
 
 	document.addEventListener('DOMContentLoaded', function() {
-		connectEventStream();
-		refreshAll();
-		initCharts();
-		refreshStats();
-		startAutoRefresh();
+		fetch('/remote-desktop/dashboard/api/user-flags', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(flags => {
+			for (const [id, f] of Object.entries(flags)) {
+				_userFlags[id] = f;
+			}
+			connectEventStream();
+			refreshAll();
+			initCharts();
+			refreshStats();
+			startAutoRefresh();
+		});
 
 		document.getElementById('cmd-users-table').addEventListener('click', function(e) {
 			const link = e.target.closest('.cmd-history-link');

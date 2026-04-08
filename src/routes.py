@@ -3,6 +3,7 @@ import datetime
 import logging
 import json
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
@@ -25,6 +26,20 @@ def _user_info(user, fallback_id=None):
     if getattr(user, "banned", False):
         info["is_banned"] = True
     return info
+
+
+def _user_info_flags(user):
+    """target user flags for event metadata, keyed with target_ prefix"""
+    if not user:
+        return {}
+    flags = {}
+    if user.type == "admin":
+        flags["target_is_admin"] = True
+    if getattr(user, "hidden", False):
+        flags["target_is_hidden"] = True
+    if getattr(user, "banned", False):
+        flags["target_is_banned"] = True
+    return flags
 
 
 def create_routes(container_manager, orchestrator):
@@ -303,6 +318,24 @@ def create_routes(container_manager, orchestrator):
     def admin_dashboard():
         return render_template("admin_dashboard.html")
 
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/user-flags", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_user_flags():
+        rows = Users.query.with_entities(Users.id, Users.type, Users.hidden, Users.banned).all()
+        flags = {}
+        for uid, utype, hidden, banned in rows:
+            f = {}
+            if utype == "admin":
+                f["is_admin"] = True
+            if hidden:
+                f["is_hidden"] = True
+            if banned:
+                f["is_banned"] = True
+            if f:
+                flags[uid] = f
+        return jsonify(flags)
+
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/containers", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
@@ -355,7 +388,12 @@ def create_routes(container_manager, orchestrator):
                 user_id=admin_user.id,
                 username=admin_user.name,
                 level="warning",
-                metadata={"action": "kill", "target_id": user_id, "target": target_username},
+                metadata={
+                    "action": "kill",
+                    "target_id": user_id,
+                    "target": target_username,
+                    **_user_info_flags(target_user),
+                },
             )
 
             result = container_manager.destroy_container(user_id, reason="admin_killed")
@@ -388,7 +426,12 @@ def create_routes(container_manager, orchestrator):
             user_id=admin_user.id,
             username=admin_user.name,
             level="info",
-            metadata={"action": "peek", "target_id": user_id, "target": target_username},
+            metadata={
+                "action": "peek",
+                "target_id": user_id,
+                "target": target_username,
+                **_user_info_flags(target_user),
+            },
         )
         return jsonify({"success": True})
 
@@ -416,7 +459,12 @@ def create_routes(container_manager, orchestrator):
                 user_id=admin_user.id,
                 username=admin_user.name,
                 level="info",
-                metadata={"action": "extend", "target_id": user_id, "target": target_username},
+                metadata={
+                    "action": "extend",
+                    "target_id": user_id,
+                    "target": target_username,
+                    **_user_info_flags(target_user),
+                },
             )
 
             result = container_manager.extend_session_timer(user_id)
@@ -471,6 +519,67 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error clearing history: {e}")
             return jsonify({"error": str(e)}), 500
 
+    # image matrix
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/images/matrix", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_images_matrix():
+        from .models import get_all_settings, set_setting
+
+        settings = get_all_settings()
+        docker_image = settings.get("docker_image", "ctfd-remote-desktop:latest")
+        display = docker_image.removesuffix(":latest")
+
+        connected = container_manager.host_manager.get_connected_contexts()
+        if not connected:
+            return jsonify(images=[display], contexts=[], matrix={})
+
+        matrix = {display: {}}
+
+        def _info(ctx_name):
+            return ctx_name, container_manager.host_manager.get_image_info(ctx_name, docker_image)
+
+        with ThreadPoolExecutor(max_workers=min(len(connected), 8)) as pool:
+            futures = {pool.submit(_info, ctx): ctx for ctx in connected}
+            for future in as_completed(futures, timeout=15):
+                try:
+                    ctx_name, info = future.result()
+                    entry = {"available": info is not None}
+                    if info:
+                        entry["info"] = info
+                    matrix[display][ctx_name] = entry
+                except Exception:
+                    matrix[display][futures[future]] = {"available": False}
+
+        set_setting(
+            "image_cache",
+            json.dumps({"matrix": matrix, "contexts": connected, "scanned_at": time.time()}),
+        )
+        return jsonify(images=[display], contexts=connected, matrix=matrix)
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/images/cache", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_images_cache():
+        from .models import get_setting
+
+        raw = get_setting("image_cache")
+        if not raw:
+            return jsonify(cached=False)
+        try:
+            cache = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return jsonify(cached=False)
+
+        return jsonify(
+            cached=True,
+            images=sorted(cache["matrix"].keys()),
+            contexts=cache["contexts"],
+            matrix=cache["matrix"],
+            scanned_at=cache["scanned_at"],
+        )
+
     # stats
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/top-users", methods=["GET"])
@@ -488,7 +597,21 @@ def create_routes(container_manager, orchestrator):
                 entry["session_count"] += 1
                 entry["username"] = row.username
 
-            users = sorted(user_stats.values(), key=lambda u: u["total_duration"], reverse=True)[:15]
+            top = sorted(user_stats.items(), key=lambda x: x[1]["total_duration"], reverse=True)[:15]
+            users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_([uid for uid, _ in top])).all()}
+            users = []
+            for uid, stats in top:
+                entry = {"user_id": uid, **stats}
+                u = users_by_id.get(uid)
+                if u:
+                    entry["username"] = u.name
+                    if u.type == "admin":
+                        entry["is_admin"] = True
+                    if getattr(u, "hidden", False):
+                        entry["is_hidden"] = True
+                    if getattr(u, "banned", False):
+                        entry["is_banned"] = True
+                users.append(entry)
             return jsonify({"users": users})
         except Exception as e:
             logger.error(f"admin API error getting top users: {e}")
@@ -508,7 +631,10 @@ def create_routes(container_manager, orchestrator):
                 daily[date_str]["sessions"] += 1
                 daily[date_str]["total_duration"] += row.duration
 
-            days = [{"date": d, **daily[d]} for d in sorted(daily.keys())]
+            days = [
+                {"date": datetime.datetime.strptime(d, "%Y-%m-%d").strftime("%b %-d, %Y"), **daily[d]}
+                for d in sorted(daily.keys())
+            ]
             return jsonify({"days": days})
         except Exception as e:
             logger.error(f"admin API error getting usage stats: {e}")
@@ -658,7 +784,7 @@ def create_routes(container_manager, orchestrator):
             for r in rows:
                 if not r.started_at:
                     continue
-                dt = datetime.fromtimestamp(r.started_at)
+                dt = datetime.datetime.fromtimestamp(r.started_at)
                 matrix[dt.hour][dt.weekday()] += 1
 
             data = []
@@ -668,7 +794,7 @@ def create_routes(container_manager, orchestrator):
                         data.append([day, hour, matrix[hour][day]])
 
             days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            hours = [f"{h:02d}:00" for h in range(24)]
+            hours = [f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)]
             return jsonify({"data": data, "days": days, "hours": hours})
         except Exception as e:
             logger.error(f"admin API error getting heatmap: {e}")
@@ -744,7 +870,7 @@ def create_routes(container_manager, orchestrator):
             t = min_t
             while t <= max_t:
                 count = sum(1 for s in all_sessions if s[0] <= t < s[1])
-                date_str = datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+                date_str = datetime.datetime.fromtimestamp(t).strftime("%b %-d, %Y %-I:%M %p")
                 points.append({"time": date_str, "concurrent": count})
                 t += interval
 
@@ -936,7 +1062,13 @@ def create_routes(container_manager, orchestrator):
                 hour_str = datetime.datetime.fromtimestamp(row.timestamp).strftime("%Y-%m-%d %H:00")
                 hourly[hour_str] += 1
 
-            points = [{"time": h, "commands": c} for h, c in sorted(hourly.items())]
+            points = [
+                {
+                    "time": datetime.datetime.strptime(h, "%Y-%m-%d %H:00").strftime("%b %-d, %Y %-I:00 %p"),
+                    "commands": c,
+                }
+                for h, c in sorted(hourly.items())
+            ]
             return jsonify({"points": points})
         except Exception as e:
             logger.error(f"admin API error getting command activity: {e}")

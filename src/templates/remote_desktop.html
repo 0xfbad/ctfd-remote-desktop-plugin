@@ -389,7 +389,7 @@ function showSessionError(detail) {
     if (!el) return;
     msgEl.textContent = 'Something went wrong on our end, please try again later or contact an administrator.';
     const d = new Date();
-    const ts = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+    const ts = d.toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true});
     const user = window.init.userName || 'unknown';
     detailEl.textContent = user + ' at ' + ts + (detail ? ': ' + detail : '');
     el.style.display = '';

@@ -129,6 +129,19 @@
     </table>
 </div>
 
+<hr class="mt-4">
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">Image Availability <span class="cfg-help" data-tip="Shows whether the configured Docker image is present on each context. Hover icons for hash, size, and build time. Pull or rebuild images on hosts marked as missing or outdated.">?</span></h5>
+    <div class="d-flex align-items-center">
+        <small class="text-muted mr-2" id="rd-scan-status"></small>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="rd-scan-btn">Scan</button>
+    </div>
+</div>
+<div id="rd-matrix-container">
+    <p class="text-muted text-center small">Click Scan to check image availability across contexts</p>
+</div>
+
 <div class="modal fade" id="rdImportContextsModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
@@ -612,7 +625,103 @@
         });
     });
 
+    function loadCachedImages() {
+        var st = document.getElementById('rd-scan-status');
+        var box = document.getElementById('rd-matrix-container');
+        rdFetch('/remote-desktop/dashboard/api/images/cache')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.cached) {
+                    box.innerHTML = '<p class="text-muted text-center small">No scan data yet. Click Scan to check image availability.</p>';
+                    return;
+                }
+                st.textContent = 'Last scanned: ' + new Date(data.scanned_at * 1000).toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+                renderMatrix(data.images || [], data.contexts || [], data.matrix || {}, box);
+            })
+            .catch(function() {
+                box.innerHTML = '<p class="text-muted text-center small">Click Scan to check image availability</p>';
+            });
+    }
+
+    function scanImages() {
+        var st = document.getElementById('rd-scan-status');
+        var box = document.getElementById('rd-matrix-container');
+        st.textContent = 'Scanning...';
+        rdFetch('/remote-desktop/dashboard/api/images/matrix')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                st.textContent = 'Last scanned: ' + new Date().toLocaleString('en-US', {month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true});
+                renderMatrix(data.images || [], data.contexts || [], data.matrix || {}, box);
+            })
+            .catch(function(e) { st.textContent = 'Error: ' + e.message; });
+    }
+
+    function renderMatrix(imgs, ctxs, mx, box) {
+        if (!imgs.length) { box.innerHTML = '<p class="text-muted text-center small">No image configured</p>'; return; }
+        if (!ctxs.length) { box.innerHTML = '<p class="text-muted text-center small">No connected contexts</p>'; return; }
+
+        function newestId(img) {
+            var latest = null;
+            ctxs.forEach(function(ctx) {
+                var e = mx[img] && mx[img][ctx];
+                if (e && e.available && e.info) {
+                    if (!latest || e.info.created > latest.created) latest = e.info;
+                }
+            });
+            return latest ? latest.id : null;
+        }
+
+        var hdr = '<thead><tr><th><b>Image</b></th>' +
+            ctxs.map(function(c) { return '<th class="text-center"><b>' + escapeHtml(c) + '</b></th>'; }).join('') +
+            '</tr></thead>';
+
+        var rows = imgs.map(function(img) {
+            var newest = newestId(img);
+            var anyMissing = false;
+            var anyOutdated = false;
+
+            var cells = ctxs.map(function(ctx) {
+                var entry = mx[img] && mx[img][ctx];
+
+                if (!entry || !entry.available) {
+                    anyMissing = true;
+                    return '<td class="text-center" style="background:rgba(220,53,69,0.06)">' +
+                        '<i class="fas fa-times-circle text-danger" title="Not found. Build or load this image on this host."></i></td>';
+                }
+
+                var info = entry.info;
+                if (!info) {
+                    return '<td class="text-center">' +
+                        '<i class="fas fa-check-circle text-success" title="Available"></i></td>';
+                }
+
+                var isStale = newest && info.id !== newest;
+                if (isStale) anyOutdated = true;
+
+                if (isStale) {
+                    return '<td class="text-center" style="background:rgba(255,193,7,0.08)">' +
+                        '<i class="fas fa-exclamation-circle text-warning" title="Outdated. SHA ' + escapeHtml(info.id) + ' (' + info.size_mb + 'MB, built ' + escapeHtml(info.created) + ') does not match the newest build. Rebuild on this host."></i></td>';
+                }
+
+                return '<td class="text-center">' +
+                    '<i class="fas fa-check-circle text-success" title="Up to date. SHA ' + escapeHtml(info.id) + ' (' + info.size_mb + 'MB, built ' + escapeHtml(info.created) + ')"></i></td>';
+            }).join('');
+
+            var badge = '';
+            if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
+            else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">outdated</span>';
+
+            return '<tr><td>' + escapeHtml(img) + badge + '</td>' + cells + '</tr>';
+        }).join('');
+
+        box.innerHTML = '<div class="table-responsive"><table class="table table-sm table-striped border">' +
+            hdr + '<tbody>' + rows + '</tbody></table></div>';
+    }
+
+    document.getElementById('rd-scan-btn').addEventListener('click', function() { scanImages(); });
+
     loadRdSettings();
     loadHosts();
+    loadCachedImages();
 })();
 </script>
