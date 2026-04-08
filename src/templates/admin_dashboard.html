@@ -267,7 +267,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Active Sessions <span class="cfg-help" data-tip="Currently running desktop containers. Kill or extend individual sessions, or purge all at once during incidents.">?</span></h3>
-					<button class="btn btn-danger" id="purge-all-btn" onclick="killAllSessions()">
+					<button class="btn btn-danger btn-sm" id="purge-all-btn" onclick="killAllSessions()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
 				</div>
@@ -779,6 +779,7 @@
 				if (m.action === 'kill') return `killed ${target}'s session`;
 				if (m.action === 'extend') return `extended ${target}'s session`;
 				if (m.action === 'peek') return `monitoring ${target}'s session`;
+				if (m.action === 'clear_history') return `cleared ${m.sessions || 0} sessions, ${m.commands || 0} command logs`;
 				return '';
 			}
 			case 'host_unhealthy':
@@ -869,6 +870,7 @@
 
 	function refreshAll() {
 		refreshContainers();
+		refreshSummaryStats();
 	}
 
 	function updateContainersTable(containers) {
@@ -982,6 +984,21 @@
 	}
 
 	// purge all
+
+	function clearHistory() {
+		if (!confirm('Clear all session history? This resets stats and charts.')) return;
+		fetch('/remote-desktop/dashboard/api/clear_history', {
+			method: 'POST',
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(r => r.json())
+		.then(data => {
+			if (data.success) {
+				refreshStats();
+			}
+		});
+	}
 
 	function killAllSessions() {
 		if (!confirm('Purge ALL active sessions? This cannot be undone.')) return;

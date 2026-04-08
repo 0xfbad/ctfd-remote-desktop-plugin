@@ -154,6 +154,15 @@
     </div>
 </div>
 
+<div class="d-flex justify-content-between align-items-center mb-3 mt-4">
+    <h5 class="mb-0">Danger Zone</h5>
+</div>
+<div>
+    <button type="button" class="btn btn-sm btn-outline-danger" id="rd-clear-history-btn">
+        <i class="fas fa-eraser"></i> Clear Session History
+    </button>
+</div>
+
 <div class="modal fade" id="rdEditContextModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
@@ -590,6 +599,16 @@
         .then(function(data) {
             if (data.success) { CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Contexts reloaded', button: 'OK' }); loadHosts(); }
             else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Reload failed', button: 'OK' });
+        });
+    });
+
+    document.getElementById('rd-clear-history-btn').addEventListener('click', function() {
+        if (!confirm('Clear all session history? This resets stats and charts.')) return;
+        rdFetch('/remote-desktop/dashboard/api/clear_history', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Cleared ' + data.sessions + ' sessions, ' + data.commands + ' command logs', button: 'OK' });
+            else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Failed', button: 'OK' });
         });
     });
 

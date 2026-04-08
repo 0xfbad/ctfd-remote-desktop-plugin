@@ -480,6 +480,33 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error killing all containers: {e}")
             return jsonify({"error": str(e)}), 500
 
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/clear_history", methods=["POST"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_clear_history():
+        from .models import DesktopSessionHistoryModel, CommandLogModel
+
+        try:
+            session_count = DesktopSessionHistoryModel.query.count()
+            cmd_count = CommandLogModel.query.count()
+            DesktopSessionHistoryModel.query.delete()
+            CommandLogModel.query.delete()
+            db.session.commit()
+
+            admin_user = get_current_user()
+            event_logger.log_event(
+                "admin_action",
+                f"cleared {session_count} sessions, {cmd_count} command logs",
+                user_id=admin_user.id if admin_user else None,
+                username=admin_user.name if admin_user else None,
+                level="warning",
+                metadata={"action": "clear_history", "sessions": session_count, "commands": cmd_count},
+            )
+            return jsonify({"success": True, "sessions": session_count, "commands": cmd_count})
+        except Exception as e:
+            logger.error(f"admin API error clearing history: {e}")
+            return jsonify({"error": str(e)}), 500
+
     # stats
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/top-users", methods=["GET"])
@@ -528,9 +555,9 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_stats_summary():
         try:
-            from .models import DesktopSessionModel
+            from .models import DesktopContainerInfoModel
 
-            active = DesktopSessionModel.query.count()
+            active = DesktopContainerInfoModel.query.count()
             healthy_contexts = sum(1 for h in orchestrator.health.values() if h)
             total_contexts = len(orchestrator.health)
 
