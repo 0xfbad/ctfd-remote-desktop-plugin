@@ -266,7 +266,7 @@ NGINXBLOCK
     added "terminal proxy location"
 fi
 
-if grep -q "remote-desktop/static/fonts/" "$NGINX_CONF"; then
+if grep -q "location /remote-desktop/static/fonts/" "$NGINX_CONF"; then
     skip "font mime type location"
 else
     cat > /tmp/_rd_font_nginx_block.conf << 'NGINXBLOCK'
@@ -283,7 +283,7 @@ else
 NGINXBLOCK
     for conf in "$NGINX_CONF" "${NGINX_CONF%/*}/https.conf"; do
         [ -f "$conf" ] || continue
-        if grep -q "remote-desktop/static/fonts/" "$conf"; then
+        if grep -q "location /remote-desktop/static/fonts/" "$conf"; then
             continue
         fi
         sed -i '/location \/ {/r /tmp/_rd_font_nginx_block.conf' "$conf"
