@@ -30,7 +30,13 @@ def _user_info(user, fallback_id=None):
 
 
 def create_routes(container_manager, orchestrator):
-    remote_desktop_bp = Blueprint("remote_desktop", __name__, template_folder="templates")
+    remote_desktop_bp = Blueprint(
+        "remote_desktop",
+        __name__,
+        template_folder="templates",
+        static_folder="static",
+        static_url_path="/remote-desktop/static",
+    )
 
     # user endpoints
 
@@ -522,33 +528,45 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_stats_summary():
         try:
+            from .models import DesktopSessionModel
+
+            active = DesktopSessionModel.query.count()
+            healthy_contexts = sum(1 for h in orchestrator.health.values() if h)
+            total_contexts = len(orchestrator.health)
+
             rows = _session_query().all()
-            total_sessions = len(rows)
+            total_sessions = len(rows) + active
 
-            if total_sessions == 0:
-                return jsonify({"total_sessions": 0, "avg_duration": 0, "peak_concurrent": 0})
-
-            avg_duration = sum(r.duration for r in rows) / total_sessions
+            durations = [r.duration for r in rows if r.duration and r.duration > 0]
+            avg_duration = sum(durations) / len(durations) if durations else 0
 
             # sweep-line algorithm for peak concurrent sessions
             events = []
+            now = time.time()
             for r in rows:
-                events.append((r.started_at, 1))
-                events.append((r.ended_at, -1))
-            events.sort(key=lambda e: (e[0], e[1]))
+                if r.started_at:
+                    events.append((r.started_at, 1))
+                    events.append((r.ended_at or now, -1))
 
+            events.sort(key=lambda e: (e[0], e[1]))
             peak = 0
             current = 0
             for _, delta in events:
                 current += delta
-                if current > peak:
-                    peak = current
+                peak = max(peak, current)
+            peak = max(peak, active)
+
+            unique_users = len({r.user_id for r in rows})
 
             return jsonify(
                 {
+                    "active": active,
                     "total_sessions": total_sessions,
                     "avg_duration": avg_duration,
                     "peak_concurrent": peak,
+                    "unique_users": unique_users,
+                    "healthy_contexts": healthy_contexts,
+                    "total_contexts": total_contexts,
                 }
             )
         except Exception as e:
@@ -640,6 +658,36 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting per-host stats: {e}")
             return jsonify({"error": str(e)}), 500
 
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/heatmap", methods=["GET"])
+    @admins_only
+    @bypass_csrf_protection
+    def admin_stats_heatmap():
+        try:
+            from datetime import datetime
+
+            period = request.args.get("period", "all")
+            rows = _session_query(period).all()
+
+            matrix = [[0] * 7 for _ in range(24)]
+            for r in rows:
+                if not r.started_at:
+                    continue
+                dt = datetime.fromtimestamp(r.started_at)
+                matrix[dt.hour][dt.weekday()] += 1
+
+            data = []
+            for hour in range(24):
+                for day in range(7):
+                    if matrix[hour][day] > 0:
+                        data.append([day, hour, matrix[hour][day]])
+
+            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            hours = [f"{h:02d}:00" for h in range(24)]
+            return jsonify({"data": data, "days": days, "hours": hours})
+        except Exception as e:
+            logger.error(f"admin API error getting heatmap: {e}")
+            return jsonify({"error": str(e)}), 500
+
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/duration-distribution", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
@@ -698,8 +746,14 @@ def create_routes(container_manager, orchestrator):
             min_t = min(s[0] for s in all_sessions)
             max_t = max(s[1] for s in all_sessions)
 
-            # sample every 5 minutes, cap at 2000 points
-            interval = max((max_t - min_t) / 2000, 300)
+            # sample interval based on time range
+            span = max_t - min_t
+            if span < 86400:
+                interval = 600  # 10 min for < 1 day
+            elif span < 604800:
+                interval = 1800  # 30 min for < 1 week
+            else:
+                interval = 3600  # 1 hour for longer
             points = []
             t = min_t
             while t <= max_t:

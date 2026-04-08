@@ -247,27 +247,39 @@ class DockerHostManager:
         cap_drop = [c.strip() for c in get_setting("cap_drop").split(",") if c.strip()]
         cap_add = [c.strip() for c in get_setting("cap_add").split(",") if c.strip()]
 
-        port_bindings = {p: None for p in ports}
+        import random
 
-        try:
-            container = client.containers.run(
-                image,
-                name=name,
-                hostname=hostname or name,
-                detach=True,
-                auto_remove=True,
-                environment=env,
-                ports=port_bindings,
-                shm_size=shm_size,
-                mem_limit=memory,
-                nano_cpus=nano_cpus,
-                cap_drop=cap_drop,
-                cap_add=cap_add,
-                pids_limit=pids_limit,
-            )
-        except docker.errors.DockerException:
-            self._clear_client(context_name)
-            raise
+        last_err = None
+        for _ in range(50):
+            port_bindings = {p: random.randint(40000, 59999) for p in ports}
+            try:
+                container = client.containers.run(
+                    image,
+                    name=name,
+                    hostname=hostname or name,
+                    detach=True,
+                    auto_remove=True,
+                    environment=env,
+                    ports=port_bindings,
+                    shm_size=shm_size,
+                    mem_limit=memory,
+                    nano_cpus=nano_cpus,
+                    cap_drop=cap_drop,
+                    cap_add=cap_add,
+                    pids_limit=pids_limit,
+                )
+                break
+            except docker.errors.APIError as e:
+                if "port is already allocated" in str(e) or "address already in use" in str(e):
+                    last_err = e
+                    continue
+                self._clear_client(context_name)
+                raise
+            except docker.errors.DockerException:
+                self._clear_client(context_name)
+                raise
+        else:
+            raise docker.errors.DockerException(f"failed to find available ports after retries: {last_err}")
 
         # poll for port mappings (container might take a moment to bind)
         port_map = {}

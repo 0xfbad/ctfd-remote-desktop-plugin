@@ -211,6 +211,57 @@
 </div>
 
 <div class="container">
+	<div class="row mb-3">
+		<div class="col-md-2">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-active" class="mb-0">-</h4>
+					<small class="text-muted">Active Now</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-2">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-total-sessions" class="mb-0">-</h4>
+					<small class="text-muted">Total Sessions</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-2">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-avg-duration" class="mb-0">-</h4>
+					<small class="text-muted">Avg Duration</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-2">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-peak-concurrent" class="mb-0">-</h4>
+					<small class="text-muted">Peak Concurrent</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-2">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-unique-users" class="mb-0">-</h4>
+					<small class="text-muted">Unique Users</small>
+				</div>
+			</div>
+		</div>
+		<div class="col-md-2">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-contexts" class="mb-0">-</h4>
+					<small class="text-muted">Contexts</small>
+				</div>
+			</div>
+		</div>
+	</div>
+
 	<div class="row">
 		<div class="col-md-12">
 			<div class="card">
@@ -221,7 +272,7 @@
 					</button>
 				</div>
 				<div class="card-body">
-					<div class="table-responsive">
+					<div class="table-responsive log-wrap">
 						<table class="table table-striped table-sm border">
 							<thead>
 								<tr>
@@ -267,33 +318,6 @@
 							</tbody>
 						</table>
 					</div>
-				</div>
-			</div>
-		</div>
-	</div>
-
-	<div class="row">
-		<div class="col-md-4">
-			<div class="card stat-card bg-light">
-				<div class="card-body">
-					<h4 id="stat-total-sessions" class="mb-0">0</h4>
-					<small class="text-muted">Total Sessions</small>
-				</div>
-			</div>
-		</div>
-		<div class="col-md-4">
-			<div class="card stat-card bg-light">
-				<div class="card-body">
-					<h4 id="stat-avg-duration" class="mb-0">0m</h4>
-					<small class="text-muted">Avg Duration</small>
-				</div>
-			</div>
-		</div>
-		<div class="col-md-4">
-			<div class="card stat-card bg-light">
-				<div class="card-body">
-					<h4 id="stat-peak-concurrent" class="mb-0">0</h4>
-					<small class="text-muted">Peak Concurrent</small>
 				</div>
 			</div>
 		</div>
@@ -404,6 +428,24 @@
 		</div>
 	</div>
 
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Usage Heatmap</h3>
+					<select class="form-control form-control-sm" style="width: auto;" onchange="refreshHeatmap(this.value)" id="heatmap-period">
+						<option value="week" selected>Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="chart-heatmap"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
 	<div id="cmd-log-section" style="display:none;">
 		<hr>
 		<div class="row mb-3">
@@ -480,7 +522,7 @@
 						</select>
 					</div>
 					<div class="card-body">
-						<div class="table-responsive">
+						<div class="table-responsive log-wrap">
 							<table class="table table-striped table-sm border">
 								<thead>
 									<tr>
@@ -978,6 +1020,7 @@
 	let perHostChart = null;
 	let topToolsChart = null;
 	let cmdActivityChart = null;
+	let heatmapChart = null;
 
 	function initCharts() {
 		['chart-top-users', 'chart-daily-usage', 'chart-concurrent', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools', 'chart-cmd-activity'].forEach(id => {
@@ -996,6 +1039,7 @@
 	}
 
 	function formatDurationShort(seconds) {
+		if (!seconds || seconds <= 0) return '-';
 		if (seconds < 60) return Math.round(seconds) + 's';
 		if (seconds < 3600) return Math.round(seconds / 60) + 'm';
 		const h = Math.floor(seconds / 3600);
@@ -1015,9 +1059,12 @@
 		})
 		.then(r => r.json())
 		.then(data => {
-			document.getElementById('stat-total-sessions').textContent = data.total_sessions;
+			document.getElementById('stat-active').textContent = data.active || 0;
+			document.getElementById('stat-total-sessions').textContent = (data.total_sessions || 0).toLocaleString();
 			document.getElementById('stat-avg-duration').textContent = formatDurationShort(data.avg_duration);
-			document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent;
+			document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent || 0;
+			document.getElementById('stat-unique-users').textContent = data.unique_users || 0;
+			document.getElementById('stat-contexts').textContent = (data.healthy_contexts || 0) + '/' + (data.total_contexts || 0);
 		});
 	}
 
@@ -1206,6 +1253,57 @@
 		});
 	}
 
+	function refreshHeatmap(period) {
+		if (!period) period = document.getElementById('heatmap-period').value;
+		fetch(`/remote-desktop/dashboard/api/stats/heatmap?period=${period}`, {
+			headers: { 'CSRF-Token': init.csrfNonce }
+		})
+		.then(r => r.json())
+		.then(data => {
+			const el = document.getElementById('chart-heatmap');
+			if (heatmapChart) heatmapChart.dispose();
+			heatmapChart = echarts.init(el);
+			const chart = heatmapChart;
+
+			if (!data.data || data.data.length === 0) {
+				chart.setOption({
+					title: { text: 'No data yet', left: 'center', top: 'center', textStyle: { color: '#999', fontSize: 14 } }
+				});
+				return;
+			}
+
+			const maxVal = Math.max(...data.data.map(d => d[2]));
+			chart.setOption({
+				tooltip: {
+					position: 'top',
+					formatter: function(p) {
+						return data.days[p.data[0]] + ' ' + data.hours[p.data[1]] + ': ' + p.data[2] + ' sessions';
+					}
+				},
+				grid: { left: 50, right: 30, top: 10, bottom: 40 },
+				xAxis: { type: 'category', data: data.days, splitArea: { show: true } },
+				yAxis: { type: 'category', data: data.hours, splitArea: { show: true } },
+				visualMap: {
+					min: 0,
+					max: maxVal || 1,
+					calculable: true,
+					orient: 'horizontal',
+					left: 'center',
+					bottom: 0,
+					itemWidth: 10,
+					itemHeight: 80,
+					inRange: { color: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'] }
+				},
+				series: [{
+					type: 'heatmap',
+					data: data.data,
+					label: { show: false },
+					emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
+				}]
+			});
+		});
+	}
+
 	function refreshStats() {
 		refreshCommandLogStats();
 		refreshSummaryStats();
@@ -1215,6 +1313,7 @@
 		refreshDurationDist();
 		refreshEndReasons();
 		refreshPerHost();
+		refreshHeatmap();
 	}
 
 	// command log stats
@@ -1431,7 +1530,7 @@
 	}
 
 	window.addEventListener('resize', function() {
-		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, topToolsChart, cmdActivityChart].forEach(c => {
+		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, topToolsChart, cmdActivityChart, heatmapChart].forEach(c => {
 			if (c) c.resize();
 		});
 	});

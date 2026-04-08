@@ -228,6 +228,13 @@ else
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Accept-Encoding "";
+      gunzip on;
+
+      # inject nerd font so ttyd renders eza icons
+      sub_filter '</head>' '<link rel="preload" href="/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin><style>@font-face{font-family:JetBrainsMonoNerdFont;font-display:block;src:url(/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2) format("woff2")}</style><script>document.fonts.ready.then(()=>{const i=setInterval(()=>{if(window.term){window.term.options.fontFamily=window.term.options.fontFamily;clearInterval(i)}},100)})</script></head>';
+      sub_filter_once on;
+
       proxy_read_timeout 86400s;
       proxy_send_timeout 86400s;
       proxy_buffering off;
@@ -257,6 +264,32 @@ NGINXBLOCK
     done
     rm -f /tmp/_rd_terminal_nginx_block.conf
     added "terminal proxy location"
+fi
+
+if grep -q "remote-desktop/static/fonts/" "$NGINX_CONF"; then
+    skip "font mime type location"
+else
+    cat > /tmp/_rd_font_nginx_block.conf << 'NGINXBLOCK'
+
+    # serve nerd font with correct mime type
+    location /remote-desktop/static/fonts/ {
+      proxy_pass http://app_servers;
+      proxy_hide_header Content-Type;
+      add_header Content-Type "font/woff2";
+      add_header Cache-Control "public, max-age=31536000";
+      add_header Access-Control-Allow-Origin "*";
+    }
+
+NGINXBLOCK
+    for conf in "$NGINX_CONF" "${NGINX_CONF%/*}/https.conf"; do
+        [ -f "$conf" ] || continue
+        if grep -q "remote-desktop/static/fonts/" "$conf"; then
+            continue
+        fi
+        sed -i '/location \/ {/r /tmp/_rd_font_nginx_block.conf' "$conf"
+    done
+    rm -f /tmp/_rd_font_nginx_block.conf
+    added "font mime type location"
 fi
 
 echo ""
