@@ -14,26 +14,27 @@ class EventLogger:
         self.listeners = []
         self._next_id = 1
 
-    def log_event(self, event_type, message, user_id=None, username=None, level="info", metadata=None):
+    def log_event(self, event_type, message, user_id=None, username=None, level="info", metadata=None, user_flags=None):
         with self.lock:
             event_id = self._next_id
             self._next_id += 1
 
-        user_flags = {}
-        if user_id:
-            try:
-                from CTFd.models import Users
+        if user_flags is None:
+            user_flags = {}
+            if user_id:
+                try:
+                    from CTFd.models import Users
 
-                user = Users.query.filter_by(id=user_id).first()
-                if user:
-                    if user.type == "admin":
-                        user_flags["is_admin"] = True
-                    if getattr(user, "hidden", False):
-                        user_flags["is_hidden"] = True
-                    if getattr(user, "banned", False):
-                        user_flags["is_banned"] = True
-            except Exception:
-                pass
+                    user = Users.query.filter_by(id=user_id).first()
+                    if user:
+                        if user.type == "admin":
+                            user_flags["is_admin"] = True
+                        if getattr(user, "hidden", False):
+                            user_flags["is_hidden"] = True
+                        if getattr(user, "banned", False):
+                            user_flags["is_banned"] = True
+                except Exception:
+                    pass
 
         event = {
             "id": event_id,

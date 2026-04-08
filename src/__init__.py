@@ -10,7 +10,6 @@ from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
@@ -98,7 +97,7 @@ def _reconcile_containers(app, host_manager, orchestrator):
 
 
 def _ensure_columns(app):
-    """add columns and fix types that create_all won't update on existing tables"""
+    # create_all won't alter existing columns, so we handle migrations manually
     from CTFd.models import db
     from sqlalchemy import inspect, text
 
@@ -159,9 +158,7 @@ def load(app):
     with open(config_tpl) as f:
         app.overridden_templates["remote_desktop_config.html"] = f.read()
 
-    # scheduler, atexit, and signal handlers must only run when serving HTTP.
-    # during CLI commands (flask db upgrade, etc.) the scheduler threads are
-    # non-daemon and keep the process alive after the command finishes.
+    # only when serving HTTP, not CLI commands where scheduler threads prevent exit
     _serving = (
         "gunicorn" in sys.modules or os.environ.get("WERKZEUG_RUN_MAIN") or (len(sys.argv) > 1 and sys.argv[1] == "run")
     )
@@ -228,7 +225,12 @@ def load(app):
     container_manager.collect_all_command_logs = _collect_with_context
 
     scheduler.start()
-    atexit.register(lambda: scheduler.shutdown(wait=False))
+
+    def _safe_shutdown_scheduler():
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+
+    atexit.register(_safe_shutdown_scheduler)
 
     def signal_handler(signum, frame):
         logger.info(f"received signal {signum}, cleaning up containers...")

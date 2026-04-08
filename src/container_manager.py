@@ -462,6 +462,21 @@ class ContainerManager:
             "created_at": row.created_at,
         }
 
+    @staticmethod
+    def _timer_from_row(row):
+        if not row.timer_started:
+            return None
+        elapsed = time.time() - row.timer_start_time
+        remaining = max(0, row.timer_duration - elapsed)
+        if remaining <= 0:
+            return None
+        return {
+            "active": True,
+            "time_remaining": int(remaining),
+            "extensions_used": row.extensions_used,
+            "max_extensions": row.max_extensions,
+        }
+
     def get_all_containers(self):
         rows = DesktopContainerInfoModel.query.all()
         if not rows:
@@ -473,8 +488,6 @@ class ContainerManager:
         containers = []
         for row in rows:
             user = users_by_id.get(row.user_id)
-            timer_status = self.get_session_timer_status(row.user_id)
-
             container_data = {
                 "user_id": row.user_id,
                 "username": user.name if user else "Unknown",
@@ -489,14 +502,7 @@ class ContainerManager:
                 "novnc_port": row.novnc_port,
                 "vnc_password": row.vnc_password,
                 "vnc_url": row.vnc_url,
-                "timer": {
-                    "active": timer_status.get("started", False),
-                    "time_remaining": timer_status.get("time_remaining", 0),
-                    "extensions_used": timer_status.get("extensions_used", 0),
-                    "max_extensions": timer_status.get("max_extensions", 3),
-                }
-                if timer_status.get("success")
-                else None,
+                "timer": self._timer_from_row(row),
             }
             containers.append(container_data)
 
@@ -646,9 +652,7 @@ class ContainerManager:
     # command log collection
 
     def _get_log_offset(self, container_id):
-        """Get the log offset for a container. On first access (or after a CTFd
-        restart), derive it from the DB row count so we don't re-ingest lines
-        we already have."""
+        # on restart, derive from DB count to avoid re-ingesting existing lines
         offset = self._log_offsets.get(container_id)
         if offset is not None:
             return offset

@@ -1,7 +1,6 @@
 import time
 import datetime
 import logging
-import traceback
 import json
 from collections import defaultdict
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
@@ -16,7 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 def _user_info(user, fallback_id=None):
-    """Build a dict with username and role flags for dashboard display."""
     if not user:
         return {"username": f"User {fallback_id}"}
     info = {"username": user.name}
@@ -38,7 +36,29 @@ def create_routes(container_manager, orchestrator):
         static_url_path="/remote-desktop/static",
     )
 
-    # user endpoints
+    def _timer_dict(timer_status):
+        if not timer_status.get("success"):
+            return None
+        return {
+            "active": timer_status.get("started", False),
+            "time_remaining": timer_status.get("time_remaining", 0),
+            "extensions_used": timer_status.get("extensions_used", 0),
+            "max_extensions": timer_status.get("max_extensions", 3),
+        }
+
+    def _session_dict(container_info, timer_status):
+        return {
+            "created_at": container_info["created_at"],
+            "vnc_url": container_info.get("vnc_url", ""),
+            "timer": _timer_dict(timer_status),
+        }
+
+    def _apply_period_filter(query, column, period):
+        if period == "week":
+            query = query.filter(column >= time.time() - 7 * 86400)
+        elif period == "month":
+            query = query.filter(column >= time.time() - 30 * 86400)
+        return query
 
     @remote_desktop_bp.route("/remote-desktop")
     @authed_only
@@ -74,8 +94,7 @@ def create_routes(container_manager, orchestrator):
                     "created_at": container_info["created_at"],
                 }
 
-                # when no reverse proxy is in front, the nginx proxy paths
-                # won't work. use direct URLs to the container's mapped ports.
+                # no reverse proxy means nginx proxy paths won't work, use direct URLs
                 behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
                 if not behind_proxy:
                     host = request.host.split(":")[0]
@@ -90,7 +109,8 @@ def create_routes(container_manager, orchestrator):
                     if container_info.get("ttyd_port"):
                         terminal_url = f"/remote-desktop/terminal/{user.id}/"
 
-                browser_host = request.host.split(":")[0] if not behind_proxy else container_info["pub_hostname"]
+                # ssh is a direct connection from the user's machine, use the hostname they're browsing from
+                browser_host = request.host.split(":")[0]
                 if container_info.get("ssh_port"):
                     ssh_info = {
                         "host": browser_host,
@@ -109,8 +129,7 @@ def create_routes(container_manager, orchestrator):
                 max_extensions=get_setting("max_extensions"),
             )
         except Exception as e:
-            logger.error(f"error rendering remote desktop page: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"error rendering remote desktop page: {e}", exc_info=True)
             return f"Error loading remote desktop page: {str(e)}", 500
 
     @remote_desktop_bp.route("/remote-desktop/api/status", methods=["GET"])
@@ -129,24 +148,7 @@ def create_routes(container_manager, orchestrator):
                 container_manager.destroy_container(user.id, reason="expired")
                 return jsonify({"session": None})
 
-            vnc_url = container_info.get("vnc_url", "")
-
-            return jsonify(
-                {
-                    "session": {
-                        "created_at": container_info["created_at"],
-                        "vnc_url": vnc_url,
-                        "timer": {
-                            "active": timer_status.get("started", False),
-                            "time_remaining": timer_status.get("time_remaining", 0),
-                            "extensions_used": timer_status.get("extensions_used", 0),
-                            "max_extensions": timer_status.get("max_extensions", 3),
-                        }
-                        if timer_status.get("success")
-                        else None,
-                    }
-                }
-            )
+            return jsonify({"session": _session_dict(container_info, timer_status)})
         except Exception as e:
             logger.error(f"API error getting status: {e}")
             return jsonify({"error": str(e)}), 500
@@ -215,23 +217,11 @@ def create_routes(container_manager, orchestrator):
                 container_info = container_manager.get_container_info(user.id)
                 if container_info:
                     timer_status = container_manager.get_session_timer_status(user.id)
-                    vnc_url = container_info.get("vnc_url", "")
                     return jsonify(
                         {
                             "status": "ready",
                             "message": "Desktop ready!",
-                            "session": {
-                                "created_at": container_info["created_at"],
-                                "vnc_url": vnc_url,
-                                "timer": {
-                                    "active": timer_status.get("started", False),
-                                    "time_remaining": timer_status.get("time_remaining", 0),
-                                    "extensions_used": timer_status.get("extensions_used", 0),
-                                    "max_extensions": timer_status.get("max_extensions", 3),
-                                }
-                                if timer_status.get("success")
-                                else None,
-                            },
+                            "session": _session_dict(container_info, timer_status),
                         }
                     )
                 return jsonify({"status": "none"})
@@ -239,24 +229,11 @@ def create_routes(container_manager, orchestrator):
             if status.get("status") == "ready":
                 container_info = container_manager.get_container_info(user.id)
                 timer_status = container_manager.get_session_timer_status(user.id)
-                vnc_url = container_info.get("vnc_url", "")
-
                 return jsonify(
                     {
                         "status": "ready",
                         "message": status.get("message", "Desktop ready!"),
-                        "session": {
-                            "created_at": container_info["created_at"],
-                            "vnc_url": vnc_url,
-                            "timer": {
-                                "active": timer_status.get("started", False),
-                                "time_remaining": timer_status.get("time_remaining", 0),
-                                "extensions_used": timer_status.get("extensions_used", 0),
-                                "max_extensions": timer_status.get("max_extensions", 3),
-                            }
-                            if timer_status.get("success")
-                            else None,
-                        },
+                        "session": _session_dict(container_info, timer_status),
                     }
                 )
 
@@ -299,16 +276,7 @@ def create_routes(container_manager, orchestrator):
                 return jsonify({"error": result.get("error", "Extension failed")}), 400
 
             timer_status = container_manager.get_session_timer_status(user.id)
-            return jsonify(
-                {
-                    "timer": {
-                        "active": timer_status.get("started", False),
-                        "time_remaining": timer_status.get("time_remaining", 0),
-                        "extensions_used": timer_status.get("extensions_used", 0),
-                        "max_extensions": timer_status.get("max_extensions", 3),
-                    }
-                }
-            )
+            return jsonify({"timer": _timer_dict(timer_status)})
         except Exception as e:
             logger.error(f"API error extending session: {e}")
             return jsonify({"error": str(e)}), 500
@@ -378,8 +346,6 @@ def create_routes(container_manager, orchestrator):
 
             user_id = int(user_id)
 
-            from CTFd.models import Users
-
             target_user = Users.query.filter_by(id=user_id).first()
             target_username = target_user.name if target_user else f"User {user_id}"
 
@@ -440,8 +406,6 @@ def create_routes(container_manager, orchestrator):
 
             if not container_manager.get_container_info(user_id):
                 return jsonify({"error": "No active session for user"}), 400
-
-            from CTFd.models import Users
 
             target_user = Users.query.filter_by(id=user_id).first()
             target_username = target_user.name if target_user else f"User {user_id}"
@@ -606,9 +570,6 @@ def create_routes(container_manager, orchestrator):
     @authed_only
     @bypass_csrf_protection
     def vnc_auth():
-        """nginx auth_request subrequest endpoint. Returns 200 with backend
-        host/port in headers if the user is authorized, or 403/404 otherwise.
-        nginx captures the headers and uses them to proxy to the container."""
         from .models import DesktopContainerInfoModel
 
         user_id = request.headers.get("X-VNC-User-ID")
@@ -637,8 +598,6 @@ def create_routes(container_manager, orchestrator):
     @authed_only
     @bypass_csrf_protection
     def terminal_auth():
-        """nginx auth_request subrequest for ttyd web terminal proxy.
-        Same pattern as vnc_auth but returns the ttyd port."""
         from .models import DesktopContainerInfoModel
 
         user_id = request.headers.get("X-Terminal-User-ID")
@@ -869,31 +828,19 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting command logs: {e}")
             return jsonify({"error": str(e)}), 500
 
-    def _session_query(period=None):
-        """Base query for session history, excluding hidden users from aggregate stats."""
+    def _session_query(period=None, limit=10000):
         from .models import DesktopSessionHistoryModel
 
         query = DesktopSessionHistoryModel.query.join(Users, DesktopSessionHistoryModel.user_id == Users.id).filter(
-            Users.hidden == False  # noqa: E712
+            Users.hidden.is_(False)
         )
-        if period == "week":
-            query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 7 * 86400)
-        elif period == "month":
-            query = query.filter(DesktopSessionHistoryModel.started_at >= time.time() - 30 * 86400)
-        return query
+        return _apply_period_filter(query, DesktopSessionHistoryModel.started_at, period).limit(limit)
 
-    def _cmd_log_query(period=None):
-        """Base query for command logs, excluding hidden users from aggregate stats."""
+    def _cmd_log_query(period=None, limit=10000):
         from .models import CommandLogModel
 
-        query = (
-            CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden == False)  # noqa: E712
-        )
-        if period == "week":
-            query = query.filter(CommandLogModel.timestamp >= time.time() - 7 * 86400)
-        elif period == "month":
-            query = query.filter(CommandLogModel.timestamp >= time.time() - 30 * 86400)
-        return query
+        query = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden.is_(False))
+        return _apply_period_filter(query, CommandLogModel.timestamp, period).limit(limit)
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/per-user", methods=["GET"])
     @admins_only
@@ -1004,7 +951,7 @@ def create_routes(container_manager, orchestrator):
         try:
             enabled = get_setting("command_logging_enabled")
             base = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(
-                Users.hidden == False  # noqa: E712
+                Users.hidden.is_(False)
             )
             total = base.count()
 
@@ -1014,7 +961,7 @@ def create_routes(container_manager, orchestrator):
                 unique_commands = (
                     db.session.query(CommandLogModel.command)
                     .join(Users, CommandLogModel.user_id == Users.id)
-                    .filter(Users.hidden == False)  # noqa: E712
+                    .filter(Users.hidden.is_(False))
                     .distinct()
                     .count()
                 )
@@ -1022,7 +969,7 @@ def create_routes(container_manager, orchestrator):
                 rows = (
                     db.session.query(CommandLogModel.command)
                     .join(Users, CommandLogModel.user_id == Users.id)
-                    .filter(Users.hidden == False)  # noqa: E712
+                    .filter(Users.hidden.is_(False))
                     .distinct()
                     .all()
                 )
@@ -1138,7 +1085,6 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_add_context():
         from .models import DesktopDockerContextModel
-        from CTFd.models import db
 
         if not request.is_json:
             return jsonify({"error": "invalid request"}), 400
@@ -1184,7 +1130,6 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_update_context(context_id):
         from .models import DesktopDockerContextModel
-        from CTFd.models import db
 
         if not request.is_json:
             return jsonify({"error": "invalid request"}), 400
@@ -1223,7 +1168,6 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_delete_context(context_id):
         from .models import DesktopDockerContextModel
-        from CTFd.models import db
 
         context = DesktopDockerContextModel.query.get(context_id)
         if not context:

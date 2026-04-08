@@ -16,13 +16,13 @@ The workspace UI has three connection modes selectable from tabs in the bottom b
 - **Terminal** (ttyd) - browser-based shell, also proxied through nginx. Lower overhead than the full desktop for command-line work
 - **SSH** - direct connection from the user's own terminal. Shows a copyable `ssh user@host -p port` command and the session password using CTFd's native Bootstrap form components. Requires the mapped SSH port to be reachable from the user's machine (won't work if high ports are firewalled)
 
-Desktop and Terminal go through the same nginx auth_request flow so they work anywhere the web UI is accessible. SSH is a fallback for users who want native terminal experience with local tool integration. The timer starts immediately when the container is ready, not on first user poll
+Desktop and Terminal go through the same nginx auth_request flow so they work anywhere the web UI is accessible. SSH is a fallback for users who want native terminal experience with local tool integration. The timer starts immediately when the container is created
 
 ## Access control
 
 The user-facing page at `/remote-desktop` checks two things before letting a user through. First, the `remote_desktop_enabled` setting must be on, if an admin flips it off in the dashboard settings all users see a full-page message saying the feature has been disabled by an administrator. Second, if CTFd has email verification enabled (`verify_emails` in CTFd config), unverified users get a message telling them to verify their email with a button linking to `/confirm`, matching how CTFd's own challenges page gates access. Admins bypass the verification check but still see the disabled page when the feature is turned off
 
-Both checks also gate the `/api/create` endpoint so session creation can't be triggered by hitting the API directly. Existing sessions are unaffected when the feature gets disabled mid-use, they continue running and expire naturally through the periodic cleanup job
+Both checks also gate the `/remote-desktop/api/create` endpoint so session creation can't be triggered by hitting the API directly. Existing sessions are unaffected when the feature gets disabled mid-use, they continue running and expire naturally through the periodic cleanup job
 
 ## Setup
 
@@ -39,18 +39,18 @@ CTFd picks up plugins on startup so you'll need to restart after cloning
 
 ### Quick setup
 
-Run the setup script from the CTFd root directory. It handles docker-compose volumes, permissions, and nginx config automatically, and skips anything already configured.
+Run the setup script from the CTFd root directory. It handles docker-compose volumes, permissions, and nginx config automatically, and skips anything already configured
 
 ```bash
 bash CTFd/plugins/ctfd-remote-desktop/setup.sh
 docker compose up -d
 ```
 
-If you prefer to do it manually or need to understand what the script does, read on.
+If you prefer to do it manually or need to understand what the script does, read on
 
 ### Docker access
 
-CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container. Everything needs to be mounted to paths it can read, not under `/root`.
+CTFd runs as a non-root user (uid 1001, home `/home/ctfd`) inside the container. Everything needs to be mounted to paths it can read, not under `/root`
 
 1. Get your docker group GID
 
@@ -91,7 +91,7 @@ services:
       - ~/.docker:/home/ctfd/.docker:ro
 ```
 
-The socket mount gives local Docker access, the SSH mount lets the Docker SDK tunnel to remote hosts, and the docker config mount has the context metadata files the plugin reads to find your configured contexts. Everything is mounted read-only.
+The socket mount gives local Docker access, the SSH mount lets the Docker SDK tunnel to remote hosts, and the docker config mount has the context metadata files the plugin reads to find your configured contexts. Everything is mounted read-only
 
 If you're only using remote contexts and don't need a local daemon you can skip the socket and `group_add`, but you still need the SSH and docker config mounts
 
@@ -180,13 +180,13 @@ Then go to the Docker Contexts section on the admin config page (`/admin/config`
 
 The image needs to be pre-pulled on every Docker host before users can use it. Pull it manually on each host or use a CI pipeline to push it out
 
-The image needs to expose VNC on port 5900, noVNC on port 6080, ttyd on port 7682, and SSH on port 22. It should accept `CTFD_USERNAME` (already sanitized to `[a-z0-9]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), `RESOLUTION`, and `MAX_LIFETIME` env vars. noVNC serves the web client at `/vnc.html` with a WebSocket endpoint at `/websockify`. ttyd serves a browser-based terminal. The SSH server should set the user's password to match `VNC_PASSWORD` so one credential works across all connection modes
+The image needs to expose VNC on port 5900, noVNC on port 6080, ttyd on port 7682, and SSH on port 22. It should accept `CTFD_USERNAME` (already sanitized to `[a-z0-9_-]` by the plugin, but the container should still sanitize as defense in depth), `VNC_PASSWORD` (configure Xvnc with VncAuth, fall back to a random password if unset), `RESOLUTION`, and `MAX_LIFETIME` env vars. noVNC serves the web client at `/vnc.html` with a WebSocket endpoint at `/websockify`. ttyd serves a browser-based terminal. The SSH server should set the user's password to match `VNC_PASSWORD` so one credential works across all connection modes
 
 `MAX_LIFETIME` is the absolute ceiling in seconds, calculated as `initial_duration + (extension_duration * max_extensions) + 300`. The container image can use it to run something like `sleep $MAX_LIFETIME && kill 1` as a safety net if the plugin's cleanup job doesn't reach it. The container's hostname is set to the Docker context name (e.g. `local`, `server1`)
 
 ### Database
 
-The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, `desktop_session_history` for completed session records, and `desktop_settings` for configuration. On first startup it seeds all settings with defaults and creates a `local` Docker context if the socket is available, so the admin UI is immediately usable without any manual context setup
+The plugin creates its tables automatically on first load, no manual migration needed. It creates `desktop_docker_contexts` for the context pool, `desktop_container_info` for active session state, `desktop_session_history` for completed session records, `desktop_settings` for configuration, and `command_logs` for shell command audit trails. On first startup it seeds all settings with defaults and creates a `local` Docker context if the socket is available, so the admin UI is immediately usable without any manual context setup
 
 When upgrading from a version without terminal/SSH support, the plugin auto-adds `ssh_port` and `ttyd_port` columns to `desktop_container_info` via ALTER TABLE on startup. Existing sessions won't have values for these columns, so the Terminal and SSH tabs won't appear until the next session is created with the updated container image
 
@@ -194,16 +194,16 @@ When upgrading from a version without terminal/SSH support, the plugin auto-adds
 
 ### Creation
 
-1. User requests session via `/api/create`
+1. User requests session via `/remote-desktop/api/create`
 2. Gevent greenlet spawns with Flask app context
 3. Orchestrator picks least-loaded healthy context via weighted scoring
 4. Acquires the per-context creation semaphore (limits concurrent creates per host)
 5. Generates random VNC password via `secrets.token_urlsafe(6)[:8]`
 6. Calls `DockerHostManager.run_container()` which talks to the Docker API through the SDK's SSH tunnel, creates the container with dynamic port mapping (0:22, 0:5900, 0:6080, 0:7682), security hardening (`cap_drop=ALL` + selective `cap_add`, pids limit), resource limits, and the VNC/resolution env vars
 7. Polls `container.reload()` for mapped ports (up to 5 attempts with 0.3s sleep)
-8. HTTP polls noVNC via the internal `check_hostname` until it responds (configurable attempts, default 180). For local socket contexts this is the docker host gateway IP, for SSH contexts it's the pub_hostname
+8. HTTP polls noVNC via the internal `check_hostname` until it responds (configurable attempts, default 180, 0.5s apart). For local socket contexts this is the docker host gateway IP, for SSH contexts it's the pub_hostname
 9. Builds a relative VNC URL like `/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true` that routes through the nginx proxy
-10. Writes a `DesktopContainerInfoModel` row to the database with all session state including timer config
+10. Writes a `DesktopContainerInfoModel` row to the database with all session state including timer config. The timer starts immediately at this point
 
 If no healthy contexts are available, creation fails immediately instead of spawning a background task that will fail anyway. If creation fails after the container was already started (e.g. VNC timeout), the error handler stops the orphaned container before releasing the slot
 
@@ -213,7 +213,7 @@ User or periodic cleanup triggers it. Before deleting the DB row the plugin writ
 
 ### Session timers
 
-Timers start on first status poll after the container is ready. Default is 3600s with up to 3 extensions of 1800s each, all configurable via the admin web UI without restart. An APScheduler job runs on a configurable interval (default 300s) to query the database for expired sessions and auto-destroy them
+Timers start when the container is created (not on first poll). Default is 3600s with up to 3 extensions of 1800s each, all configurable via the admin web UI without restart. An APScheduler job runs on a configurable interval (default 300s) to query the database for expired sessions and auto-destroy them
 
 ## State storage
 
@@ -229,7 +229,7 @@ The admin dashboard has a Usage Stats section that queries this history. Summary
 
 - **Top Users** horizontal bar of the 15 heaviest users by total session time, tooltip shows session count
 - **Daily Usage** line chart of session counts per day with area fill and zoom slider
-- **Concurrent Sessions** reconstructed from start/end timestamps (sampled every 5 minutes), includes currently active sessions. Useful for capacity planning
+- **Concurrent Sessions** reconstructed from start/end timestamps using adaptive sampling intervals (10 min for less than a day, 30 min for less than a week, 1 hour for longer), includes currently active sessions
 - **Session Duration Distribution** histogram bucketed into <5m, 5-15m, 15-30m, 30-60m, 1-2h, 2h+. If most sessions hit the max bucket your timer settings are probably too short
 - **Session End Reasons** donut chart breaking down user_destroyed, expired, admin_killed, reconciliation. High expired rate means people are walking away instead of stopping sessions
 - **Per-Host Breakdown** sessions per Docker context with total duration in tooltip, shows whether load balancing is working
@@ -257,7 +257,7 @@ Every container gets hardened defaults
 
 The plugin sanitizes CTFd display names into valid Linux usernames before passing them to the container as `CTFD_USERNAME`. Keeps lowercase letters, digits, underscores, and hyphens, strips leading digits and hyphens (Linux usernames must start with a letter or underscore), then truncates to 32 characters. The `username_source` setting controls the input
 
-- `name` (default): uses the CTFd display name, so `Alice B.` becomes `aliceb`, `john_doe` becomes `john_doe`
+- `name` (default): uses the CTFd display name, so `Alice B.` becomes `aliceb`, `john_doe` stays as `john_doe`
 - `email`: uses the local part of the user's email, so `jdoe@ucsc.edu` becomes `jdoe`
 
 Falls back to `user{id}` (e.g. `user42`) when sanitization produces an empty string (`;-;`), an all-numeric name (`12345`, which conflicts with Linux UID lookup), or a reserved system name (root, daemon, sshd, nobody, etc). The raw display name is still used in logs and the admin dashboard
@@ -278,7 +278,7 @@ A `config.json` at the root registers the plugin's settings panel inline on CTFd
 
 ### DockerHostManager
 
-Manages docker SDK clients for each configured docker context, uses thread-local client caching with a generation counter so each thread gets its own `DockerClient` instance and stale clients from old configs get dropped transparently when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, resolves each endpoint by scanning all directories under `~/.docker/contexts/meta/` and matching by the `Name` field inside each `meta.json` (Docker stores these in hash-named directories, not by context name). Falls back to `ssh://{hostname}` from the DB record if no meta match is found, and as a final fallback connects via the local Docker socket at `/var/run/docker.sock` if it exists. Also exposes `discover_contexts()` which scans the same metadata directories and the local socket to find all available contexts for import. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of users hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
+Manages docker SDK clients for each configured docker context. Uses a process-level client cache protected by a lock with a generation counter, so stale clients from old configs get dropped when the generation bumps. Context loading queries `DesktopDockerContextModel` for enabled entries, resolves each endpoint by scanning all directories under `~/.docker/contexts/meta/` and matching by the `Name` field inside each `meta.json` (Docker stores these in hash-named directories, not by context name). Falls back to `ssh://{hostname}` from the DB record if no meta match is found, and as a final fallback connects via the local Docker socket at `/var/run/docker.sock` if it exists. Also exposes `discover_contexts()` which scans the same metadata directories and the local socket to find all available contexts for import. Each context gets a `BoundedSemaphore` (default limit 2) that gates concurrent container creation so a burst of users hitting start simultaneously queue up instead of overwhelming the Docker daemon with parallel SSH connections
 
 `get_pub_hostname()` returns the address stored in the DB, `get_check_hostname()` returns where to actually connect for internal checks like VNC readiness polling. For local socket contexts these differ because `localhost` inside the CTFd container is the container itself, not the Docker host where the port mappings live, so `check_hostname` resolves to the host gateway IP (read from `/proc/net/route` default route). For SSH contexts they're the same
 
@@ -288,7 +288,7 @@ Tracks per-context container counts, health status, and weights, picks the next 
 
 ### ContainerManager
 
-Handles container creation, destruction, timer operations, and periodic cleanup. All session state is stored in the database via `DesktopContainerInfoModel`, the only in-memory state is `creation_status` which tracks the progress of in-flight container creations (selecting host, starting container, waiting for VNC, ready/failed). Checks `orchestrator.has_healthy_context()` before spawning the background greenlet to fail fast. If creation fails after the container was already started, the error handler stops it before releasing the slot. The error path wraps container stop, slot release, and health marking in individual try/except blocks so a failure in one doesn't mask the others
+Handles container creation, destruction, timer operations, command log collection, and periodic cleanup. All session state is stored in the database via `DesktopContainerInfoModel`, the only in-memory state is `creation_status` which tracks the progress of in-flight container creations (selecting host, starting container, waiting for VNC, ready/failed). Checks `orchestrator.has_healthy_context()` before spawning the background greenlet to fail fast. If creation fails after the container was already started, the error handler stops it before releasing the slot. The error path wraps container stop, slot release, and health marking in individual try/except blocks so a failure in one doesn't mask the others
 
 ### EventLogger
 
@@ -322,63 +322,76 @@ Managed through the admin dashboard. Click Import Contexts to scan the host for 
 | max_concurrent_creates | 2 | how many containers can be created simultaneously on a single host |
 | username_source | name | what to derive the container linux username from, `name` uses the CTFd display name, `email` uses the local part before the @ |
 | require_verified | true | only allow verified users to access remote desktop, has no effect unless email verification is enabled in CTFd settings |
+| command_logging_enabled | false | when true, the plugin periodically ingests shell command logs from running containers |
+| command_log_interval | 30 | how often command logs are collected from containers in seconds |
+| cap_drop | ALL | linux capabilities to drop from containers, comma-separated |
+| cap_add | CHOWN,SETUID,... | linux capabilities to add back, comma-separated. must include any caps required by binaries with file capabilities |
 
 ## API endpoints
 
-All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-desktop/admin/`
+All user endpoints are under `/remote-desktop/`, admin endpoints under `/remote-desktop/dashboard/`
 
 **User**
 
 - `GET /remote-desktop` main UI
-- `POST /api/create` request session
-- `GET /api/creation-status` poll progress
-- `GET /api/status` current session
-- `POST /api/destroy` destroy session
-- `POST /api/extend` extend timer
-- `POST /api/cleanup` trigger cleanup (admin only)
+- `POST /remote-desktop/api/create` request session
+- `GET /remote-desktop/api/creation-status` poll progress
+- `GET /remote-desktop/api/status` current session
+- `POST /remote-desktop/api/destroy` destroy session
+- `POST /remote-desktop/api/extend` extend timer
+- `POST /remote-desktop/api/cleanup` trigger cleanup (admin only)
 
 **Admin**
 
-- `GET /admin` dashboard
-- `GET /admin/api/containers` list sessions
-- `GET /admin/api/hosts` orchestrator status
-- `POST /admin/api/kill` force kill
-- `POST /admin/api/kill-all` kill all sessions
-- `POST /admin/api/extend` extend any session
-- `GET /admin/api/events/stream` SSE
-- `GET /admin/api/events/recent` event log
+- `GET /remote-desktop/dashboard` dashboard
+- `GET /remote-desktop/dashboard/api/containers` list sessions
+- `GET /remote-desktop/dashboard/api/hosts` orchestrator status
+- `POST /remote-desktop/dashboard/api/kill` force kill
+- `POST /remote-desktop/dashboard/api/kill-all` kill all sessions
+- `POST /remote-desktop/dashboard/api/extend` extend any session
+- `GET /remote-desktop/dashboard/api/events/stream` SSE
+- `GET /remote-desktop/dashboard/api/events/recent` event log
 
 **Stats**
 
-- `GET /admin/api/stats/summary` total sessions, avg duration, peak concurrent
-- `GET /admin/api/stats/top-users?period=` top 15 users by duration
-- `GET /admin/api/stats/usage?period=` daily session counts
-- `GET /admin/api/stats/concurrent?period=` concurrent sessions over time (sampled every 5m)
-- `GET /admin/api/stats/per-host?period=` sessions and total duration per Docker context
-- `GET /admin/api/stats/duration-distribution?period=` histogram of session lengths
-- `GET /admin/api/stats/extensions?period=` extension usage counts and end reason breakdown
+- `GET /remote-desktop/dashboard/api/stats/summary` total sessions, avg duration, peak concurrent
+- `GET /remote-desktop/dashboard/api/stats/top-users?period=` top 15 users by duration
+- `GET /remote-desktop/dashboard/api/stats/usage?period=` daily session counts
+- `GET /remote-desktop/dashboard/api/stats/concurrent?period=` concurrent sessions over time
+- `GET /remote-desktop/dashboard/api/stats/per-host?period=` sessions and total duration per Docker context
+- `GET /remote-desktop/dashboard/api/stats/duration-distribution?period=` histogram of session lengths
+- `GET /remote-desktop/dashboard/api/stats/extensions?period=` extension usage counts and end reason breakdown
+- `GET /remote-desktop/dashboard/api/stats/heatmap?period=` session start times by hour and day of week
 
 **Proxy Auth**
 
-- `GET /vnc/auth` internal nginx auth_request for VNC desktop, returns backend host/port in `X-VNC-Host`/`X-VNC-Port` headers
-- `GET /vnc/<user_id>/<path>` proxied through nginx to container's noVNC (not handled by Flask)
-- `GET /terminal/auth` internal nginx auth_request for web terminal, returns backend host/port in `X-Terminal-Host`/`X-Terminal-Port` headers
-- `GET /terminal/<user_id>/<path>` proxied through nginx to container's ttyd (not handled by Flask)
+- `GET /remote-desktop/vnc/auth` internal nginx auth_request for VNC desktop, returns backend host/port in `X-VNC-Host`/`X-VNC-Port` headers
+- `GET /remote-desktop/vnc/<user_id>/<path>` proxied through nginx to container's noVNC (not handled by Flask)
+- `GET /remote-desktop/terminal/auth` internal nginx auth_request for web terminal, returns backend host/port in `X-Terminal-Host`/`X-Terminal-Port` headers
+- `GET /remote-desktop/terminal/<user_id>/<path>` proxied through nginx to container's ttyd (not handled by Flask)
 
 **Contexts**
 
-- `GET /admin/api/contexts` list with live status, `is_local` flag, and docker socket reachability
-- `GET /admin/api/contexts/discover` scan host for importable contexts with reachability check
-- `POST /admin/api/contexts` add
-- `PUT /admin/api/contexts/<id>` update
-- `DELETE /admin/api/contexts/<id>` delete
-- `GET /admin/api/contexts/<id>/test` ping + image check
-- `POST /admin/api/contexts/reload` reconnect all
+- `GET /remote-desktop/dashboard/api/contexts` list with live status, `is_local` flag, and docker socket reachability
+- `GET /remote-desktop/dashboard/api/contexts/discover` scan host for importable contexts with reachability check
+- `POST /remote-desktop/dashboard/api/contexts` add
+- `PUT /remote-desktop/dashboard/api/contexts/<id>` update
+- `DELETE /remote-desktop/dashboard/api/contexts/<id>` delete
+- `GET /remote-desktop/dashboard/api/contexts/<id>/test` ping + image check
+- `POST /remote-desktop/dashboard/api/contexts/reload` reconnect all
 
 **Settings**
 
-- `GET /admin/api/settings` all settings as JSON
-- `PUT /admin/api/settings` bulk upsert
+- `GET /remote-desktop/dashboard/api/settings` all settings as JSON
+- `PUT /remote-desktop/dashboard/api/settings` bulk upsert
+
+**Command Logs**
+
+- `GET /remote-desktop/dashboard/api/command-logs` paginated command log with user info
+- `GET /remote-desktop/dashboard/api/command-logs/stats/per-user?period=` per-user command counts
+- `GET /remote-desktop/dashboard/api/command-logs/stats/tools?period=` most-used commands
+- `GET /remote-desktop/dashboard/api/command-logs/stats/activity?period=` command activity over time
+- `GET /remote-desktop/dashboard/api/command-logs/stats/summary?period=` total commands, unique users, unique tools
 
 ## Concurrency
 
@@ -390,12 +403,13 @@ All shared state is guarded by component-level locks: ContainerManager.lock for 
 
 ## Scheduling
 
-The plugin uses APScheduler instead of a daemon thread for background jobs. Under gunicorn with gevent it uses `GeventScheduler`, otherwise `BackgroundScheduler`. Two independent jobs run
+The plugin uses APScheduler for background jobs. Under gunicorn with gevent it uses `GeventScheduler`, otherwise `BackgroundScheduler`. Three jobs run independently
 
 - **Expiry check**: every `cleanup_interval` seconds (default 300), queries the database for sessions with expired timers and destroys them
 - **Health check**: every 30 seconds, pings each context and updates health status
+- **Command log collection**: every `command_log_interval` seconds (default 30), ingests shell command logs from all running containers when `command_logging_enabled` is true
 
-Both jobs use `misfire_grace_time=30` and `coalesce=True` so if the scheduler falls behind it catches up without firing duplicate runs
+All jobs use `misfire_grace_time=30` and `coalesce=True` so if the scheduler falls behind it catches up without firing duplicate runs
 
 ## Context health
 
@@ -421,7 +435,7 @@ This means a CTFd restart doesn't kill active user sessions, they survive and ge
 
 **502 on VNC proxy**: check the nginx error log. Common causes: `no resolver defined` means the `resolver 127.0.0.11` directive is missing from the VNC location block, `host not found` means the Docker host isn't resolvable from the nginx container
 
-**Sessions lost after restart**: this shouldn't happen anymore since state is in the database, if it does check the CTFd logs for reconciliation messages, you should see something like "reconciled containers on startup: N recovered, M stale records removed"
+**Sessions lost after restart**: this shouldn't happen since state is in the database, if it does check the CTFd logs for reconciliation messages, you should see something like "reconciled containers on startup: N recovered, M stale records removed"
 
 **Containers piling up on one host**: the orchestrator uses weighted least-connections scoring, check that your context weights are set appropriately in the admin UI, a context with weight 2 gets twice the score bonus compared to weight 1
 

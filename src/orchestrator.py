@@ -89,7 +89,6 @@ class Orchestrator:
             return self._pick_best_context()
 
     def _pick_best_context(self):
-        """Must be called with self.lock held."""
         candidates = []
         for name, healthy in self.health.items():
             if not healthy:
@@ -106,7 +105,6 @@ class Orchestrator:
         return candidates[0][1]
 
     def select_and_reserve(self):
-        """Pick the best context and increment its count atomically."""
         with self.lock:
             name = self._pick_best_context()
             self.container_counts[name] += 1
@@ -162,7 +160,6 @@ class Orchestrator:
             return status
 
     def health_check(self):
-        """Ping each context and update health status. Runs outside app context."""
         with self.lock:
             names = list(self.health.keys())
 

@@ -15,7 +15,6 @@ DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docke
 
 
 def parse_size(s):
-    # human-readable size string to bytes, e.g. '4g' becomes 4294967296
     s = str(s).strip().lower()
     multipliers = {"k": 1024, "m": 1024**2, "g": 1024**3, "gb": 1024**3, "mb": 1024**2, "kb": 1024}
     for suffix, mult in sorted(multipliers.items(), key=lambda x: -len(x[0])):
@@ -25,9 +24,6 @@ def parse_size(s):
 
 
 def _scan_context_meta(context_name=None):
-    """Read docker context metadata from ~/.docker/contexts/meta/.
-    If context_name is given, return that context's meta dict or None.
-    Otherwise return all contexts as a list of meta dicts."""
     contexts_dir = os.path.join(DOCKER_CONFIG_DIR, "contexts", "meta")
     if not os.path.isdir(contexts_dir):
         return None if context_name else []
@@ -71,7 +67,6 @@ def _resolve_endpoint(context_name, hostname):
 
 
 def discover_contexts():
-    """Scan the host for available docker contexts."""
     discovered = []
     for meta in _scan_context_meta():
         name = meta.get("Name", "")
@@ -87,8 +82,7 @@ def discover_contexts():
 
 
 def _get_host_gateway():
-    """Get the docker host gateway IP from /proc/net/route (the default route).
-    Falls back to localhost if it can't be determined."""
+    # default route gateway from /proc, needed for reaching container ports on the host
     try:
         import struct
 
@@ -104,7 +98,6 @@ def _get_host_gateway():
 
 
 def ping_endpoint(endpoint, timeout=3):
-    """Quick connectivity check for a docker endpoint."""
     try:
         client = docker.DockerClient(base_url=endpoint, timeout=timeout)
         client.ping()
@@ -142,7 +135,7 @@ class DockerHostManager:
             if not url:
                 raise Exception(f"no client for context '{context_name}'")
 
-            client = docker.DockerClient(base_url=url)
+            client = docker.DockerClient(base_url=url, timeout=10)
             self._clients[context_name] = client
             return client
 
@@ -185,8 +178,6 @@ class DockerHostManager:
                 pass
 
     def load_contexts(self, contexts):
-        """(re)connect all enabled contexts. contexts is a list of
-        DesktopDockerContextModel rows."""
         new_configs = {}
         new_pub_hostnames = {}
 
@@ -217,9 +208,7 @@ class DockerHostManager:
         return self._pub_hostnames.get(context_name)
 
     def get_check_hostname(self, context_name):
-        """Address to use for internal connectivity checks (VNC readiness etc).
-        Local socket contexts use the docker host gateway since port mappings
-        are on the host, not reachable via localhost from inside a container."""
+        # local socket contexts need the host gateway since ports bind on the host, not localhost
         endpoint = self._context_configs.get(context_name, "")
         if endpoint.startswith("unix://"):
             return _get_host_gateway()
@@ -334,7 +323,6 @@ class DockerHostManager:
             return False
 
     def get_image_info(self, context_name, image):
-        """Return image metadata dict or None if not found."""
         try:
             client = self._get_client(context_name)
             img = client.images.get(image)
@@ -353,8 +341,6 @@ class DockerHostManager:
             return None
 
     def exec_in_container(self, context_name, container_name_or_id, cmd):
-        """Execute a command inside a running container. Returns (exit_code, output_str).
-        Returns (-1, '') on any failure so callers never need to handle exceptions."""
         try:
             client = self._get_client(context_name)
             container = client.containers.get(container_name_or_id)
