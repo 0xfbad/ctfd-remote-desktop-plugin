@@ -660,7 +660,7 @@
         if (!imgs.length) { box.innerHTML = '<p class="text-muted text-center small">No image configured</p>'; return; }
         if (!ctxs.length) { box.innerHTML = '<p class="text-muted text-center small">No connected contexts</p>'; return; }
 
-        function newestId(img) {
+        function newestRef(img) {
             var latest = null;
             ctxs.forEach(function(ctx) {
                 var e = mx[img] && mx[img][ctx];
@@ -668,7 +668,7 @@
                     if (!latest || e.info.created > latest.created) latest = e.info;
                 }
             });
-            return latest ? latest.id : null;
+            return latest;
         }
 
         var hdr = '<thead><tr><th><b>Image</b></th>' +
@@ -676,7 +676,7 @@
             '</tr></thead>';
 
         var rows = imgs.map(function(img) {
-            var newest = newestId(img);
+            var ref = newestRef(img);
             var anyMissing = false;
             var anyOutdated = false;
 
@@ -695,21 +695,30 @@
                         '<i class="fas fa-check-circle text-success" title="Available"></i></td>';
                 }
 
-                var isStale = newest && info.id !== newest;
+                // compare by size instead of hash, locally built images have unique IDs per host
+                var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb;
+                var sizeDiff = ref ? Math.abs(info.size_mb - ref.size_mb) : 0;
+                var threshold = ref ? Math.max(ref.size_mb * 0.05, 1) : 0;
+                var isStale = ref && !isRef && sizeDiff > threshold;
                 if (isStale) anyOutdated = true;
+
+                if (isRef) {
+                    return '<td class="text-center">' +
+                        '<i class="fas fa-check-circle text-success" title="Newest build found across contexts. ' + info.size_mb + 'MB, built ' + escapeHtml(info.created) + '"></i></td>';
+                }
 
                 if (isStale) {
                     return '<td class="text-center" style="background:rgba(255,193,7,0.08)">' +
-                        '<i class="fas fa-exclamation-circle text-warning" title="Outdated. SHA ' + escapeHtml(info.id) + ' (' + info.size_mb + 'MB, built ' + escapeHtml(info.created) + ') does not match the newest build. Rebuild on this host."></i></td>';
+                        '<i class="fas fa-exclamation-circle text-warning" title="Possibly outdated. This image is ' + info.size_mb + 'MB but the newest build is ' + ref.size_mb + 'MB (' + sizeDiff + 'MB difference). Built ' + escapeHtml(info.created) + '. Consider rebuilding."></i></td>';
                 }
 
                 return '<td class="text-center">' +
-                    '<i class="fas fa-check-circle text-success" title="Up to date. SHA ' + escapeHtml(info.id) + ' (' + info.size_mb + 'MB, built ' + escapeHtml(info.created) + ')"></i></td>';
+                    '<i class="fas fa-check-circle text-success" title="Size (' + info.size_mb + 'MB) is consistent with the newest build (' + ref.size_mb + 'MB). Built ' + escapeHtml(info.created) + '"></i></td>';
             }).join('');
 
             var badge = '';
             if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
-            else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">outdated</span>';
+            else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">possibly outdated</span>';
 
             return '<tr><td>' + escapeHtml(img) + badge + '</td>' + cells + '</tr>';
         }).join('');
