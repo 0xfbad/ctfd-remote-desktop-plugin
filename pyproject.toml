@@ -13,3 +13,7 @@ namespace_packages = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 ignore_errors = true
+
+[tool.vulture]
+paths = ["src", "__init__.py"]
+min_confidence = 80

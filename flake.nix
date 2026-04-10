@@ -21,7 +21,7 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             uv
-            (python3.withPackages (ps: [ ps.ruff ps.mypy ps.pytest ]))
+            (python3.withPackages (ps: [ ps.ruff ps.mypy ps.pytest ps.vulture ]))
           ];
           shellHook = ''
             echo "ruff check .          lint"
@@ -29,6 +29,7 @@
             echo "ruff format --check . format (dry run)"
             echo "mypy .                type check"
             echo "pytest tests/ -v      run tests"
+            echo "vulture .              dead code"
             echo "nix flake check       run all checks"
           '';
         };
