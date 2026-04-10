@@ -22,44 +22,44 @@ def make_orchestrator(contexts):
 
 def test_single_healthy_context():
     o = make_orchestrator([("a", 1, True)])
-    assert o.get_next_context() == "a"
+    assert o._pick_best_context() == "a"
 
 
 def test_no_healthy_raises():
     o = make_orchestrator([("a", 1, False)])
     with pytest.raises(Exception, match="no healthy contexts"):
-        o.get_next_context()
+        o._pick_best_context()
 
 
 def test_empty_raises():
     o = Orchestrator(FakeHostManager())
     with pytest.raises(Exception, match="no healthy contexts"):
-        o.get_next_context()
+        o._pick_best_context()
 
 
 def test_higher_weight_preferred():
     o = make_orchestrator([("a", 1, True), ("b", 5, True)])
-    assert o.get_next_context() == "b"
+    assert o._pick_best_context() == "b"
 
 
 def test_weight_balanced_by_load():
     # weight 2 vs weight 1, both at 0 containers so "a" wins (score 2 vs 1)
     o = make_orchestrator([("a", 2, True), ("b", 1, True)])
-    assert o.get_next_context() == "a"
+    assert o._pick_best_context() == "a"
 
     # after reserving a slot on "a": score_a = 2/2 = 1, score_b = 1/1 = 1
     # tie broken alphabetically, "a" still wins
     o.reserve_slot("a")
-    assert o.get_next_context() == "a"
+    assert o._pick_best_context() == "a"
 
     # reserve another on "a": score_a = 2/3 = 0.67, score_b = 1/1 = 1
     o.reserve_slot("a")
-    assert o.get_next_context() == "b"
+    assert o._pick_best_context() == "b"
 
 
 def test_unhealthy_skipped():
     o = make_orchestrator([("a", 10, False), ("b", 1, True)])
-    assert o.get_next_context() == "b"
+    assert o._pick_best_context() == "b"
 
 
 def test_reserve_and_release():
@@ -80,7 +80,7 @@ def test_release_does_not_go_negative():
 def test_alphabetical_tiebreak():
     # equal weight, equal load, alphabetical wins
     o = make_orchestrator([("zebra", 1, True), ("alpha", 1, True)])
-    assert o.get_next_context() == "alpha"
+    assert o._pick_best_context() == "alpha"
 
 
 def test_concurrent_reserve_release():
@@ -111,7 +111,7 @@ def test_concurrent_reserve_release():
     assert min_count[0] >= 0
 
 
-def test_concurrent_get_next_context():
+def test_concurrent_select_and_reserve():
     import threading
 
     num_threads = 20
@@ -125,7 +125,7 @@ def test_concurrent_get_next_context():
     def worker():
         barrier.wait()
         try:
-            result = o.get_next_context()
+            result = o.select_and_reserve()
             with results_lock:
                 results.append(result)
         except Exception as e:
@@ -142,3 +142,4 @@ def test_concurrent_get_next_context():
     assert not errors
     assert len(results) == num_threads
     assert all(r in valid_names for r in results)
+    assert sum(o.container_counts.values()) == num_threads

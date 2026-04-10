@@ -84,10 +84,6 @@ class Orchestrator:
         with self.lock:
             return any(self.health.values())
 
-    def get_next_context(self):
-        with self.lock:
-            return self._pick_best_context()
-
     def _pick_best_context(self):
         candidates = []
         for name, healthy in self.health.items():

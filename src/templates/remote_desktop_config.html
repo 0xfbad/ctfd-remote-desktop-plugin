@@ -68,31 +68,41 @@
         <div class="col-md-4">
             <h5>Session Timers</h5>
             <div class="form-group">
-                <label>Initial Duration (seconds) <span class="cfg-help" data-tip="How long a desktop session lasts before it expires. Users will see a countdown timer. Set higher for longer competitions, lower to save server resources.">?</span></label>
-                <input type="number" class="form-control" id="rd-setting-initial_duration">
+                <label>Initial Duration <span class="cfg-help" data-tip="How long a desktop session lasts before it expires. Users will see a countdown timer. Set higher for longer competitions, lower to save server resources.">?</span></label>
+                <div class="input-group">
+                    <input type="number" class="form-control no-spin" id="rd-duration-initial-h" min="0" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">h</span></div>
+                    <input type="number" class="form-control no-spin" id="rd-duration-initial-m" min="0" max="59" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">m</span></div>
+                </div>
             </div>
             <div class="form-group">
-                <label>Extension Duration (seconds) <span class="cfg-help" data-tip="How much extra time is added each time a user clicks Extend. Shorter values give users more control over how long they stay, longer values mean fewer clicks.">?</span></label>
-                <input type="number" class="form-control" id="rd-setting-extension_duration">
+                <label>Extension Duration <span class="cfg-help" data-tip="How much extra time is added each time a user clicks Extend. Shorter values give users more control over how long they stay, longer values mean fewer clicks.">?</span></label>
+                <div class="input-group">
+                    <input type="number" class="form-control no-spin" id="rd-duration-ext-h" min="0" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">h</span></div>
+                    <input type="number" class="form-control no-spin" id="rd-duration-ext-m" min="0" max="59" placeholder="0">
+                    <div class="input-group-append"><span class="input-group-text">m</span></div>
+                </div>
             </div>
             <div class="form-group">
                 <label>Max Extensions <span class="cfg-help" data-tip="How many times a user can extend their session. Set to 0 for no extensions (hard time limit). Higher values let users keep their desktop alive longer.">?</span></label>
-                <input type="number" class="form-control" id="rd-setting-max_extensions">
+                <input type="number" class="form-control no-spin" id="rd-setting-max_extensions" min="0">
             </div>
         </div>
         <div class="col-md-4">
             <h5>Timeouts</h5>
             <div class="form-group">
                 <label>VNC Ready Attempts <span class="cfg-help" data-tip="How many times the server checks if a new desktop is ready before giving up. Increase if desktops fail to start on slower hardware.">?</span></label>
-                <input type="number" class="form-control" id="rd-setting-vnc_ready_attempts">
+                <input type="number" class="form-control no-spin" id="rd-setting-vnc_ready_attempts" min="1">
             </div>
             <div class="form-group">
                 <label>HTTP Timeout (seconds) <span class="cfg-help" data-tip="How long to wait for a response from Docker when creating or managing desktops. Increase if you see timeout errors on slow networks.">?</span></label>
-                <input type="number" class="form-control" id="rd-setting-http_request_timeout">
+                <input type="number" class="form-control no-spin" id="rd-setting-http_request_timeout" min="1">
             </div>
             <div class="form-group">
                 <label>Cleanup Interval (seconds) <span class="cfg-help" data-tip="How often the server checks for expired sessions to clean up. Lower values free resources faster, higher values reduce server load.">?</span></label>
-                <input type="number" class="form-control" id="rd-setting-cleanup_interval">
+                <input type="number" class="form-control no-spin" id="rd-setting-cleanup_interval" min="1">
             </div>
         </div>
     </div>
@@ -276,6 +286,9 @@
     z-index: 1000;
     pointer-events: none;
 }
+.no-spin::-webkit-outer-spin-button,
+.no-spin::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.no-spin { -moz-appearance: textfield; }
 </style>
 
 <script>
@@ -283,9 +296,23 @@
     var rdSettingKeys = [
         'remote_desktop_enabled', 'require_verified', 'command_logging_enabled',
         'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit', 'username_source', 'cap_drop', 'cap_add',
-        'initial_duration', 'extension_duration', 'max_extensions',
+        'max_extensions',
         'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'
     ];
+
+    var durationFields = [
+        { key: 'initial_duration', h: 'rd-duration-initial-h', m: 'rd-duration-initial-m' },
+        { key: 'extension_duration', h: 'rd-duration-ext-h', m: 'rd-duration-ext-m' }
+    ];
+
+    function secsToHM(secs) {
+        secs = parseInt(secs) || 0;
+        return { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60) };
+    }
+
+    function hmToSecs(h, m) {
+        return (parseInt(h) || 0) * 3600 + (parseInt(m) || 0) * 60;
+    }
 
     function loadRdSettings() {
         fetch('/remote-desktop/dashboard/api/settings', {
@@ -305,17 +332,31 @@
                     }
                 }
             });
+            durationFields.forEach(function(df) {
+                if (settings[df.key] !== undefined) {
+                    var hm = secsToHM(settings[df.key]);
+                    document.getElementById(df.h).value = hm.h;
+                    document.getElementById(df.m).value = hm.m;
+                }
+            });
         })
         .catch(function(err) { console.error('Error loading RD settings:', err); });
     }
 
     document.getElementById('rd-save-btn').addEventListener('click', function() {
+        if (!document.getElementById('rd-settings-form').reportValidity()) return;
         var payload = {};
         rdSettingKeys.forEach(function(key) {
             var el = document.getElementById('rd-setting-' + key);
             if (el) {
                 payload[key] = el.type === 'checkbox' ? el.checked : el.value;
             }
+        });
+        durationFields.forEach(function(df) {
+            payload[df.key] = hmToSecs(
+                document.getElementById(df.h).value,
+                document.getElementById(df.m).value
+            );
         });
 
         fetch('/remote-desktop/dashboard/api/settings', {

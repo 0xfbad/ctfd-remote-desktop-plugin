@@ -617,29 +617,6 @@ def create_routes(container_manager, orchestrator):
             logger.error(f"admin API error getting top users: {e}")
             return jsonify({"error": str(e)}), 500
 
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/usage", methods=["GET"])
-    @admins_only
-    @bypass_csrf_protection
-    def admin_stats_usage():
-        try:
-            period = request.args.get("period", "all")
-            rows = _session_query(period).all()
-
-            daily = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0})
-            for row in rows:
-                date_str = datetime.datetime.fromtimestamp(row.started_at).strftime("%Y-%m-%d")
-                daily[date_str]["sessions"] += 1
-                daily[date_str]["total_duration"] += row.duration
-
-            days = [
-                {"date": datetime.datetime.strptime(d, "%Y-%m-%d").strftime("%b %-d, %Y"), **daily[d]}
-                for d in sorted(daily.keys())
-            ]
-            return jsonify({"days": days})
-        except Exception as e:
-            logger.error(f"admin API error getting usage stats: {e}")
-            return jsonify({"error": str(e)}), 500
-
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/summary", methods=["GET"])
     @admins_only
     @bypass_csrf_protection
@@ -674,6 +651,7 @@ def create_routes(container_manager, orchestrator):
             peak = max(peak, active)
 
             unique_users = len({r.user_id for r in rows})
+            total_hours = sum(durations) / 3600
 
             return jsonify(
                 {
@@ -684,6 +662,7 @@ def create_routes(container_manager, orchestrator):
                     "unique_users": unique_users,
                     "healthy_contexts": healthy_contexts,
                     "total_contexts": total_contexts,
+                    "total_hours": round(total_hours, 1),
                 }
             )
         except Exception as e:
@@ -775,27 +754,45 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_stats_heatmap():
         try:
-            from datetime import datetime
-
             period = request.args.get("period", "all")
             rows = _session_query(period).all()
 
-            matrix = [[0] * 7 for _ in range(24)]
+            counts = [[0] * 7 for _ in range(24)]
+            durations = [[0.0] * 7 for _ in range(24)]
+            week_mode = period == "week"
+
+            if week_mode:
+                utc_now = datetime.datetime.utcnow()
+                start_date = (utc_now - datetime.timedelta(days=6)).date()
+
             for r in rows:
                 if not r.started_at:
                     continue
-                dt = datetime.datetime.fromtimestamp(r.started_at)
-                matrix[dt.hour][dt.weekday()] += 1
+                dt = datetime.datetime.utcfromtimestamp(r.started_at)
+                if week_mode:
+                    day_idx = (dt.date() - start_date).days
+                    if not (0 <= day_idx < 7):
+                        continue
+                else:
+                    day_idx = dt.weekday()
+                counts[dt.hour][day_idx] += 1
+                durations[dt.hour][day_idx] += r.duration or 0
 
             data = []
             for hour in range(24):
                 for day in range(7):
-                    if matrix[hour][day] > 0:
-                        data.append([day, hour, matrix[hour][day]])
+                    if counts[hour][day] > 0:
+                        data.append([day, hour, counts[hour][day], round(durations[hour][day] / 3600, 1)])
 
-            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            hours = [f"{h % 12 or 12} {'AM' if h < 12 else 'PM'}" for h in range(24)]
-            return jsonify({"data": data, "days": days, "hours": hours})
+            result: dict = {"data": data}
+            if week_mode:
+                epoch = datetime.datetime(1970, 1, 1)
+                result["start_ts"] = int(
+                    (datetime.datetime.combine(start_date, datetime.time()) - epoch).total_seconds()
+                )
+            else:
+                result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            return jsonify(result)
         except Exception as e:
             logger.error(f"admin API error getting heatmap: {e}")
             return jsonify({"error": str(e)}), 500
@@ -805,78 +802,58 @@ def create_routes(container_manager, orchestrator):
     @bypass_csrf_protection
     def admin_stats_duration_dist():
         try:
+            from .models import get_setting
+
             period = request.args.get("period", "all")
             rows = _session_query(period).all()
 
-            # bucket durations into ranges
-            buckets = {"<5m": 0, "5-15m": 0, "15-30m": 0, "30-60m": 0, "1-2h": 0, "2h+": 0}
-            for row in rows:
-                d = row.duration
-                if d < 300:
-                    buckets["<5m"] += 1
-                elif d < 900:
-                    buckets["5-15m"] += 1
-                elif d < 1800:
-                    buckets["15-30m"] += 1
-                elif d < 3600:
-                    buckets["30-60m"] += 1
-                elif d < 7200:
-                    buckets["1-2h"] += 1
-                else:
-                    buckets["2h+"] += 1
+            initial = get_setting("initial_duration")
+            ext_dur = get_setting("extension_duration")
+            max_ext = get_setting("max_extensions")
 
-            result = [{"range": k, "count": v} for k, v in buckets.items()]
+            def _fmt(s):
+                if s < 3600:
+                    return f"{int(s // 60)}m"
+                h = int(s // 3600)
+                m = int((s % 3600) // 60)
+                return f"{h}h{m}m" if m else f"{h}h"
+
+            # 3 base buckets, then one per extension level
+            edges = [0, 300, initial / 2, initial]
+            labels = ["<5m", f"5m-{_fmt(initial / 2)}", f"{_fmt(initial / 2)}-{_fmt(initial)}"]
+            hints = [
+                "very short sessions may indicate remote desktop config issues",
+                "users who left before using most of their time",
+                "used most of the base session time",
+            ]
+            for i in range(1, max_ext + 1):
+                lo = initial + ext_dur * (i - 1)
+                hi = initial + ext_dur * i
+                edges.append(hi)
+                labels.append(f"{_fmt(lo)}-{_fmt(hi)}")
+                if i == max_ext:
+                    hints.append("used all extensions, consider increasing time or extensions")
+                elif i == 1:
+                    hints.append("needed a bit more time than the base session")
+                else:
+                    hints.append(f"used {i} of {max_ext} extensions, may need a longer base time")
+
+            counts = [0] * len(labels)
+            for row in rows:
+                d = row.duration or 0
+                placed = False
+                for j in range(len(edges) - 1):
+                    if d < edges[j + 1]:
+                        counts[j] = counts[j] + 1
+                        placed = True
+                        break
+                if not placed:
+                    counts[-1] = counts[-1] + 1
+
+            result = [{"range": labels[i], "count": counts[i], "hint": hints[i]} for i in range(len(labels))]
             return jsonify({"buckets": result})
         except Exception as e:
             logger.error(f"admin API error getting duration distribution: {e}")
-            return jsonify({"error": str(e)}), 500
-
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/concurrent", methods=["GET"])
-    @admins_only
-    @bypass_csrf_protection
-    def admin_stats_concurrent():
-        from .models import DesktopContainerInfoModel
-
-        try:
-            period = request.args.get("period", "all")
-            rows = _session_query(period).all()
-
-            # also include currently active sessions
-            active = DesktopContainerInfoModel.query.all()
-            now = time.time()
-
-            # build time series by sampling at regular intervals
-            all_sessions = []
-            for r in rows:
-                all_sessions.append((r.started_at, r.ended_at))
-            for r in active:
-                all_sessions.append((r.created_at, now))
-
-            if not all_sessions:
-                return jsonify({"points": []})
-
-            min_t = min(s[0] for s in all_sessions)
-            max_t = max(s[1] for s in all_sessions)
-
-            # sample interval based on time range
-            span = max_t - min_t
-            if span < 86400:
-                interval = 600  # 10 min for < 1 day
-            elif span < 604800:
-                interval = 1800  # 30 min for < 1 week
-            else:
-                interval = 3600  # 1 hour for longer
-            points = []
-            t = min_t
-            while t <= max_t:
-                count = sum(1 for s in all_sessions if s[0] <= t < s[1])
-                date_str = datetime.datetime.fromtimestamp(t).strftime("%b %-d, %Y %-I:%M %p")
-                points.append({"time": date_str, "concurrent": count})
-                t += interval
-
-            return jsonify({"points": points})
-        except Exception as e:
-            logger.error(f"admin API error getting concurrent stats: {e}")
             return jsonify({"error": str(e)}), 500
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/extensions", methods=["GET"])

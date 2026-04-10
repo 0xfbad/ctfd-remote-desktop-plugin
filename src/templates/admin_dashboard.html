@@ -212,7 +212,7 @@
 
 <div class="container">
 	<div class="row mb-3">
-		<div class="col-md-2">
+		<div class="col">
 			<div class="card bg-light">
 				<div class="card-body text-center py-2 px-2">
 					<h4 id="stat-active" class="mb-0">-</h4>
@@ -220,7 +220,7 @@
 				</div>
 			</div>
 		</div>
-		<div class="col-md-2">
+		<div class="col">
 			<div class="card bg-light">
 				<div class="card-body text-center py-2 px-2">
 					<h4 id="stat-total-sessions" class="mb-0">-</h4>
@@ -228,7 +228,15 @@
 				</div>
 			</div>
 		</div>
-		<div class="col-md-2">
+		<div class="col">
+			<div class="card bg-light">
+				<div class="card-body text-center py-2 px-2">
+					<h4 id="stat-total-hours" class="mb-0">-</h4>
+					<small class="text-muted">Total Hours</small>
+				</div>
+			</div>
+		</div>
+		<div class="col">
 			<div class="card bg-light">
 				<div class="card-body text-center py-2 px-2">
 					<h4 id="stat-avg-duration" class="mb-0">-</h4>
@@ -236,7 +244,7 @@
 				</div>
 			</div>
 		</div>
-		<div class="col-md-2">
+		<div class="col">
 			<div class="card bg-light">
 				<div class="card-body text-center py-2 px-2">
 					<h4 id="stat-peak-concurrent" class="mb-0">-</h4>
@@ -244,7 +252,7 @@
 				</div>
 			</div>
 		</div>
-		<div class="col-md-2">
+		<div class="col">
 			<div class="card bg-light">
 				<div class="card-body text-center py-2 px-2">
 					<h4 id="stat-unique-users" class="mb-0">-</h4>
@@ -252,7 +260,7 @@
 				</div>
 			</div>
 		</div>
-		<div class="col-md-2">
+		<div class="col">
 			<div class="card bg-light">
 				<div class="card-body text-center py-2 px-2">
 					<h4 id="stat-contexts" class="mb-0">-</h4>
@@ -327,6 +335,24 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
+					<h3 class="card-title">Usage Heatmap <span class="cfg-help" data-tip="Session starts by hour and day of week. Spot peak usage windows for capacity planning.">?</span></h3>
+					<select class="form-control form-control-sm" style="width: auto;" onchange="refreshHeatmap(this.value)" id="heatmap-period">
+						<option value="week" selected>Past Week</option>
+						<option value="month">Past Month</option>
+						<option value="all">All Time</option>
+					</select>
+				</div>
+				<div class="card-body">
+					<div class="chart-container" id="chart-heatmap"></div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
 					<h3 class="card-title">Top Users <span class="cfg-help" data-tip="Ranked by total desktop time. Identify power users or accounts consuming disproportionate resources.">?</span></h3>
 					<select id="period-top-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshTopUsers()">
 						<option value="week">Past Week</option>
@@ -341,41 +367,6 @@
 		</div>
 	</div>
 
-	<div class="row">
-		<div class="col-md-12">
-			<div class="card">
-				<div class="card-header">
-					<h3 class="card-title">Daily Usage <span class="cfg-help" data-tip="Sessions created per day. Spot usage trends and plan server capacity around peak competition days.">?</span></h3>
-					<select id="period-daily-usage" class="form-control form-control-sm" style="width: auto;" onchange="refreshDailyUsage()">
-						<option value="week">Past Week</option>
-						<option value="month">Past Month</option>
-						<option value="all">All Time</option>
-					</select>
-				</div>
-				<div class="card-body">
-					<div class="chart-container" id="chart-daily-usage"></div>
-				</div>
-			</div>
-		</div>
-	</div>
-
-	<div class="row">
-		<div class="col-md-12">
-			<div class="card">
-				<div class="card-header">
-					<h3 class="card-title">Concurrent Sessions <span class="cfg-help" data-tip="How many desktops were running simultaneously. Use this to right-size your Docker hosts and catch capacity bottlenecks.">?</span></h3>
-					<select id="period-concurrent" class="form-control form-control-sm" style="width: auto;" onchange="refreshConcurrent()">
-						<option value="week">Past Week</option>
-						<option value="month">Past Month</option>
-						<option value="all">All Time</option>
-					</select>
-				</div>
-				<div class="card-body">
-					<div class="chart-container" id="chart-concurrent"></div>
-				</div>
-			</div>
-		</div>
-	</div>
 
 	<div class="row">
 		<div class="col-md-6">
@@ -423,24 +414,6 @@
 				</div>
 				<div class="card-body">
 					<div class="chart-container" id="chart-per-host"></div>
-				</div>
-			</div>
-		</div>
-	</div>
-
-	<div class="row">
-		<div class="col-md-12">
-			<div class="card">
-				<div class="card-header">
-					<h3 class="card-title">Usage Heatmap</h3>
-					<select class="form-control form-control-sm" style="width: auto;" onchange="refreshHeatmap(this.value)" id="heatmap-period">
-						<option value="week" selected>Past Week</option>
-						<option value="month">Past Month</option>
-						<option value="all">All Time</option>
-					</select>
-				</div>
-				<div class="card-body">
-					<div class="chart-container" id="chart-heatmap"></div>
 				</div>
 			</div>
 		</div>
@@ -1036,8 +1009,6 @@
 	// stats
 
 	let topUsersChart = null;
-	let dailyUsageChart = null;
-	let concurrentChart = null;
 	let durationDistChart = null;
 	let endReasonsChart = null;
 	let perHostChart = null;
@@ -1046,13 +1017,11 @@
 	let heatmapChart = null;
 
 	function initCharts() {
-		['chart-top-users', 'chart-daily-usage', 'chart-concurrent', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools', 'chart-cmd-activity'].forEach(id => {
+		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools', 'chart-cmd-activity'].forEach(id => {
 			const el = document.getElementById(id);
 			if (!el) return;
 			const chart = echarts.init(el);
 			if (id === 'chart-top-users') topUsersChart = chart;
-			else if (id === 'chart-daily-usage') dailyUsageChart = chart;
-			else if (id === 'chart-concurrent') concurrentChart = chart;
 			else if (id === 'chart-duration-dist') durationDistChart = chart;
 			else if (id === 'chart-end-reasons') endReasonsChart = chart;
 			else if (id === 'chart-per-host') perHostChart = chart;
@@ -1087,6 +1056,7 @@
 			document.getElementById('stat-avg-duration').textContent = formatDurationShort(data.avg_duration);
 			document.getElementById('stat-peak-concurrent').textContent = data.peak_concurrent || 0;
 			document.getElementById('stat-unique-users').textContent = data.unique_users || 0;
+			document.getElementById('stat-total-hours').textContent = (data.total_hours || 0).toLocaleString();
 			document.getElementById('stat-contexts').textContent = (data.healthy_contexts || 0) + '/' + (data.total_contexts || 0);
 		});
 	}
@@ -1128,74 +1098,6 @@
 		});
 	}
 
-	function refreshDailyUsage() {
-		const period = getPeriod('period-daily-usage');
-		fetch(`/remote-desktop/dashboard/api/stats/usage?period=${period}`, {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			if (!dailyUsageChart) return;
-			const days = data.days || [];
-			dailyUsageChart.setOption({
-				tooltip: {
-					trigger: 'axis',
-					formatter: function(params) {
-						const p = params[0];
-						return echarts.format.encodeHTML(p.name) + '<br/>' + p.value + ' sessions';
-					}
-				},
-				toolbox: { feature: { saveAsImage: {} } },
-				dataZoom: [
-					{ type: 'inside' },
-					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
-				],
-				grid: { left: 60, right: 20, top: 30, bottom: 60 },
-				xAxis: { type: 'category', data: days.map(d => d.date), axisLabel: { rotate: 45 } },
-				yAxis: { type: 'value', name: 'Sessions', minInterval: 1 },
-				series: [{
-					type: 'line',
-					data: days.map(d => d.sessions),
-					itemStyle: { color: '#28a745' },
-					lineStyle: { color: '#28a745' },
-					areaStyle: { color: 'rgba(40, 167, 69, 0.1)' }
-				}]
-			});
-		});
-	}
-
-	function refreshConcurrent() {
-		const period = getPeriod('period-concurrent');
-		fetch(`/remote-desktop/dashboard/api/stats/concurrent?period=${period}`, {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			if (!concurrentChart) return;
-			const points = data.points || [];
-			concurrentChart.setOption({
-				tooltip: { trigger: 'axis' },
-				toolbox: { feature: { saveAsImage: {} } },
-				dataZoom: [
-					{ type: 'inside' },
-					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
-				],
-				grid: { left: 60, right: 20, top: 30, bottom: 60 },
-				xAxis: { type: 'category', data: points.map(p => p.time), axisLabel: { rotate: 45 } },
-				yAxis: { type: 'value', name: 'Sessions', minInterval: 1 },
-				series: [{
-					type: 'line',
-					data: points.map(p => p.concurrent),
-					itemStyle: { color: '#6f42c1' },
-					lineStyle: { color: '#6f42c1' },
-					areaStyle: { color: 'rgba(111, 66, 193, 0.1)' }
-				}]
-			});
-		});
-	}
-
 	function refreshDurationDist() {
 		const period = getPeriod('period-duration-dist');
 		fetch(`/remote-desktop/dashboard/api/stats/duration-distribution?period=${period}`, {
@@ -1207,7 +1109,17 @@
 			if (!durationDistChart) return;
 			const buckets = data.buckets || [];
 			durationDistChart.setOption({
-				tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+				tooltip: {
+					trigger: 'axis',
+					axisPointer: { type: 'shadow' },
+					formatter: function(params) {
+						const p = params[0];
+						const b = buckets[p.dataIndex] || {};
+						let html = '<b>' + echarts.format.encodeHTML(p.name) + '</b><br/>' + p.value + ' sessions';
+						if (b.hint) html += '<br/><span style="color:#999;font-size:11px">' + echarts.format.encodeHTML(b.hint) + '</span>';
+						return html;
+					}
+				},
 				toolbox: { feature: { saveAsImage: {} } },
 				grid: { left: 60, right: 20, top: 30, bottom: 30 },
 				xAxis: { type: 'category', data: buckets.map(b => b.range) },
@@ -1299,20 +1211,44 @@
 				return;
 			}
 
-			const maxVal = Math.max(...data.data.map(d => d[2]));
+			const tzOffset = -(new Date().getTimezoneOffset() / 60);
+			const localData = data.data.map(d => {
+				const localHour = (d[1] + tzOffset + 24) % 24;
+				const dayShift = Math.floor((d[1] + tzOffset) / 24);
+				const localDay = (d[0] + dayShift + 7) % 7;
+				return [localDay, localHour, d[2], d[3]];
+			});
+			const hours = Array.from({length: 24}, (_, h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'));
+
+			var dayLabels;
+			const wdNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+			if (data.start_ts != null) {
+				dayLabels = [];
+				for (let i = 0; i < 7; i++) {
+					const d = new Date((data.start_ts + i * 86400) * 1000);
+					dayLabels.push(wdNames[d.getDay()] + ' ' + (d.getMonth()+1) + '/' + d.getDate());
+				}
+			} else {
+				dayLabels = data.days;
+			}
+
+			const maxVal = Math.max(...localData.map(d => d[2]));
 			chart.setOption({
 				tooltip: {
 					position: 'top',
 					formatter: function(p) {
-						return data.days[p.data[0]] + ' ' + data.hours[p.data[1]] + ': ' + p.data[2] + ' sessions';
+						const dur = p.data[3] != null ? p.data[3] : 0;
+						return '<b>' + dayLabels[p.data[0]] + ' ' + hours[p.data[1]] + '</b><br/>' +
+							p.data[2] + ' sessions, ' + dur + 'h total';
 					}
 				},
 				grid: { left: 50, right: 30, top: 10, bottom: 40 },
-				xAxis: { type: 'category', data: data.days, splitArea: { show: true } },
-				yAxis: { type: 'category', data: data.hours, splitArea: { show: true } },
+				xAxis: { type: 'category', data: dayLabels, splitArea: { show: true } },
+				yAxis: { type: 'category', data: hours, splitArea: { show: true }, inverse: true },
 				visualMap: {
 					min: 0,
 					max: maxVal || 1,
+					dimension: 2,
 					calculable: true,
 					orient: 'horizontal',
 					left: 'center',
@@ -1323,7 +1259,7 @@
 				},
 				series: [{
 					type: 'heatmap',
-					data: data.data,
+					data: localData,
 					label: { show: false },
 					emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
 				}]
@@ -1335,8 +1271,6 @@
 		refreshCommandLogStats();
 		refreshSummaryStats();
 		refreshTopUsers();
-		refreshDailyUsage();
-		refreshConcurrent();
 		refreshDurationDist();
 		refreshEndReasons();
 		refreshPerHost();

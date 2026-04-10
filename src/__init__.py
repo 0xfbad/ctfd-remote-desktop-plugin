@@ -232,7 +232,7 @@ def load(app):
 
     atexit.register(_safe_shutdown_scheduler)
 
-    def signal_handler(signum, frame):
+    def signal_handler(signum, _frame):
         logger.info(f"received signal {signum}, cleaning up containers...")
         try:
             scheduler.shutdown(wait=False)
