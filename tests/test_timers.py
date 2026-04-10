@@ -123,17 +123,17 @@ def test_concurrent_extend():
 
     def worker():
         barrier.wait()
-        with _patch_db(row), patch("container_manager.db"):
-            result = cm.extend_session_timer(1, new_duration=10)
+        result = cm.extend_session_timer(1, new_duration=10)
         with results_lock:
             results.append(result)
 
-    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
-    for t in threads:
-        t.start()
-    barrier.wait()
-    for t in threads:
-        t.join()
+    with _patch_db(row), patch("container_manager.db"):
+        threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        barrier.wait()
+        for t in threads:
+            t.join()
 
     successes = [r for r in results if r["success"]]
     assert len(successes) == max_ext
