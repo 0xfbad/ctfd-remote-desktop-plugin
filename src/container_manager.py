@@ -228,6 +228,7 @@ class ContainerManager:
                 vnc_url=vnc_url,
                 docker_context=context_name,
                 pub_hostname=pub_hostname,
+                container_username=container_username,
                 created_at=time.time(),
                 timer_started=True,
                 timer_start_time=time.time(),
@@ -448,6 +449,10 @@ class ContainerManager:
         if not row:
             return None
 
+        if self._is_expired(row):
+            self.destroy_container(user_id, reason="expired")
+            return None
+
         return {
             "container_id": row.container_id,
             "container_name": row.container_name,
@@ -457,10 +462,17 @@ class ContainerManager:
             "ttyd_port": row.ttyd_port,
             "docker_context": row.docker_context,
             "pub_hostname": row.pub_hostname,
+            "container_username": row.container_username,
             "vnc_password": row.vnc_password,
             "vnc_url": row.vnc_url,
             "created_at": row.created_at,
         }
+
+    @staticmethod
+    def _is_expired(row):
+        if not row.timer_started or row.timer_start_time is None:
+            return False
+        return row.timer_duration - (time.time() - row.timer_start_time) <= 0
 
     @staticmethod
     def _timer_from_row(row):
@@ -481,6 +493,18 @@ class ContainerManager:
         rows = DesktopContainerInfoModel.query.all()
         if not rows:
             return []
+
+        expired = [row for row in rows if self._is_expired(row)]
+        for row in expired:
+            try:
+                self.destroy_container(row.user_id, reason="expired")
+            except Exception as e:
+                logger.error(f"inline expiry cleanup failed for user {row.user_id}: {e}")
+
+        if expired:
+            rows = DesktopContainerInfoModel.query.all()
+            if not rows:
+                return []
 
         user_ids = [row.user_id for row in rows]
         users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}

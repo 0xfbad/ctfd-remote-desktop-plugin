@@ -54,6 +54,7 @@ for attr in ("Blueprint", "request", "jsonify", "render_template", "Response", "
 _decorators = sys.modules["CTFd.utils.decorators"]
 _decorators.authed_only = lambda f: f
 _decorators.admins_only = lambda f: f
+_decorators.ratelimit = lambda **kw: (lambda f: f)
 
 _user_utils = sys.modules["CTFd.utils.user"]
 _user_utils.get_current_user = MagicMock()
@@ -61,7 +62,6 @@ _user_utils.is_admin = MagicMock(return_value=False)
 _user_utils.is_verified = MagicMock(return_value=True)
 
 _plugins = sys.modules["CTFd.plugins"]
-_plugins.bypass_csrf_protection = lambda f: f
 _plugins.register_user_page_menu_bar = MagicMock()
 _plugins.register_admin_plugin_menu_bar = MagicMock()
 

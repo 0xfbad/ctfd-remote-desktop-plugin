@@ -108,6 +108,9 @@ def _ensure_columns(app):
             if col not in cols:
                 db.session.execute(text(f"ALTER TABLE desktop_container_info ADD COLUMN {col} INTEGER"))
                 logger.info(f"added {col} column to desktop_container_info")
+        if "container_username" not in cols:
+            db.session.execute(text("ALTER TABLE desktop_container_info ADD COLUMN container_username VARCHAR(64)"))
+            logger.info("added container_username column to desktop_container_info")
 
         # float(32-bit) rounds unix timestamps, need double
         float_fixes = {

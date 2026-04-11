@@ -24,6 +24,7 @@ class DesktopContainerInfoModel(db.Model):
     vnc_url = db.Column(db.Text, nullable=False)
     docker_context = db.Column(db.String(512), nullable=False)
     pub_hostname = db.Column(db.String(512), nullable=False)
+    container_username = db.Column(db.String(64), nullable=True)
     created_at = db.Column(db.Float(precision=53), nullable=False)
     timer_started = db.Column(db.Boolean, default=False)
     timer_start_time = db.Column(db.Float(precision=53), nullable=True)

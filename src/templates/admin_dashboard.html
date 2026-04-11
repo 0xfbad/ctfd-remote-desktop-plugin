@@ -966,10 +966,13 @@
 
 	function clearHistory() {
 		if (!confirm('Clear all session history? This resets stats and charts.')) return;
+		const fd = new FormData();
+		fd.append('nonce', window.init.csrfNonce);
 		fetch('/remote-desktop/dashboard/api/clear_history', {
 			method: 'POST',
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
+			credentials: 'same-origin',
+			body: fd
 		})
 		.then(r => r.json())
 		.then(data => {
@@ -985,13 +988,13 @@
 		const btn = document.getElementById('purge-all-btn');
 		btn.disabled = true;
 
+		const formData = new FormData();
+		formData.append('nonce', window.init.csrfNonce);
 		fetch('/remote-desktop/dashboard/api/kill-all', {
 			method: 'POST',
-			headers: {
-				'X-Requested-With': 'XMLHttpRequest',
-				'CSRF-Token': window.init.csrfNonce
-			},
-			credentials: 'same-origin'
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin',
+			body: formData
 		})
 		.then(response => response.json())
 		.then(data => {

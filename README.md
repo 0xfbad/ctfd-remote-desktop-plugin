@@ -213,7 +213,7 @@ User or periodic cleanup triggers it. Before deleting the DB row the plugin writ
 
 ### Session timers
 
-Timers start when the container is created (not on first poll). Default is 3600s with up to 3 extensions of 1800s each, all configurable via the admin web UI without restart. An APScheduler job runs on a configurable interval (default 300s) to query the database for expired sessions and auto-destroy them
+Timers start when the container is created (not on first poll). Default is 3600s with up to 3 extensions of 1800s each, all configurable via the admin web UI without restart. Expired sessions are cleaned up inline whenever any API endpoint reads container state, so they vanish as soon as the user or admin dashboard polls for status. An APScheduler job also runs on a configurable interval (default 300s) as a safety net for sessions that expire between polls
 
 ## State storage
 

@@ -21,6 +21,7 @@ def test_get_container_info_from_db():
     row.vnc_password = "secret"
     row.vnc_url = "http://host1.example.com:6080/vnc.html"
     row.created_at = 1700000000.0
+    row.timer_started = False
 
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = row

@@ -6,8 +6,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
-from CTFd.utils.decorators import authed_only, admins_only
-from CTFd.plugins import bypass_csrf_protection
+from CTFd.utils.decorators import authed_only, admins_only, ratelimit
 from CTFd.utils.user import get_current_user, is_admin, is_verified
 from .event_logger import event_logger
 from .docker_host_manager import LOCAL_CONTEXT_NAME, discover_contexts, ping_endpoint
@@ -130,7 +129,7 @@ def create_routes(container_manager, orchestrator):
                     ssh_info = {
                         "host": browser_host,
                         "port": container_info["ssh_port"],
-                        "username": container_manager._resolve_username(user),
+                        "username": container_info["container_username"],
                         "password": container_info["vnc_password"],
                     }
 
@@ -145,7 +144,7 @@ def create_routes(container_manager, orchestrator):
             )
         except Exception as e:
             logger.error(f"error rendering remote desktop page: {e}", exc_info=True)
-            return f"Error loading remote desktop page: {str(e)}", 500
+            return f"Error loading remote desktop: {e}", 500
 
     @remote_desktop_bp.route("/remote-desktop/api/status", methods=["GET"])
     @authed_only
@@ -158,11 +157,6 @@ def create_routes(container_manager, orchestrator):
                 return jsonify({"session": None})
 
             timer_status = container_manager.get_session_timer_status(user.id)
-
-            if timer_status.get("expired"):
-                container_manager.destroy_container(user.id, reason="expired")
-                return jsonify({"session": None})
-
             return jsonify({"session": _session_dict(container_info, timer_status)})
         except Exception as e:
             logger.error(f"API error getting status: {e}")
@@ -170,7 +164,7 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/api/create", methods=["POST"])
     @authed_only
-    @bypass_csrf_protection
+    @ratelimit(method="POST", limit=5, interval=300)
     def create_session():
         from .models import get_setting
 
@@ -259,7 +253,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/api/destroy", methods=["POST"])
     @authed_only
-    @bypass_csrf_protection
     def destroy_session():
         try:
             user = get_current_user()
@@ -278,7 +271,7 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/api/extend", methods=["POST"])
     @authed_only
-    @bypass_csrf_protection
+    @ratelimit(method="POST", limit=10, interval=300)
     def extend_session():
         try:
             user = get_current_user()
@@ -297,14 +290,9 @@ def create_routes(container_manager, orchestrator):
             return jsonify({"error": str(e)}), 500
 
     @remote_desktop_bp.route("/remote-desktop/api/cleanup", methods=["POST"])
-    @authed_only
-    @bypass_csrf_protection
+    @admins_only
     def trigger_cleanup():
         try:
-            get_current_user()
-            if not is_admin():
-                return jsonify({"error": "Admin access required"}), 403
-
             container_manager.periodic_cleanup()
             return jsonify({"success": True, "message": "Cleanup triggered"})
         except Exception as e:
@@ -320,7 +308,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/user-flags", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_user_flags():
         rows = Users.query.with_entities(Users.id, Users.type, Users.hidden, Users.banned).all()
         flags = {}
@@ -338,7 +325,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/containers", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_get_containers():
         try:
             containers = container_manager.get_all_containers()
@@ -358,7 +344,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/hosts", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_get_hosts():
         try:
             status = orchestrator.get_status()
@@ -369,7 +354,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/kill", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_kill_container():
         try:
             admin_user = get_current_user()
@@ -409,7 +393,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_peek_session():
         admin_user = get_current_user()
         user_id = request.form.get("user_id")
@@ -437,7 +420,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/extend", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_extend_session():
         try:
             admin_user = get_current_user()
@@ -482,7 +464,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/kill-all", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_kill_all():
         try:
             admin_user = get_current_user()
@@ -494,7 +475,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/clear_history", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_clear_history():
         from .models import DesktopSessionHistoryModel, CommandLogModel
 
@@ -523,7 +503,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/images/matrix", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_images_matrix():
         from .models import get_all_settings, set_setting
 
@@ -560,7 +539,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/images/cache", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_images_cache():
         from .models import get_setting
 
@@ -584,7 +562,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/top-users", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_stats_top_users():
         try:
             period = request.args.get("period", "all")
@@ -619,7 +596,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/summary", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_stats_summary():
         try:
             from .models import DesktopContainerInfoModel
@@ -673,7 +649,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/vnc/auth", methods=["GET"])
     @authed_only
-    @bypass_csrf_protection
     def vnc_auth():
         from .models import DesktopContainerInfoModel
 
@@ -701,7 +676,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/terminal/auth", methods=["GET"])
     @authed_only
-    @bypass_csrf_protection
     def terminal_auth():
         from .models import DesktopContainerInfoModel
 
@@ -729,7 +703,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/per-host", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_stats_per_host():
         try:
             period = request.args.get("period", "all")
@@ -751,7 +724,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/heatmap", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_stats_heatmap():
         try:
             period = request.args.get("period", "all")
@@ -799,7 +771,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/duration-distribution", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_stats_duration_dist():
         try:
             from .models import get_setting
@@ -858,7 +829,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/extensions", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_stats_extensions():
         try:
             period = request.args.get("period", "all")
@@ -886,7 +856,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_get_command_logs():
         from .models import CommandLogModel
 
@@ -947,7 +916,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/per-user", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_command_stats_per_user():
         try:
             period = request.args.get("period", "all")
@@ -990,7 +958,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/tools", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_command_stats_tools():
         try:
             period = request.args.get("period", "all")
@@ -1022,7 +989,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/activity", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_command_stats_activity():
         try:
             period = request.args.get("period", "all")
@@ -1053,7 +1019,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/summary", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_command_stats_summary():
         from .models import CommandLogModel, get_setting
 
@@ -1109,7 +1074,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_get_contexts():
         from .models import DesktopDockerContextModel
 
@@ -1140,7 +1104,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/discover", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_discover_contexts():
         from concurrent.futures import ThreadPoolExecutor
         from .models import DesktopDockerContextModel
@@ -1191,7 +1154,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_add_context():
         from .models import DesktopDockerContextModel
 
@@ -1236,7 +1198,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>", methods=["PUT"])
     @admins_only
-    @bypass_csrf_protection
     def admin_update_context(context_id):
         from .models import DesktopDockerContextModel
 
@@ -1274,7 +1235,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>", methods=["DELETE"])
     @admins_only
-    @bypass_csrf_protection
     def admin_delete_context(context_id):
         from .models import DesktopDockerContextModel
 
@@ -1290,7 +1250,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>/test", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_test_context(context_id):
         from .models import DesktopDockerContextModel, get_setting
 
@@ -1311,7 +1270,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/reload", methods=["POST"])
     @admins_only
-    @bypass_csrf_protection
     def admin_reload_contexts():
         try:
             orchestrator.load_from_db()
@@ -1324,7 +1282,6 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["GET"])
     @admins_only
-    @bypass_csrf_protection
     def admin_get_settings():
         from .models import get_all_settings
 
@@ -1337,15 +1294,16 @@ def create_routes(container_manager, orchestrator):
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["PUT"])
     @admins_only
-    @bypass_csrf_protection
     def admin_update_settings():
-        from .models import set_setting
+        from .models import set_setting, SETTING_DEFAULTS
 
         if not request.is_json:
             return jsonify({"error": "invalid request"}), 400
 
         try:
             for key, value in request.json.items():
+                if key not in SETTING_DEFAULTS:
+                    continue
                 set_setting(key, value)
             return jsonify({"success": True})
         except Exception as e:
