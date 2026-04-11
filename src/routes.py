@@ -123,11 +123,10 @@ def create_routes(container_manager, orchestrator):
                     if container_info.get("ttyd_port"):
                         terminal_url = f"/remote-desktop/terminal/{user.id}/"
 
-                # ssh is a direct connection from the user's machine, use the hostname they're browsing from
-                browser_host = request.host.split(":")[0]
+                # ssh is a direct connection to the container host, not proxied through CTFd
                 if container_info.get("ssh_port"):
                     ssh_info = {
-                        "host": browser_host,
+                        "host": container_info["pub_hostname"],
                         "port": container_info["ssh_port"],
                         "username": container_info["container_username"],
                         "password": container_info["vnc_password"],
