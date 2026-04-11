@@ -622,17 +622,9 @@ class ContainerManager:
                     expired_user_ids.append(row.user_id)
 
             for user_id in expired_user_ids:
-                user = Users.query.filter_by(id=user_id).first()
-                username = user.name if user else f"User {user_id}"
-
                 logger.info(f"auto-destroying expired session for user {user_id}")
-
-                event_logger.log_event(
-                    "session_expired", "session expired", user_id=user_id, username=username, level="warning"
-                )
-
                 try:
-                    self.destroy_container(user_id, reason="expired", log_destruction=False)
+                    self.destroy_container(user_id, reason="expired")
                 except Exception as e:
                     logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
