@@ -9,7 +9,7 @@ from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only, ratelimit
 from CTFd.utils.user import get_current_user, is_admin, is_verified
 from .event_logger import event_logger
-from .docker_host_manager import LOCAL_CONTEXT_NAME, discover_contexts, ping_endpoint
+from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,10 @@ def _user_info_flags(user):
     if getattr(user, "banned", False):
         flags["target_is_banned"] = True
     return flags
+
+
+def _direct_vnc_url(host, novnc_port, password):
+    return f"http://{host}:{novnc_port}/vnc.html?autoconnect=true&password={password}&resize=remote&reconnect=true"
 
 
 def create_routes(container_manager, orchestrator):
@@ -112,11 +116,7 @@ def create_routes(container_manager, orchestrator):
                 behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
                 if not behind_proxy:
                     host = request.host.split(":")[0]
-                    pw = container_info["vnc_password"]
-                    vnc_url = (
-                        f"http://{host}:{container_info['novnc_port']}"
-                        f"/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true"
-                    )
+                    vnc_url = _direct_vnc_url(host, container_info["novnc_port"], container_info["vnc_password"])
                     if container_info.get("ttyd_port"):
                         terminal_url = f"http://{host}:{container_info['ttyd_port']}/"
                 else:
@@ -332,10 +332,7 @@ def create_routes(container_manager, orchestrator):
                 host = request.host.split(":")[0]
                 for c in containers:
                     if c.get("novnc_port"):
-                        pw = c.get("vnc_password", "")
-                        c["vnc_url"] = (
-                            f"http://{host}:{c['novnc_port']}/vnc.html?autoconnect=true&password={pw}&resize=remote&reconnect=true"
-                        )
+                        c["vnc_url"] = _direct_vnc_url(host, c["novnc_port"], c.get("vnc_password", ""))
             return jsonify({"containers": containers})
         except Exception as e:
             logger.error(f"admin API error getting containers: {e}")
@@ -580,13 +577,7 @@ def create_routes(container_manager, orchestrator):
                 entry = {"user_id": uid, **stats}
                 u = users_by_id.get(uid)
                 if u:
-                    entry["username"] = u.name
-                    if u.type == "admin":
-                        entry["is_admin"] = True
-                    if getattr(u, "hidden", False):
-                        entry["is_hidden"] = True
-                    if getattr(u, "banned", False):
-                        entry["is_banned"] = True
+                    entry.update(_user_info(u))
                 users.append(entry)
             return jsonify({"users": users})
         except Exception as e:
@@ -1093,8 +1084,6 @@ def create_routes(container_manager, orchestrator):
                         "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
                     }
                 )
-            from .docker_host_manager import LOCAL_SOCKET_PATH
-
             docker_ok = ping_endpoint(f"unix://{LOCAL_SOCKET_PATH}")
             return jsonify({"contexts": data, "docker_socket": docker_ok})
         except Exception as e:
@@ -1104,7 +1093,6 @@ def create_routes(container_manager, orchestrator):
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/discover", methods=["GET"])
     @admins_only
     def admin_discover_contexts():
-        from concurrent.futures import ThreadPoolExecutor
         from .models import DesktopDockerContextModel
         from .docker_host_manager import _get_host_gateway
 

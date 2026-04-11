@@ -147,9 +147,6 @@ def load(app):
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
 
-    app.desktop_host_manager = host_manager
-    app.desktop_orchestrator = orchestrator
-
     remote_desktop_bp = create_routes(container_manager, orchestrator)
 
     app.register_blueprint(remote_desktop_bp)
