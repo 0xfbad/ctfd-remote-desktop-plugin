@@ -54,7 +54,7 @@ for attr in ("Blueprint", "request", "jsonify", "render_template", "Response", "
 _decorators = sys.modules["CTFd.utils.decorators"]
 _decorators.authed_only = lambda f: f
 _decorators.admins_only = lambda f: f
-_decorators.ratelimit = lambda **kw: (lambda f: f)
+_decorators.ratelimit = lambda **kw: lambda f: f
 
 _user_utils = sys.modules["CTFd.utils.user"]
 _user_utils.get_current_user = MagicMock()
