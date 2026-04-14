@@ -650,6 +650,10 @@ function switchMode(mode, tabEl) {
     document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
     tabEl.classList.add('active');
 
+    const url = new URL(window.location);
+    url.searchParams.set('mode', mode);
+    history.replaceState(null, '', url);
+
     const vncFrame = document.getElementById('vnc-frame');
     const terminalFrame = document.getElementById('terminal-frame');
     const sshPanel = document.getElementById('ssh-panel');
@@ -730,13 +734,19 @@ function reloadPage() {
     allowNavigation();
     // kill iframes so their websockets don't block navigation
     document.querySelectorAll('iframe').forEach(f => { f.src = 'about:blank'; f.remove(); });
-    window.location.href = window.location.pathname;
+    window.location.href = window.location.pathname + window.location.search;
 }
 
 document.addEventListener('DOMContentLoaded', function() {
     const navbar = document.querySelector('.navbar');
     if (navbar) {
         document.documentElement.style.setProperty('--navbar-height', navbar.offsetHeight + 'px');
+    }
+
+    const modeParam = new URLSearchParams(window.location.search).get('mode');
+    if (modeParam) {
+        const tab = document.querySelector(`.mode-tab[data-mode="${modeParam}"]`);
+        if (tab) switchMode(modeParam, tab);
     }
 
     {% if creation_status and creation_status.get('status') not in ['failed', 'ready', 'none', None] %}
