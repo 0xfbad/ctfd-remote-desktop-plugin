@@ -232,7 +232,7 @@ else
       gunzip on;
 
       # inject nerd font so ttyd renders eza icons
-      sub_filter '</head>' '<link rel="preload" href="/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin><style>@font-face{font-family:JetBrainsMonoNerdFont;font-display:block;src:url(/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2) format("woff2")}</style><script>document.fonts.ready.then(()=>{const i=setInterval(()=>{if(window.term){window.term.options.fontFamily=window.term.options.fontFamily;clearInterval(i)}},100)})</script></head>';
+      sub_filter '</head>' '<link rel="preload" href="/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin><style>@font-face{font-family:JetBrainsMonoNerdFont;font-display:block;src:url(/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2) format("woff2")}</style><script>document.fonts.ready.then(()=>{const i=setInterval(()=>{if(!window.term)return;clearInterval(i);Promise.all(Array.from(document.fonts).map(f=>f.load())).then(()=>{const o=window.term.options.fontFamily;window.term.options.fontFamily="monospace";window.term.options.fontFamily=o;if(window.term.fit)window.term.fit()})},50)})</script></head>';
       sub_filter_once on;
 
       proxy_read_timeout 86400s;

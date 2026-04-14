@@ -319,12 +319,12 @@
                     <i class="fas fa-desktop"></i> Desktop
                 </button>
                 {% if terminal_url %}
-                <button class="mode-tab alt-mode-tab" data-mode="terminal" data-tip="Browser-based shell, lighter than full desktop" onclick="switchMode('terminal', this)" disabled>
+                <button class="mode-tab alt-mode-tab" data-mode="terminal" data-tip="Browser-based shell, lighter than full desktop" onclick="switchMode('terminal', this)">
                     <i class="fas fa-terminal"></i> Terminal
                 </button>
                 {% endif %}
                 {% if ssh_info %}
-                <button class="mode-tab alt-mode-tab" data-mode="ssh" data-tip="Connect from your own terminal" onclick="switchMode('ssh', this)" disabled>
+                <button class="mode-tab alt-mode-tab" data-mode="ssh" data-tip="Connect from your own terminal" onclick="switchMode('ssh', this)">
                     <i class="fas fa-plug"></i> SSH
                 </button>
                 {% endif %}
@@ -752,10 +752,6 @@ document.addEventListener('DOMContentLoaded', function() {
     showStatusMessage(creationStatus.message || 'Creating container...', 0);
     pollCreationStatus();
     {% elif container_info %}
-    // let nginx sub_filter font injection settle before allowing terminal/ssh
-    setTimeout(() => {
-        document.querySelectorAll('.alt-mode-tab').forEach(t => t.disabled = false);
-    }, 500);
     setTimeout(syncWithServer, 500);
     setInterval(syncWithServer, 5000);
     {% endif %}
