@@ -303,7 +303,7 @@ def create_routes(container_manager, orchestrator):
     @remote_desktop_bp.route("/remote-desktop/dashboard")
     @admins_only
     def admin_dashboard():
-        return render_template("admin_dashboard.html")
+        return render_template("remote_desktop_dashboard.html")
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/user-flags", methods=["GET"])
     @admins_only
