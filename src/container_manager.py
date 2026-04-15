@@ -1,17 +1,29 @@
+from __future__ import annotations
+
 import re
 import json
 import time
 import logging
 import secrets
 import traceback
+from typing import Callable
 from threading import Lock
 
+from flask import Flask
 from CTFd.models import db, Users
-from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel, CommandLogModel
+from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel, CommandLogModel, SettingValue, user_flags
 from .event_logger import event_logger
-from .docker_host_manager import parse_size
+from .docker_host_manager import DockerHostManager, parse_size
+from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[type-arg]
+    """fetch user from DB and return (user_obj, display_name) tuple"""
+    user = Users.query.filter_by(id=user_id).first()
+    return user, user.name if user else f"User {user_id}"
+
 
 _USERNAME_RE = re.compile(r"[^a-z0-9_-]")
 _RESERVED_NAMES = {
@@ -41,7 +53,15 @@ _RESERVED_NAMES = {
 }
 
 
-def _sanitize_username(raw, user_id=None):
+CreationStatusDict = dict[str, str]
+ContainerInfoDict = dict[str, str | int | float | None]
+TimerDict = dict[str, bool | int]
+TimerStatusDict = dict[str, bool | int | str]
+ResultDict = dict[str, bool | str | int]
+ContainerListEntry = dict[str, str | int | float | bool | TimerDict | None]
+
+
+def _sanitize_username(raw: str, user_id: int | None = None) -> str:
     name = _USERNAME_RE.sub("", raw.lower())
     # linux usernames must start with a letter or underscore
     name = name.lstrip("0123456789-")[:32]
@@ -51,30 +71,36 @@ def _sanitize_username(raw, user_id=None):
 
 
 class ContainerManager:
-    def __init__(self, host_manager, orchestrator, app=None):
+    def __init__(self, host_manager: DockerHostManager, orchestrator: Orchestrator, app: Flask | None = None) -> None:
         self.host_manager = host_manager
         self.orchestrator = orchestrator
         self.app = app
-        self.creation_status = {}
+        self.creation_status: dict[int, CreationStatusDict] = {}
         self.lock = Lock()
-        self._log_offsets = {}  # container_id -> lines already ingested
+        self._log_offsets: dict[str, int] = {}
 
-    def _get_setting(self, key):
+    def _get_setting(self, key: str) -> SettingValue:
         from .models import get_setting
 
         return get_setting(key)
 
-    def _resolve_username(self, user):
+    def _resolve_username(self, user: Users) -> str:  # type: ignore[type-arg]
         source = self._get_setting("username_source")
 
         if source == "email" and user.email:
             return _sanitize_username(user.email.split("@")[0], user.id)
         return _sanitize_username(user.name, user.id)
 
-    def wait_for_vnc_ready(self, hostname, novnc_port, max_attempts=None, progress_callback=None):
+    def wait_for_vnc_ready(
+        self,
+        hostname: str,
+        novnc_port: int,
+        max_attempts: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> bool:
         if max_attempts is None:
-            max_attempts = self._get_setting("vnc_ready_attempts")
-        http_timeout = self._get_setting("http_request_timeout")
+            max_attempts = int(self._get_setting("vnc_ready_attempts"))  # type: ignore[arg-type]
+        http_timeout = int(self._get_setting("http_request_timeout"))  # type: ignore[arg-type]
 
         import urllib.request
         import urllib.error
@@ -101,24 +127,18 @@ class ContainerManager:
         logger.warning(f"VNC not ready on {hostname}:{novnc_port} after {max_attempts} attempts")
         return False
 
-    def _create_container_background_wrapper(self, app, user_id):
+    def _create_container_background_wrapper(self, app: Flask, user_id: int) -> None:
         with app.app_context():
             self._create_container_background(user_id)
 
-    def _create_container_background(self, user_id):
+    def _create_container_background(self, user_id: int) -> None:
         logger.info(f"[BACKGROUND] creating container for user {user_id}")
 
-        try:
-            user = Users.query.filter_by(id=user_id).first()
-            username = user.name if user else f"User {user_id}"
-            container_username = self._resolve_username(user) if user else f"user{user_id}"
-        except Exception as e:
-            logger.error(f"[BACKGROUND] failed to get user {user_id}: {e}")
-            username = f"User {user_id}"
-            container_username = f"user{user_id}"
+        user, username = _display_name(user_id)
+        container_username = self._resolve_username(user) if user else f"user{user_id}"
 
-        context_name = None
-        container_name = None
+        context_name: str | None = None
+        container_name: str | None = None
 
         try:
             with self.lock:
@@ -143,16 +163,16 @@ class ContainerManager:
                     }
                 vnc_password = secrets.token_urlsafe(6)[:8]
 
-                docker_image = self._get_setting("docker_image")
-                resolution = self._get_setting("resolution")
-                shm_size = parse_size(self._get_setting("shm_size"))
-                memory_limit = parse_size(self._get_setting("memory_limit"))
+                docker_image = str(self._get_setting("docker_image"))
+                resolution = str(self._get_setting("resolution"))
+                shm_size = parse_size(self._get_setting("shm_size"))  # type: ignore[arg-type]
+                memory_limit = parse_size(self._get_setting("memory_limit"))  # type: ignore[arg-type]
                 cpu_limit = self._get_setting("cpu_limit")
-                nano_cpus = int(float(cpu_limit) * 1e9)
+                nano_cpus = int(float(cpu_limit) * 1e9)  # type: ignore[arg-type]
 
-                initial_duration = self._get_setting("initial_duration")
-                extension_duration = self._get_setting("extension_duration")
-                max_extensions = self._get_setting("max_extensions")
+                initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
+                extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
+                max_extensions = int(self._get_setting("max_extensions"))  # type: ignore[arg-type]
                 # hard ceiling so containers can't outlive the max possible session
                 max_lifetime = int(initial_duration + (extension_duration * max_extensions) + 300)
 
@@ -180,11 +200,12 @@ class ContainerManager:
             finally:
                 self.host_manager.release_semaphore(context_name)
 
-            container_id = result["container_id"]
-            ssh_port = result["ports"].get("22/tcp")
-            vnc_port = result["ports"]["5900/tcp"]
-            novnc_port = result["ports"]["6080/tcp"]
-            ttyd_port = result["ports"].get("7682/tcp")
+            port_map: dict[str, int] = result["ports"]  # type: ignore[assignment]
+            container_id = str(result["container_id"])
+            ssh_port = port_map.get("22/tcp")
+            vnc_port = port_map["5900/tcp"]
+            novnc_port = port_map["6080/tcp"]
+            ttyd_port = port_map.get("7682/tcp")
 
             logger.info(
                 f"container {container_name} created - SSH:{ssh_port} VNC:{vnc_port} noVNC:{novnc_port} ttyd:{ttyd_port}"
@@ -196,14 +217,14 @@ class ContainerManager:
                     "message": f"Waiting for {display_hostname} display server...",
                 }
 
-            def _vnc_progress(attempt, max_attempts):
+            def _vnc_progress(attempt: int, max_attempts: int) -> None:
                 with self.lock:
                     self.creation_status[user_id] = {
                         "status": "waiting_vnc",
                         "message": f"Waiting for {display_hostname} display server... ({attempt}/{max_attempts})",
                     }
 
-            vnc_ready = self.wait_for_vnc_ready(check_hostname, novnc_port, progress_callback=_vnc_progress)
+            vnc_ready = self.wait_for_vnc_ready(check_hostname, novnc_port, progress_callback=_vnc_progress)  # type: ignore[arg-type]
 
             if not vnc_ready:
                 raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
@@ -295,7 +316,7 @@ class ContainerManager:
                 self.creation_status[user_id] = {
                     "status": "failed",
                     "error": str(e),
-                    "hostname": context_name,
+                    "hostname": context_name or "",
                 }
 
             event_logger.log_event(
@@ -307,11 +328,10 @@ class ContainerManager:
                 metadata={"error": str(e), "traceback": traceback.format_exc()},
             )
 
-    def create_container(self, user_id):
+    def create_container(self, user_id: int) -> ResultDict:
         from flask import current_app
 
-        user = Users.query.filter_by(id=user_id).first()
-        username = user.name if user else f"User {user_id}"
+        user, username = _display_name(user_id)
 
         logger.info(f"create_container called for user {user_id} ({username})")
 
@@ -338,19 +358,19 @@ class ContainerManager:
             username=username,
             level="info",
             metadata={
-                "hosts": {
-                    h["context_name"]: {
+                "hosts": {  # type: ignore[dict-item]
+                    str(h["context_name"]): {
                         "containers": h["active_containers"],
                         "weight": h["weight"],
                         "healthy": h["healthy"],
-                        "score": round(h["weight"] / (h["active_containers"] + 1), 2) if h["healthy"] else 0,
+                        "score": round(int(h["weight"]) / (int(h["active_containers"]) + 1), 2) if h["healthy"] else 0,  # type: ignore[arg-type]
                     }
                     for h in host_status
                 },
             },
         )
 
-        app = current_app._get_current_object()
+        app: Flask = current_app._get_current_object()  # type: ignore[assignment]
 
         try:
             import gevent
@@ -368,13 +388,14 @@ class ContainerManager:
 
         return {"success": True, "status": "creating"}
 
-    def get_creation_status(self, user_id):
+    def get_creation_status(self, user_id: int) -> CreationStatusDict | None:
         with self.lock:
             return self.creation_status.get(user_id)
 
-    def destroy_container(self, user_id, reason="user_destroyed", log_destruction=True):
-        user = Users.query.filter_by(id=user_id).first()
-        username = user.name if user else f"User {user_id}"
+    def destroy_container(
+        self, user_id: int, reason: str = "user_destroyed", log_destruction: bool = True
+    ) -> ResultDict:
+        _user, username = _display_name(user_id)
 
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
 
@@ -392,7 +413,6 @@ class ContainerManager:
         context_name = row.docker_context
         container_name = row.container_name
 
-        # collect final command logs before stopping
         try:
             self._collect_logs_for_container(row)
         except Exception as e:
@@ -444,7 +464,7 @@ class ContainerManager:
 
         return {"success": True}
 
-    def get_container_info(self, user_id):
+    def get_container_info(self, user_id: int) -> ContainerInfoDict | None:
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if not row:
             return None
@@ -469,13 +489,13 @@ class ContainerManager:
         }
 
     @staticmethod
-    def _is_expired(row):
+    def _is_expired(row: DesktopContainerInfoModel) -> bool:
         if not row.timer_started or row.timer_start_time is None:
             return False
         return row.timer_duration - (time.time() - row.timer_start_time) <= 0
 
     @staticmethod
-    def _timer_from_row(row):
+    def _timer_from_row(row: DesktopContainerInfoModel) -> TimerDict | None:
         if not row.timer_started:
             return None
         elapsed = time.time() - row.timer_start_time
@@ -489,7 +509,7 @@ class ContainerManager:
             "max_extensions": row.max_extensions,
         }
 
-    def get_all_containers(self):
+    def get_all_containers(self) -> list[ContainerListEntry]:
         rows = DesktopContainerInfoModel.query.all()
         if not rows:
             return []
@@ -509,15 +529,13 @@ class ContainerManager:
         user_ids = [row.user_id for row in rows]
         users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
 
-        containers = []
+        containers: list[ContainerListEntry] = []
         for row in rows:
             user = users_by_id.get(row.user_id)
             container_data = {
                 "user_id": row.user_id,
                 "username": user.name if user else "Unknown",
-                "is_admin": user.type == "admin" if user else False,
-                "is_hidden": getattr(user, "hidden", False) if user else False,
-                "is_banned": getattr(user, "banned", False) if user else False,
+                **user_flags(user),
                 "container_name": row.container_name,
                 "container_id": row.container_id,
                 "docker_context": row.docker_context,
@@ -532,12 +550,11 @@ class ContainerManager:
 
         return containers
 
-    def extend_session_timer(self, user_id, new_duration=None):
-        user = Users.query.filter_by(id=user_id).first()
-        username = user.name if user else f"User {user_id}"
+    def extend_session_timer(self, user_id: int, new_duration: int | None = None) -> ResultDict:
+        _user, username = _display_name(user_id)
 
         if new_duration is None:
-            new_duration = self._get_setting("extension_duration")
+            new_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
 
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if not row:
@@ -573,7 +590,7 @@ class ContainerManager:
 
         return {"success": True, "extensions_used": row.extensions_used, "max_extensions": row.max_extensions}
 
-    def get_session_timer_status(self, user_id):
+    def get_session_timer_status(self, user_id: int) -> TimerStatusDict:
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if not row:
             return {"success": False, "error": "No active session"}
@@ -595,9 +612,8 @@ class ContainerManager:
             "max_extensions": row.max_extensions,
         }
 
-    def periodic_cleanup(self):
-        with self.app.app_context():
-            # purge stale creation_status entries for users with no active session
+    def periodic_cleanup(self) -> None:
+        with self.app.app_context():  # type: ignore[union-attr]
             with self.lock:
                 active_user_ids = {
                     r.user_id
@@ -628,7 +644,7 @@ class ContainerManager:
                 except Exception as e:
                     logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
-    def destroy_all_containers_admin(self, admin_user):
+    def destroy_all_containers_admin(self, admin_user: Users) -> int:  # type: ignore[type-arg]
         rows = DesktopContainerInfoModel.query.all()
         killed = 0
 
@@ -651,7 +667,7 @@ class ContainerManager:
 
         return killed
 
-    def cleanup_all_containers(self):
+    def cleanup_all_containers(self) -> None:
         logger.info("cleaning up all containers on shutdown")
 
         rows = DesktopContainerInfoModel.query.all()
@@ -665,23 +681,17 @@ class ContainerManager:
 
         logger.info("cleanup completed")
 
-    # command log collection
-
-    def _get_log_offset(self, container_id):
+    def _get_log_offset(self, container_id: str) -> int:
         # on restart, derive from DB count to avoid re-ingesting existing lines
         offset = self._log_offsets.get(container_id)
         if offset is not None:
             return offset
 
-        try:
-            offset = CommandLogModel.query.filter_by(container_id=container_id).count()
-        except Exception:
-            offset = 0
-
+        offset = CommandLogModel.query.filter_by(container_id=container_id).count()
         self._log_offsets[container_id] = offset
         return offset
 
-    def _collect_logs_for_container(self, row):
+    def _collect_logs_for_container(self, row: DesktopContainerInfoModel) -> None:
         if not self._get_setting("command_logging_enabled"):
             return
 
@@ -728,16 +738,12 @@ class ContainerManager:
         # so truncated/partial lines get retried next cycle
         self._log_offsets[row.container_id] = offset + parsed
 
-    def collect_all_command_logs(self):
-        with self.app.app_context():
+    def collect_all_command_logs(self) -> None:
+        with self.app.app_context():  # type: ignore[union-attr]
             if not self._get_setting("command_logging_enabled"):
                 return
 
-            try:
-                rows = DesktopContainerInfoModel.query.all()
-            except Exception:
-                return
-
+            rows = DesktopContainerInfoModel.query.all()
             for row in rows:
                 try:
                     self._collect_logs_for_container(row)

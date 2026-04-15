@@ -1,10 +1,4 @@
 from unittest.mock import patch, MagicMock
-from container_manager import ContainerManager
-
-
-def make_manager():
-    cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
-    return cm
 
 
 def make_container_row(user_id=1, created_at=1000.0, extensions_used=2):
@@ -17,8 +11,8 @@ def make_container_row(user_id=1, created_at=1000.0, extensions_used=2):
     return row
 
 
-def test_destroy_records_history():
-    cm = make_manager()
+def test_destroy_records_history(container_manager):
+    cm = container_manager
     row = make_container_row(user_id=1, created_at=1000.0, extensions_used=2)
 
     mock_model = MagicMock()
@@ -36,6 +30,7 @@ def test_destroy_records_history():
         patch("container_manager.db", mock_db),
         patch("container_manager.Users", mock_users),
         patch("container_manager.time") as mock_time,
+        patch("models.get_setting", return_value=False),
     ):
         mock_time.time.return_value = 2000.0
         result = cm.destroy_container(1, reason="user_destroyed")
@@ -53,8 +48,8 @@ def test_destroy_records_history():
     mock_db.session.add.assert_any_call(mock_history_cls.return_value)
 
 
-def test_destroy_expired_records_history():
-    cm = make_manager()
+def test_destroy_expired_records_history(container_manager):
+    cm = container_manager
     row = make_container_row(user_id=42)
     row.timer_started = True
     row.timer_start_time = 1000.0
@@ -83,8 +78,8 @@ def test_destroy_expired_records_history():
     assert mock_history_cls.call_args[1]["end_reason"] == "expired"
 
 
-def test_destroy_all_records_history():
-    cm = make_manager()
+def test_destroy_all_records_history(container_manager):
+    cm = container_manager
     row1 = make_container_row(user_id=1, created_at=1000.0)
     row2 = make_container_row(user_id=2, created_at=1100.0)
 
@@ -118,8 +113,8 @@ def test_destroy_all_records_history():
         assert c[1]["end_reason"] == "admin_killed"
 
 
-def test_history_duration_calculation():
-    cm = make_manager()
+def test_history_duration_calculation(container_manager):
+    cm = container_manager
     row = make_container_row(user_id=5, created_at=1500.0)
 
     mock_model = MagicMock()
@@ -136,6 +131,7 @@ def test_history_duration_calculation():
         patch("container_manager.db", mock_db),
         patch("container_manager.Users", mock_users),
         patch("container_manager.time") as mock_time,
+        patch("models.get_setting", return_value=False),
     ):
         mock_time.time.return_value = 5000.0
         cm.destroy_container(5)

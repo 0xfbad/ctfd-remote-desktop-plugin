@@ -319,12 +319,12 @@
                     <i class="fas fa-desktop"></i> Desktop
                 </button>
                 {% if terminal_url %}
-                <button class="mode-tab alt-mode-tab" data-mode="terminal" data-tip="Browser-based shell, lighter than full desktop" onclick="switchMode('terminal', this)">
+                <button class="mode-tab" data-mode="terminal" data-tip="Browser-based shell, lighter than full desktop" onclick="switchMode('terminal', this)">
                     <i class="fas fa-terminal"></i> Terminal
                 </button>
                 {% endif %}
                 {% if ssh_info %}
-                <button class="mode-tab alt-mode-tab" data-mode="ssh" data-tip="Connect from your own terminal" onclick="switchMode('ssh', this)">
+                <button class="mode-tab" data-mode="ssh" data-tip="Connect from your own terminal" onclick="switchMode('ssh', this)">
                     <i class="fas fa-plug"></i> SSH
                 </button>
                 {% endif %}
@@ -476,7 +476,6 @@ function checkStatus() {
             showSessionError(data.error || 'Unknown error');
         } else {
             const message = data.message || 'Creating container...';
-            const hostnameMatch = message.match(/(?:to|on|for)\s+(\w+)/i);
 
             if (startBtn) {
                 startBtn.innerHTML = `<span class="loading-spinner"></span> ${message}`;

@@ -1,10 +1,4 @@
 from unittest.mock import patch, MagicMock
-from container_manager import ContainerManager
-
-
-def make_manager():
-    cm = ContainerManager(MagicMock(), MagicMock())
-    return cm
 
 
 class FakeRow:
@@ -28,8 +22,8 @@ def _patch_db(row):
     return patch("container_manager.DesktopContainerInfoModel", mock_model)
 
 
-def test_extend_timer():
-    cm = make_manager()
+def test_extend_timer(container_manager):
+    cm = container_manager
     row = FakeRow(max_extensions=3)
     row.timer_started = True
     row.timer_start_time = 1000.0
@@ -46,8 +40,8 @@ def test_extend_timer():
     assert row.timer_duration == 800
 
 
-def test_extend_max_reached():
-    cm = make_manager()
+def test_extend_max_reached(container_manager):
+    cm = container_manager
     row = FakeRow(max_extensions=1)
     row.timer_started = True
     row.timer_start_time = 1000.0
@@ -61,8 +55,8 @@ def test_extend_max_reached():
     assert "Maximum extensions" in result["error"]
 
 
-def test_timer_status_running():
-    cm = make_manager()
+def test_timer_status_running(container_manager):
+    cm = container_manager
     row = FakeRow()
     row.timer_started = True
     row.timer_start_time = 1000.0
@@ -77,8 +71,8 @@ def test_timer_status_running():
     assert status["time_remaining"] == 500
 
 
-def test_timer_status_expired():
-    cm = make_manager()
+def test_timer_status_expired(container_manager):
+    cm = container_manager
     row = FakeRow()
     row.timer_started = True
     row.timer_start_time = 1000.0
@@ -92,8 +86,8 @@ def test_timer_status_expired():
     assert status["time_remaining"] == 0
 
 
-def test_timer_status_not_started():
-    cm = make_manager()
+def test_timer_status_not_started(container_manager):
+    cm = container_manager
     row = FakeRow()
 
     with _patch_db(row):
@@ -104,7 +98,7 @@ def test_timer_status_not_started():
     assert status["time_remaining"] == 0
 
 
-def test_concurrent_extend():
+def test_concurrent_extend(container_manager):
     import threading
 
     num_threads = 20
@@ -116,7 +110,7 @@ def test_concurrent_extend():
     row.timer_start_time = 1000.0
     row.timer_duration = 60000
 
-    cm = make_manager()
+    cm = container_manager
     barrier = threading.Barrier(num_threads + 1)
     results = []
     results_lock = threading.Lock()

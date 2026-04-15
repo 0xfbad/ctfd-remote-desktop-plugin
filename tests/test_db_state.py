@@ -1,14 +1,8 @@
 from unittest.mock import patch, MagicMock
-from container_manager import ContainerManager
 
 
-def make_manager():
-    cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
-    return cm
-
-
-def test_get_container_info_from_db():
-    cm = make_manager()
+def test_get_container_info_from_db(container_manager):
+    cm = container_manager
 
     row = MagicMock()
     row.container_id = "abc123"
@@ -35,8 +29,8 @@ def test_get_container_info_from_db():
     assert info["docker_context"] == "ctx1"
 
 
-def test_get_container_info_none():
-    cm = make_manager()
+def test_get_container_info_none(container_manager):
+    cm = container_manager
 
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = None
@@ -47,8 +41,8 @@ def test_get_container_info_none():
     assert info is None
 
 
-def test_destroy_deletes_db_row():
-    cm = make_manager()
+def test_destroy_deletes_db_row(container_manager):
+    cm = container_manager
 
     row = MagicMock()
     row.docker_context = "ctx1"
@@ -69,6 +63,7 @@ def test_destroy_deletes_db_row():
         patch("container_manager.DesktopSessionHistoryModel", MagicMock()),
         patch("container_manager.db", mock_db),
         patch("container_manager.Users", mock_users),
+        patch("models.get_setting", return_value=False),
     ):
         result = cm.destroy_container(1)
 
@@ -78,8 +73,8 @@ def test_destroy_deletes_db_row():
     cm.orchestrator.release_slot.assert_called_once_with("ctx1")
 
 
-def test_destroy_no_container():
-    cm = make_manager()
+def test_destroy_no_container(container_manager):
+    cm = container_manager
 
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = None
@@ -97,8 +92,8 @@ def test_destroy_no_container():
     assert "No active container" in result["error"]
 
 
-def test_create_rejects_existing_session():
-    cm = make_manager()
+def test_create_rejects_existing_session(container_manager):
+    cm = container_manager
 
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = MagicMock()
@@ -116,8 +111,8 @@ def test_create_rejects_existing_session():
     assert "already exists" in result["error"]
 
 
-def test_destroy_all_containers_admin():
-    cm = make_manager()
+def test_destroy_all_containers_admin(container_manager):
+    cm = container_manager
 
     row1 = MagicMock()
     row1.user_id = 1
@@ -161,8 +156,8 @@ def test_destroy_all_containers_admin():
     assert cm.orchestrator.release_slot.call_count == 2
 
 
-def test_periodic_cleanup_destroys_expired():
-    cm = make_manager()
+def test_periodic_cleanup_destroys_expired(container_manager):
+    cm = container_manager
 
     row = MagicMock()
     row.user_id = 42

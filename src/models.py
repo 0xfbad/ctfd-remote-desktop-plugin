@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 from CTFd.models import db
+
+SettingValue = bool | int | float | str | None
 
 
 class DesktopDockerContextModel(db.Model):
@@ -65,7 +69,7 @@ class DesktopSettingsModel(db.Model):
     value = db.Column(db.Text)
 
 
-SETTING_DEFAULTS = {
+SETTING_DEFAULTS: dict[str, SettingValue] = {
     "remote_desktop_enabled": False,
     "docker_image": "ctfd-remote-desktop:latest",
     "memory_limit": "4g",
@@ -89,7 +93,7 @@ SETTING_DEFAULTS = {
 }
 
 
-def _coerce(raw, default):
+def _coerce(raw: str, default: SettingValue) -> SettingValue:
     if default is None:
         return raw
 
@@ -103,19 +107,16 @@ def _coerce(raw, default):
     return raw
 
 
-def get_setting(key, default=None):
+def get_setting(key: str, default: SettingValue = None) -> SettingValue:
     if default is None:
         default = SETTING_DEFAULTS.get(key)
-    try:
-        row = DesktopSettingsModel.query.filter_by(key=key).first()
-        if row and row.value is not None:
-            return _coerce(row.value, default)
-    except Exception:
-        pass
+    row = DesktopSettingsModel.query.filter_by(key=key).first()
+    if row and row.value is not None:
+        return _coerce(row.value, default)
     return default
 
 
-def set_setting(key, value):
+def set_setting(key: str, value: SettingValue) -> None:
     row = DesktopSettingsModel.query.filter_by(key=key).first()
     if row:
         row.value = str(value)
@@ -125,13 +126,24 @@ def set_setting(key, value):
     db.session.commit()
 
 
-def get_all_settings():
-    settings = dict(SETTING_DEFAULTS)
-    try:
-        rows = DesktopSettingsModel.query.all()
-        for row in rows:
-            default = SETTING_DEFAULTS.get(row.key)
-            settings[row.key] = _coerce(row.value, default)
-    except Exception:
-        pass
+def user_flags(user: object | None) -> dict[str, bool]:
+    """extract is_admin/is_hidden/is_banned from a CTFd User, only includes truthy keys"""
+    if not user:
+        return {}
+    flags: dict[str, bool] = {}
+    if getattr(user, "type", None) == "admin":
+        flags["is_admin"] = True
+    if getattr(user, "hidden", False):
+        flags["is_hidden"] = True
+    if getattr(user, "banned", False):
+        flags["is_banned"] = True
+    return flags
+
+
+def get_all_settings() -> dict[str, SettingValue]:
+    settings: dict[str, SettingValue] = dict(SETTING_DEFAULTS)
+    rows = DesktopSettingsModel.query.all()
+    for row in rows:
+        default = SETTING_DEFAULTS.get(row.key)
+        settings[row.key] = _coerce(row.value, default)
     return settings

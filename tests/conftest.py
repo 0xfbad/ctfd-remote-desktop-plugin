@@ -35,7 +35,7 @@ _stub_modules = [
     "paramiko.ssh_exception",
     "apscheduler",
     "apscheduler.schedulers",
-    "apscheduler.schedulers.background",
+    "apscheduler.schedulers.gevent",
     "gevent",
     "gevent.monkey",
 ]
@@ -47,7 +47,16 @@ sys.modules["CTFd.models"] = _ctfd_models
 
 # flask stubs
 _flask = sys.modules["flask"]
-for attr in ("Blueprint", "request", "jsonify", "render_template", "Response", "stream_with_context", "current_app"):
+for attr in (
+    "Flask",
+    "Blueprint",
+    "request",
+    "jsonify",
+    "render_template",
+    "Response",
+    "stream_with_context",
+    "current_app",
+):
     setattr(_flask, attr, MagicMock())
 
 # CTFd decorator stubs
@@ -84,8 +93,8 @@ _paramiko.ssh_exception = _paramiko_ssh
 # apscheduler stubs
 _apscheduler_sched = sys.modules["apscheduler.schedulers"]
 _apscheduler_sched.SchedulerNotRunningError = type("SchedulerNotRunningError", (Exception,), {})
-_apscheduler_bg = sys.modules["apscheduler.schedulers.background"]
-_apscheduler_bg.BackgroundScheduler = MagicMock()
+_apscheduler_gevent = sys.modules["apscheduler.schedulers.gevent"]
+_apscheduler_gevent.GeventScheduler = MagicMock()
 
 # gevent stubs
 sys.modules["gevent.monkey"].get_original = lambda mod, attr: __import__(mod).__dict__[attr]
@@ -134,3 +143,10 @@ _load_module("routes")
 # "__init__", pre-register a stub so it doesn't execute the real one
 # (which has relative imports that fail outside CTFd)
 sys.modules["__init__"] = types.ModuleType("__init__")
+
+
+@pytest.fixture()
+def container_manager():
+    from container_manager import ContainerManager
+
+    return ContainerManager(MagicMock(), MagicMock(), MagicMock())
