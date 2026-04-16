@@ -2,12 +2,31 @@ from __future__ import annotations
 
 import time
 import logging
-from typing import Callable
+from typing import Callable, Any
 from threading import Lock
 from collections import deque
 from datetime import datetime
 
+from markupsafe import escape as _markup_escape
+
 logger = logging.getLogger(__name__)
+
+
+def _esc(val: Any) -> Any:
+    """html-escape strings, pass through everything else"""
+    if isinstance(val, str):
+        return str(_markup_escape(val))
+    return val
+
+
+def _esc_deep(obj: Any) -> Any:
+    """recursively html-escape all string values (and dict keys) in a structure"""
+    if isinstance(obj, dict):
+        return {_esc(k): _esc_deep(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_esc_deep(v) for v in obj)
+    return _esc(obj)
+
 
 EventDict = dict[str, int | float | str | bool | None | dict[str, int | float | str | bool | None]]
 EventListener = Callable[[EventDict], None]
@@ -50,11 +69,11 @@ class EventLogger:
             "datetime": datetime.now().strftime("%b %-d, %Y %-I:%M:%S %p"),
             "type": event_type,
             "level": level,
-            "message": message,
+            "message": _esc(message),
             "user_id": user_id,
-            "username": username,
+            "username": _esc(username),
             **user_flags,
-            "metadata": metadata or {},
+            "metadata": _esc_deep(metadata) if metadata else {},
         }
 
         with self.lock:

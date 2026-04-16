@@ -254,11 +254,12 @@ class DockerHostManager:
         cap_drop = [c.strip() for c in str(get_setting("cap_drop")).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(get_setting("cap_add")).split(",") if c.strip()]
 
-        import random
+        import secrets
 
+        _sysrand = secrets.SystemRandom()
         last_err: Exception | None = None
         for _ in range(50):
-            port_bindings = {p: random.randint(40000, 59999) for p in ports}
+            port_bindings = {p: _sysrand.randint(40000, 59999) for p in ports}
             try:
                 container = client.containers.run(
                     image,

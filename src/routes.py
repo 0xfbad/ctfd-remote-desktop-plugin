@@ -7,6 +7,7 @@ import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
+from markupsafe import escape as _markup_escape
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only, ratelimit
 from CTFd.utils.user import get_current_user, is_admin, is_verified
@@ -18,6 +19,12 @@ from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover
 
 logger = logging.getLogger(__name__)
 
+
+def _esc(val: str | None) -> str:
+    """html-escape a string for safe embedding in JSON / innerHTML contexts"""
+    return str(_markup_escape(val)) if val else ""
+
+
 UserInfoDict = dict[str, str | bool]
 SessionDict = dict[str, float | str | dict[str, bool | int] | None]
 TimerDisplayDict = dict[str, bool | int]
@@ -26,7 +33,7 @@ TimerDisplayDict = dict[str, bool | int]
 def _user_info(user: Users | None, fallback_id: int | None = None) -> UserInfoDict:  # type: ignore[type-arg]
     if not user:
         return {"username": f"User {fallback_id}"}
-    return {"username": user.name, **user_flags(user)}
+    return {"username": _esc(user.name), **user_flags(user)}
 
 
 def _target_flags(user: Users | None) -> dict[str, bool]:  # type: ignore[type-arg]
@@ -34,7 +41,8 @@ def _target_flags(user: Users | None) -> dict[str, bool]:  # type: ignore[type-a
 
 
 def _direct_vnc_url(host: str, novnc_port: int, password: str) -> str:
-    return f"http://{host}:{novnc_port}/vnc.html?autoconnect=true&password={password}&resize=remote&reconnect=true"
+    # password in fragment so it never appears in server logs or referer headers
+    return f"http://{host}:{novnc_port}/vnc.html?autoconnect=true&resize=remote&reconnect=true#password={password}"
 
 
 def create_routes(container_manager: ContainerManager, orchestrator: Orchestrator) -> Blueprint:
@@ -310,11 +318,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_kill_container():
         admin_user = get_current_user()
-        user_id = request.form.get("user_id")
-        if not user_id:
-            return jsonify({"error": "user_id required"}), 400
-
-        user_id = int(user_id)
+        user_id = request.form.get("user_id", type=int)
+        if user_id is None:
+            return jsonify({"error": "user_id must be an integer"}), 400
 
         target_user = Users.query.filter_by(id=user_id).first()
         target_username = target_user.name if target_user else f"User {user_id}"
@@ -343,11 +349,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_peek_session():
         admin_user = get_current_user()
-        user_id = request.form.get("user_id")
-        if not user_id:
-            return jsonify({"error": "user_id required"}), 400
-
-        user_id = int(user_id)
+        user_id = request.form.get("user_id", type=int)
+        if user_id is None:
+            return jsonify({"error": "user_id must be an integer"}), 400
         target_user = Users.query.filter_by(id=user_id).first()
         target_username = target_user.name if target_user else f"User {user_id}"
 
@@ -370,11 +374,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_extend_session():
         admin_user = get_current_user()
-        user_id = request.form.get("user_id")
-        if not user_id:
-            return jsonify({"error": "user_id required"}), 400
-
-        user_id = int(user_id)
+        user_id = request.form.get("user_id", type=int)
+        if user_id is None:
+            return jsonify({"error": "user_id must be an integer"}), 400
 
         if not container_manager.get_container_info(user_id):
             return jsonify({"error": "No active session for user"}), 400
@@ -569,11 +571,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     ) -> Response | tuple[str, int]:
         from .models import DesktopContainerInfoModel
 
-        user_id = request.headers.get(user_id_header)
-        if not user_id:
+        raw_user_id = request.headers.get(user_id_header)
+        if not raw_user_id:
             return "", 400
 
-        user_id = int(user_id)
+        try:
+            user_id = int(raw_user_id)
+        except (ValueError, TypeError):
+            return "", 400
         current_user = get_current_user()
         if current_user.id != user_id and not is_admin():
             return "", 403
@@ -616,7 +621,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             if row.end_reason == "reconciliation":
                 hosts[ctx]["failures"] += 1
 
-        result = [{"host": h, **hosts[h]} for h in sorted(hosts.keys())]
+        result = [{"host": _esc(h), **hosts[h]} for h in sorted(hosts.keys())]
         return jsonify({"hosts": result})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/heatmap", methods=["GET"])
@@ -763,10 +768,10 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                         "user_id": log.user_id,
                         **user_map.get(log.user_id, {"username": f"User {log.user_id}"}),
                         "timestamp": log.timestamp,
-                        "command": log.command,
+                        "command": _esc(log.command),
                         "exit_code": log.exit_code,
                         "duration": log.duration,
-                        "cwd": log.cwd,
+                        "cwd": _esc(log.cwd),
                         "tty": log.tty,
                     }
                     for log in logs
@@ -841,7 +846,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 tool_errors[tool] += 1
 
         tools = sorted(
-            [{"tool": t, "count": c, "errors": tool_errors.get(t, 0)} for t, c in tool_counts.items()],
+            [{"tool": _esc(t), "count": c, "errors": tool_errors.get(t, 0)} for t, c in tool_counts.items()],
             key=lambda x: x["count"],
             reverse=True,
         )[:30]
@@ -924,9 +929,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             data.append(
                 {
                     "id": ctx.id,
-                    "context_name": ctx.context_name,
-                    "hostname": ctx.hostname,
-                    "pub_hostname": ctx.pub_hostname,
+                    "context_name": _esc(ctx.context_name),
+                    "hostname": _esc(ctx.hostname),
+                    "pub_hostname": _esc(ctx.pub_hostname),
                     "weight": ctx.weight,
                     "enabled": ctx.enabled,
                     "connected": ctx.context_name in connected,
@@ -964,9 +969,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
             available.append(
                 {
-                    "name": ctx["name"],
-                    "endpoint": ctx["endpoint"],
-                    "suggested_hostname": suggested,
+                    "name": _esc(ctx["name"]),
+                    "endpoint": _esc(ctx["endpoint"]),
+                    "suggested_hostname": _esc(suggested),
                 }
             )
 
@@ -1169,7 +1174,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/events/recent")
     @admins_only
     def admin_get_recent_events():
-        limit = request.args.get("limit", 100, type=int)
+        limit = min(request.args.get("limit", 100, type=int), 2000)
         events = event_logger.get_recent_events(limit=limit)
         return jsonify({"events": events})
 

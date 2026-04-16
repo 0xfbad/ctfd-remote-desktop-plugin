@@ -10,6 +10,7 @@ from typing import Callable
 from threading import Lock
 
 from flask import Flask
+from markupsafe import escape as _markup_escape
 from CTFd.models import db, Users
 from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel, CommandLogModel, SettingValue, user_flags
 from .event_logger import event_logger
@@ -17,6 +18,11 @@ from .docker_host_manager import DockerHostManager, parse_size
 from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
+
+
+def _esc(val: str | None) -> str:
+    """html-escape a string for safe embedding in JSON / innerHTML contexts"""
+    return str(_markup_escape(val)) if val else ""
 
 
 def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[type-arg]
@@ -147,7 +153,8 @@ class ContainerManager:
             context_name = self.orchestrator.select_and_reserve()
             pub_hostname = self.host_manager.get_pub_hostname(context_name)
             check_hostname = self.host_manager.get_check_hostname(context_name)
-            display_hostname = context_name
+            # escaped for safe embedding in creation status messages rendered via innerHTML
+            display_hostname = _esc(context_name)
 
             logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
 
@@ -229,7 +236,7 @@ class ContainerManager:
             if not vnc_ready:
                 raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
 
-            vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&password={vnc_password}&resize=remote&reconnect=true"
+            vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&resize=remote&reconnect=true#password={vnc_password}"
 
             # check if destroy was called while we were setting up
             with self.lock:
@@ -315,8 +322,8 @@ class ContainerManager:
             with self.lock:
                 self.creation_status[user_id] = {
                     "status": "failed",
-                    "error": str(e),
-                    "hostname": context_name or "",
+                    "error": _esc(str(e)),
+                    "hostname": _esc(context_name or ""),
                 }
 
             event_logger.log_event(
@@ -534,11 +541,11 @@ class ContainerManager:
             user = users_by_id.get(row.user_id)
             container_data = {
                 "user_id": row.user_id,
-                "username": user.name if user else "Unknown",
+                "username": _esc(user.name) if user else "Unknown",
                 **user_flags(user),
-                "container_name": row.container_name,
+                "container_name": _esc(row.container_name),
                 "container_id": row.container_id,
-                "docker_context": row.docker_context,
+                "docker_context": _esc(row.docker_context),
                 "created_at": row.created_at,
                 "vnc_port": row.vnc_port,
                 "novnc_port": row.novnc_port,

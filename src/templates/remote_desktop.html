@@ -743,7 +743,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     const modeParam = new URLSearchParams(window.location.search).get('mode');
-    if (modeParam) {
+    if (modeParam && ['desktop', 'terminal', 'ssh'].includes(modeParam)) {
         const tab = document.querySelector(`.mode-tab[data-mode="${modeParam}"]`);
         if (tab) switchMode(modeParam, tab);
     }

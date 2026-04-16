@@ -688,7 +688,8 @@
 			_userFlags[uid] = {is_admin: obj.is_admin, is_hidden: obj.is_hidden, is_banned: obj.is_banned};
 		}
 		const flags = _userFlags[uid] || obj;
-		const name = escapeHtml(obj.username || `User ${uid}`);
+		// username is pre-escaped server-side with markupsafe
+		const name = obj.username || `User ${parseInt(uid)}`;
 		return `<a href="/admin/users/${parseInt(uid)}">${name}</a>${userBadges(flags)}`;
 	}
 
@@ -751,9 +752,10 @@
 					if (m.target_id && (m.target_is_admin || m.target_is_hidden || m.target_is_banned)) {
 						_userFlags[m.target_id] = {is_admin: m.target_is_admin, is_hidden: m.target_is_hidden, is_banned: m.target_is_banned};
 					}
+					// m.target is pre-escaped server-side
 					const target = m.target_id
-						? '<a href="/admin/users/' + m.target_id + '">' + escapeHtml(m.target || '') + '</a>' + userBadges(_userFlags[m.target_id] || {})
-						: escapeHtml(m.target || '');
+						? '<a href="/admin/users/' + parseInt(m.target_id) + '">' + (m.target || '') + '</a>' + userBadges(_userFlags[m.target_id] || {})
+						: (m.target || '');
 				if (m.killed_count !== undefined) return `purged ${m.killed_count} sessions`;
 				if (m.action === 'kill') return `killed ${target}'s session`;
 				if (m.action === 'extend') return `extended ${target}'s session`;
@@ -790,11 +792,12 @@
 		const details = formatEventDetails(event);
 		const detailsText = details.replace(/<[^>]*>/g, '');
 
+		// event data (username, message, metadata) is pre-escaped server-side
 		row.innerHTML = `
 			<td class="log-time">${escapeHtml(formatTimestamp(event.timestamp))}</td>
 			<td class="log-user">${event.username ? userLink({user_id: event.user_id, username: event.username}, event.user_id) : ''}</td>
 			<td><span class="badge ${badgeClass}">${escapeHtml(label)}</span></td>
-			<td class="log-detail cell-clip" title="${escapeHtml(detailsText)}">${details}</td>
+			<td class="log-detail cell-clip" title="${detailsText}">${details}</td>
 		`;
 
 		feed.insertBefore(row, feed.firstChild);
@@ -874,11 +877,12 @@
 						  timeRemaining <= 0 ? 'EXPIRED' :
 						  timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
 
+			// container_name, docker_context, username are pre-escaped server-side
 			const row = `
 				<tr>
 					<td class="log-user">${userLink(container)}</td>
-					<td class="cell-clip-sm" title="${escapeHtml(container.container_name)}"><code>${escapeHtml(container.container_name)}</code></td>
-					<td>${escapeHtml(container.docker_context || '')}</td>
+					<td class="cell-clip-sm" title="${container.container_name}"><code>${container.container_name}</code></td>
+					<td>${container.docker_context || ''}</td>
 					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
 					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
 					<td><span class="${statusClass}">${status}</span></td>
@@ -910,7 +914,10 @@
 
 		const username = container.username || `User ${userId}`;
 		const windowName = `vnc_peek_${userId}`;
-		const vncWindow = window.open(container.vnc_url + '&view_only=true', windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
+		// password may be in fragment (#), use URL API so view_only goes in query string
+		const peekUrl = new URL(container.vnc_url, window.location.origin);
+		peekUrl.searchParams.set('view_only', 'true');
+		const vncWindow = window.open(peekUrl.toString(), windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
 
 		if (!vncWindow) {
 			CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
@@ -1082,9 +1089,10 @@
 						const p = params[0];
 						const user = data.users.find(u => u.username === p.name) || {};
 						const uid = user.user_id;
+						// username is pre-escaped server-side
 						const nameHtml = uid
-							? '<a href="/admin/users/' + uid + '" style="color:inherit;text-decoration:underline">' + escapeHtml(p.name) + '</a>' + userBadges(user)
-							: escapeHtml(p.name);
+							? '<a href="/admin/users/' + parseInt(uid) + '" style="color:inherit;text-decoration:underline">' + p.name + '</a>' + userBadges(user)
+							: p.name;
 						return nameHtml + '<br/>' + formatDurationShort(p.value) + ' (' + (user.session_count || 0) + ' sessions)';
 					}
 				},
@@ -1118,8 +1126,8 @@
 					formatter: function(params) {
 						const p = params[0];
 						const b = buckets[p.dataIndex] || {};
-						let html = '<b>' + echarts.format.encodeHTML(p.name) + '</b><br/>' + p.value + ' sessions';
-						if (b.hint) html += '<br/><span style="color:#999;font-size:11px">' + echarts.format.encodeHTML(b.hint) + '</span>';
+						let html = '<b>' + escapeHtml(p.name) + '</b><br/>' + p.value + ' sessions';
+						if (b.hint) html += '<br/><span style="color:#999;font-size:11px">' + escapeHtml(b.hint) + '</span>';
 						return html;
 					}
 				},
@@ -1174,10 +1182,11 @@
 					trigger: 'axis',
 					axisPointer: { type: 'shadow' },
 					formatter: function(params) {
+						// host is pre-escaped server-side
 						const host = params[0].name;
 						const sessions = params[0].value;
 						const h = hosts.find(h => h.host === host) || {};
-						return echarts.format.encodeHTML(host) + '<br/>' +
+						return host + '<br/>' +
 							sessions + ' sessions<br/>' +
 							formatDurationShort(h.total_duration || 0) + ' total';
 					}
@@ -1296,6 +1305,7 @@
 			if (!logs.length) return;
 			if (empty) empty.remove();
 
+			// command, username are pre-escaped server-side
 			feed.innerHTML = logs.map(log => {
 				const exitBadge = log.exit_code === 0 ? 'badge-success' :
 								  log.exit_code !== null ? 'badge-danger' : 'badge-secondary';
@@ -1304,7 +1314,7 @@
 				return `<tr>
 					<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
 					<td class="log-user">${userLink(log, log.user_id)}</td>
-					<td class="cell-clip" title="${escapeHtml(log.command)}"><code>${escapeHtml(log.command)}</code></td>
+					<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
 					<td><span class="badge ${exitBadge}" ${exitTip ? `title="${exitTip}"` : ''}>${exitText}</span></td>
 				</tr>`;
 			}).join('');
@@ -1356,10 +1366,11 @@
 				tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No command data</td></tr>';
 				return;
 			}
+			// username is pre-escaped server-side
 			tbody.innerHTML = users.map(u => `
 				<tr>
 					<td class="log-user">${userLink(u)}</td>
-					<td><a href="#" class="cmd-history-link" data-userid="${parseInt(u.user_id)}" data-username="${escapeHtml(u.username)}">${u.total_commands.toLocaleString()}</a></td>
+					<td><a href="#" class="cmd-history-link" data-userid="${parseInt(u.user_id)}" data-username="${u.username}">${u.total_commands.toLocaleString()}</a></td>
 					<td>${u.avg_per_session}</td>
 					<td>${u.unique_tools}</td>
 				</tr>
@@ -1384,7 +1395,8 @@
 					formatter: function(params) {
 						const p = params[0];
 						const t = tools.find(t => t.tool === p.name) || {};
-						return echarts.format.encodeHTML(p.name) + '<br/>' +
+						// tool name is pre-escaped server-side
+						return p.name + '<br/>' +
 							p.value + ' uses' + (t.errors ? '<br/>' + t.errors + ' errors' : '');
 					}
 				},
@@ -1444,8 +1456,9 @@
 		cmdHistoryUserId = userId;
 		cmdHistoryOffset = 0;
 		const flags = _userFlags[userId] || {};
+		// username is pre-escaped server-side
 		document.getElementById('cmd-history-username').innerHTML =
-			'<a href="/admin/users/' + parseInt(userId) + '">' + escapeHtml(username) + '</a>' + userBadges(flags);
+			'<a href="/admin/users/' + parseInt(userId) + '">' + username + '</a>' + userBadges(flags);
 		loadCmdHistory();
 		$('#cmdHistoryModal').modal('show');
 	}
@@ -1464,16 +1477,17 @@
 			if (!logs.length) {
 				tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No commands</td></tr>';
 			} else {
+				// command, cwd are pre-escaped server-side
 				tbody.innerHTML = logs.map(log => {
 					const exitClass = log.exit_code === 0 ? 'text-success' : (log.exit_code !== null ? 'text-danger' : '');
 					const exitTip = exitCodeTitle(log.exit_code);
 					const exitDisplay = log.exit_code !== null ? log.exit_code : '-';
 					return `<tr>
 						<td class="text-nowrap">${escapeHtml(formatTimestamp(log.timestamp))}</td>
-						<td class="cell-clip" title="${escapeHtml(log.command)}"><code>${escapeHtml(log.command)}</code></td>
+						<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
 						<td class="${exitClass}" ${exitTip ? `title="${exitTip}"` : ''}>${exitDisplay}${exitTip ? ` <small class="text-muted">(${exitTip})</small>` : ''}</td>
 						<td>${log.duration !== null ? log.duration + 's' : '-'}</td>
-						<td class="cell-clip-sm" title="${escapeHtml(log.cwd || '')}"><small class="text-muted">${escapeHtml(log.cwd || '')}</small></td>
+						<td class="cell-clip-sm" title="${log.cwd || ''}"><small class="text-muted">${log.cwd || ''}</small></td>
 					</tr>`;
 				}).join('');
 			}
