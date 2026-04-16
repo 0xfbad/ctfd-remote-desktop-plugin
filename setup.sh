@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # setup script for ctfd-remote-desktop plugin
-# adds required docker-compose volumes, group_add, nginx websocket config,
-# and fixes file permissions so the ctfd container user can read them
+# adds required docker-compose volumes, group_add, permissions init service,
+# and nginx websocket config
 
 PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 CTFD_ROOT="$(cd "$PLUGIN_DIR/../../.." && pwd)"
@@ -67,11 +67,11 @@ else
     added "docker socket volume"
 fi
 
-if grep -q "/home/ctfd/.ssh" "$COMPOSE_FILE"; then
+if grep -q "ctfd-ssh:/home/ctfd/.ssh" "$COMPOSE_FILE"; then
     skip "ssh volume"
 else
-    sed -i "/docker.sock/a\\      - ~/.ssh:/home/ctfd/.ssh:ro" "$COMPOSE_FILE"
-    added "ssh volume"
+    sed -i "/docker.sock/a\\      - ctfd-ssh:/home/ctfd/.ssh:ro" "$COMPOSE_FILE"
+    added "ssh named volume"
 fi
 
 if grep -q "/home/ctfd/.docker" "$COMPOSE_FILE"; then
@@ -81,75 +81,67 @@ else
     added "docker config volume"
 fi
 
-# file permissions
+# permissions init service + named volume
+# copies host ssh keys into a named volume with correct ownership so the
+# ctfd container (uid 1001) can read them without loosening host permissions
+echo ""
+echo "permissions service"
+
+if grep -q "ctfd-ssh:" "$COMPOSE_FILE" && grep -q "permissions:" "$COMPOSE_FILE"; then
+    skip "permissions service and ctfd-ssh volume"
+else
+    # add permissions service before the nginx service
+    PERMS_BLOCK='
+  permissions:
+    image: alpine:3.23
+    user: root
+    volumes:
+      - ~/.ssh:/mnt/host-ssh:ro
+      - ctfd-ssh:/mnt/ctfd-ssh
+    command: >
+      sh -c '"'"'
+        cp -a /mnt/host-ssh/. /mnt/ctfd-ssh/ &&
+        chown -R 1001:1001 /mnt/ctfd-ssh
+      '"'"'
+'
+    if ! grep -q "permissions:" "$COMPOSE_FILE"; then
+        sed -i "/^\s*nginx:/i\\$PERMS_BLOCK" "$COMPOSE_FILE"
+        added "permissions service"
+    else
+        skip "permissions service"
+    fi
+
+    # add depends_on for ctfd service
+    if ! grep -q "permissions:" <(sed -n '/^\s*ctfd:/,/^\s*[a-z]/p' "$COMPOSE_FILE" | grep "depends_on" -A5); then
+        sed -i '/^\s*ctfd:/,/^\s*depends_on:/{/depends_on:/a\      permissions:\n        condition: service_completed_successfully
+}' "$COMPOSE_FILE"
+        added "ctfd depends_on permissions"
+    fi
+
+    # add named volume declaration
+    if ! grep -q "^volumes:" "$COMPOSE_FILE" && ! grep -q "^  ctfd-ssh:" "$COMPOSE_FILE"; then
+        echo -e "\nvolumes:\n  ctfd-ssh:" >> "$COMPOSE_FILE"
+        added "ctfd-ssh named volume"
+    elif ! grep -q "ctfd-ssh:" "$COMPOSE_FILE"; then
+        sed -i '/^volumes:/a\  ctfd-ssh:' "$COMPOSE_FILE"
+        added "ctfd-ssh named volume"
+    else
+        skip "ctfd-ssh named volume"
+    fi
+fi
+
+# docker config permissions
 echo ""
 echo "file permissions"
 
-fix_perms() {
-    local path="$1"
-    local target="$2"
-    local desc="$3"
-
-    if [ ! -e "$path" ]; then
-        echo -e "  ${YELLOW}warn${NC}  $path not found, skipping"
-        return
-    fi
-
-    current=$(stat -c '%a' "$path")
-    if [ "$current" = "$target" ] || [ "$((0$current & 0$target))" = "$((0$target))" ]; then
-        skip "$desc ($current)"
+if [ -d "$HOME/.docker" ]; then
+    current=$(stat -c '%a' "$HOME/.docker")
+    if [ "$((0$current & 0755))" = "$((0755))" ]; then
+        skip "~/.docker ($current)"
     else
-        chmod "$target" "$path"
-        added "$desc -> $target"
+        chmod 755 "$HOME/.docker"
+        added "~/.docker -> 755"
     fi
-}
-
-fix_perms "$HOME/.docker" "755" "~/.docker"
-fix_perms "$HOME/.ssh" "755" "~/.ssh"
-
-if [ -f "$HOME/.ssh/known_hosts" ]; then
-    fix_perms "$HOME/.ssh/known_hosts" "644" "~/.ssh/known_hosts"
-fi
-
-# ssh keys: the .ssh dir is bind-mounted into the ctfd container which runs
-# as a different uid. paramiko (used by the docker SDK for ssh tunnels) needs
-# to read the key but doesn't enforce permissions. openssh does enforce 600.
-# solution: keep the standard key names at 644 so paramiko can read them,
-# and make a 600 copy for CLI ssh usage.
-for key in "$HOME/.ssh/id_"*; do
-    [ -f "$key" ] || continue
-    case "$key" in
-        *.pub|*_cli) continue ;;
-    esac
-
-    cli_copy="${key}_cli"
-    if [ ! -f "$cli_copy" ]; then
-        cp "$key" "$cli_copy"
-        chmod 600 "$cli_copy"
-        added "$cli_copy (600, for CLI ssh)"
-    else
-        skip "$cli_copy"
-    fi
-
-    fix_perms "$key" "644" "$key (container-readable)"
-done
-
-# ssh config for CLI usage that points at the 600 copies. kept outside the
-# standard config path so the container user doesn't try to read it
-CLI_CONFIG="$HOME/.ssh/cli_config"
-if [ ! -f "$CLI_CONFIG" ]; then
-    {
-        echo "Host *"
-        for key in "$HOME/.ssh/id_"*_cli; do
-            [ -f "$key" ] || continue
-            echo "    IdentityFile $key"
-        done
-        echo "    StrictHostKeyChecking no"
-    } > "$CLI_CONFIG"
-    chmod 600 "$CLI_CONFIG"
-    added "~/.ssh/cli_config (use: ssh -F ~/.ssh/cli_config)"
-else
-    skip "~/.ssh/cli_config"
 fi
 
 # nginx config

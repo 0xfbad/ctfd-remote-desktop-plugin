@@ -53,13 +53,31 @@ services:
       - "DOCKER_GID"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.ssh:/home/ctfd/.ssh:ro
+      - ctfd-ssh:/home/ctfd/.ssh:ro
       - ~/.docker:/home/ctfd/.docker:ro
+    depends_on:
+      permissions:
+        condition: service_completed_successfully
+
+  permissions:
+    image: alpine:3.23
+    user: root
+    volumes:
+      - ~/.ssh:/mnt/host-ssh:ro
+      - ctfd-ssh:/mnt/ctfd-ssh
+    command: >
+      sh -c '
+        cp -a /mnt/host-ssh/. /mnt/ctfd-ssh/ &&
+        chown -R 1001:1001 /mnt/ctfd-ssh
+      '
+
+volumes:
+  ctfd-ssh:
 ```
 
-The socket mount gives local Docker access, the SSH mount lets the Docker SDK tunnel to remote hosts, and the docker config mount has context metadata. If you're only using remote contexts you can skip the socket and group_add
+The socket mount gives local Docker access, the SSH keys are copied into a named volume by the permissions init container with correct ownership (uid 1001 matches ctfd inside the container), and the docker config mount has context metadata. Don't bind-mount `~/.ssh` directly, the host UID won't match the container user and paramiko will fail to read `known_hosts`. If you're only using remote contexts you can skip the socket and group_add
 
-The setup script also handles SSH key permissions (the container needs to read private keys, but paramiko and openssh have different permission requirements) and adds nginx location blocks for VNC and terminal proxying. For custom nginx configs, see the location blocks in `setup.sh` and add them to whichever config nginx is actually loading
+The setup script also handles nginx location blocks for VNC and terminal proxying. For custom nginx configs, see the location blocks in `setup.sh` and add them to whichever config nginx is actually loading
 
 ### Docker contexts
 
