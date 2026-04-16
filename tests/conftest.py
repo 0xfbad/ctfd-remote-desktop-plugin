@@ -1,3 +1,4 @@
+import html as _html
 import importlib.util
 import sys
 import types
@@ -38,12 +39,17 @@ _stub_modules = [
     "apscheduler.schedulers.gevent",
     "gevent",
     "gevent.monkey",
+    "markupsafe",
 ]
 
 for mod_name in _stub_modules:
     sys.modules[mod_name] = types.ModuleType(mod_name)
 
 sys.modules["CTFd.models"] = _ctfd_models
+
+# markupsafe stub with a real escape implementation
+_markupsafe = sys.modules["markupsafe"]
+_markupsafe.escape = lambda s: _html.escape(str(s), quote=True)
 
 # flask stubs
 _flask = sys.modules["flask"]
