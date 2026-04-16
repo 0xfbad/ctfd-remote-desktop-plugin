@@ -5,7 +5,7 @@ import logging
 from typing import Callable, Any
 from threading import Lock
 from collections import deque
-from datetime import datetime
+from datetime import UTC, datetime
 
 from markupsafe import escape as _markup_escape
 
@@ -66,7 +66,7 @@ class EventLogger:
         event: EventDict = {
             "id": event_id,
             "timestamp": time.time(),
-            "datetime": datetime.now().strftime("%b %-d, %Y %-I:%M:%S %p"),
+            "datetime": datetime.now(UTC).strftime("%b %-d, %Y %-I:%M:%S %p"),
             "type": event_type,
             "level": level,
             "message": _esc(message),

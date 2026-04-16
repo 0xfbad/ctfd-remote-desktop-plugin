@@ -7,22 +7,16 @@ import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
-from markupsafe import escape as _markup_escape
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only, ratelimit
 from CTFd.utils.user import get_current_user, is_admin, is_verified
 from .container_manager import ContainerManager, ContainerInfoDict, TimerStatusDict
 from .orchestrator import Orchestrator
 from .event_logger import event_logger, EventDict
-from .models import user_flags
+from .models import user_flags, _esc
 from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
 
 logger = logging.getLogger(__name__)
-
-
-def _esc(val: str | None) -> str:
-    """html-escape a string for safe embedding in JSON / innerHTML contexts"""
-    return str(_markup_escape(val)) if val else ""
 
 
 UserInfoDict = dict[str, str | bool]
@@ -567,7 +561,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         )
 
     def _proxy_auth(
-        service: str, user_id_header: str, port_attr: str, host_header: str, port_header: str
+        user_id_header: str, port_attr: str, host_header: str, port_header: str
     ) -> Response | tuple[str, int]:
         from .models import DesktopContainerInfoModel
 
@@ -600,12 +594,12 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/vnc/auth", methods=["GET"])
     @authed_only
     def vnc_auth():
-        return _proxy_auth("vnc", "X-VNC-User-ID", "novnc_port", "X-VNC-Host", "X-VNC-Port")
+        return _proxy_auth("X-VNC-User-ID", "novnc_port", "X-VNC-Host", "X-VNC-Port")
 
     @remote_desktop_bp.route("/remote-desktop/terminal/auth", methods=["GET"])
     @authed_only
     def terminal_auth():
-        return _proxy_auth("terminal", "X-Terminal-User-ID", "ttyd_port", "X-Terminal-Host", "X-Terminal-Port")
+        return _proxy_auth("X-Terminal-User-ID", "ttyd_port", "X-Terminal-Host", "X-Terminal-Port")
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/per-host", methods=["GET"])
     @admins_only
@@ -635,13 +629,13 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         week_mode = period == "week"
 
         if week_mode:
-            utc_now = datetime.datetime.utcnow()
+            utc_now = datetime.datetime.now(datetime.UTC)
             start_date = (utc_now - datetime.timedelta(days=6)).date()
 
         for r in rows:
             if not r.started_at:
                 continue
-            dt = datetime.datetime.utcfromtimestamp(r.started_at)
+            dt = datetime.datetime.fromtimestamp(r.started_at, tz=datetime.UTC)
             if week_mode:
                 day_idx = (dt.date() - start_date).days
                 if not (0 <= day_idx < 7):
@@ -867,7 +861,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         hourly = defaultdict(int)
         for row in rows:
-            hour_str = datetime.datetime.fromtimestamp(row.timestamp).strftime("%Y-%m-%d %H:00")
+            hour_str = datetime.datetime.fromtimestamp(row.timestamp, tz=datetime.UTC).strftime("%Y-%m-%d %H:00")
             hourly[hour_str] += 1
 
         points = [

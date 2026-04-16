@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from CTFd.models import db
+from markupsafe import escape as _markup_escape
 
 SettingValue = bool | int | float | str | None
+
+
+def _esc(val: str | None) -> str:
+    """html-escape a string for safe embedding in JSON / innerHTML contexts"""
+    return str(_markup_escape(val)) if val else ""
 
 
 class DesktopDockerContextModel(db.Model):

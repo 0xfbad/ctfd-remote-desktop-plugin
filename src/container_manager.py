@@ -10,19 +10,20 @@ from typing import Callable
 from threading import Lock
 
 from flask import Flask
-from markupsafe import escape as _markup_escape
 from CTFd.models import db, Users
-from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel, CommandLogModel, SettingValue, user_flags
+from .models import (
+    DesktopContainerInfoModel,
+    DesktopSessionHistoryModel,
+    CommandLogModel,
+    SettingValue,
+    user_flags,
+    _esc,
+)
 from .event_logger import event_logger
 from .docker_host_manager import DockerHostManager, parse_size
 from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
-
-
-def _esc(val: str | None) -> str:
-    """html-escape a string for safe embedding in JSON / innerHTML contexts"""
-    return str(_markup_escape(val)) if val else ""
 
 
 def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[type-arg]
