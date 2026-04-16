@@ -99,7 +99,7 @@ All settings live in the database and are managed through Admin > Config > Remot
 | require_verified | true | require email verification, only applies if CTFd has verification enabled |
 | command_logging_enabled | false | periodically ingest shell command logs from running containers |
 | cap_drop | ALL | linux capabilities to drop |
-| cap_add | CHOWN,SETUID,... | linux capabilities to add back |
+| cap_add | CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE,SYS_CHROOT | linux capabilities to add back |
 
 ## Troubleshooting
 
