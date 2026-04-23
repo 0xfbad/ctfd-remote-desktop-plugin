@@ -283,7 +283,7 @@ class DockerHostManager:
                     continue
                 self._clear_client(context_name)
                 raise
-            except docker.errors.DockerException:
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
         else:
@@ -324,7 +324,7 @@ class DockerHostManager:
             container.stop(timeout=timeout)
         except docker.errors.NotFound:
             logger.debug(f"container {container_name} already removed")
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise
 
@@ -370,7 +370,7 @@ class DockerHostManager:
             return exit_code, output
         except docker.errors.NotFound:
             return -1, ""
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             return -1, ""
         except Exception:
@@ -384,6 +384,6 @@ class DockerHostManager:
             return container.status == "running"
         except docker.errors.NotFound:
             return False
-        except docker.errors.DockerException:
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
             self._clear_client(context_name)
             raise

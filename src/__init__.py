@@ -5,6 +5,8 @@ import sys
 import signal
 import atexit
 import logging
+import docker
+import paramiko
 from types import FrameType
 from typing import Callable
 
@@ -71,27 +73,34 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
 
     for row in rows:
         try:
-            if host_manager.is_container_running(row.docker_context, row.container_id):
-                orchestrator.reserve_slot(row.docker_context)
-                kept += 1
-            else:
-                ended_at = _time.time()
-                user = Users.query.filter_by(id=row.user_id).first()
-                username = user.name if user else f"User {row.user_id}"
-                history = DesktopSessionHistoryModel(
-                    user_id=row.user_id,
-                    username=username,
-                    docker_context=row.docker_context,
-                    started_at=row.created_at,
-                    ended_at=ended_at,
-                    duration=ended_at - row.created_at,
-                    end_reason="reconciliation",
-                    extensions_used=row.extensions_used,
-                )
-                db.session.add(history)
-                db.session.delete(row)
-                removed += 1
+            running = host_manager.is_container_running(row.docker_context, row.container_id)
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+            # transient connectivity issue, keep the row and retry on next reconcile cycle
+            kept += 1
+            continue
         except Exception:
+            db.session.delete(row)
+            removed += 1
+            continue
+
+        if running:
+            orchestrator.reserve_slot(row.docker_context)
+            kept += 1
+        else:
+            ended_at = _time.time()
+            user = Users.query.filter_by(id=row.user_id).first()
+            username = user.name if user else f"User {row.user_id}"
+            history = DesktopSessionHistoryModel(
+                user_id=row.user_id,
+                username=username,
+                docker_context=row.docker_context,
+                started_at=row.created_at,
+                ended_at=ended_at,
+                duration=ended_at - row.created_at,
+                end_reason="reconciliation",
+                extensions_used=row.extensions_used,
+            )
+            db.session.add(history)
             db.session.delete(row)
             removed += 1
 
