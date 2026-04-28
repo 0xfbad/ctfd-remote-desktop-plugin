@@ -9,6 +9,8 @@ import traceback
 from typing import Callable
 from threading import Lock
 
+import docker
+import paramiko
 from flask import Flask
 from CTFd.models import db, Users
 from .models import (
@@ -481,6 +483,9 @@ class ContainerManager:
             self.destroy_container(user_id, reason="expired")
             return None
 
+        if not self._verify_or_reap(row):
+            return None
+
         return {
             "container_id": row.container_id,
             "container_name": row.container_name,
@@ -501,6 +506,35 @@ class ContainerManager:
         if not row.timer_started or row.timer_start_time is None:
             return False
         return row.timer_duration - (time.time() - row.timer_start_time) <= 0
+
+    def _verify_or_reap(self, row: DesktopContainerInfoModel) -> bool:
+        # returns True if the row is live or unverifiable (transient error).
+        # returns False if the container vanished and we deleted the row.
+        try:
+            running = self.host_manager.is_container_running(row.docker_context, row.container_id)
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+            return True
+        if running:
+            return True
+
+        ended_at = time.time()
+        user = Users.query.filter_by(id=row.user_id).first()
+        db.session.add(
+            DesktopSessionHistoryModel(
+                user_id=row.user_id,
+                username=user.name if user else f"User {row.user_id}",
+                docker_context=row.docker_context,
+                started_at=row.created_at,
+                ended_at=ended_at,
+                duration=ended_at - row.created_at,
+                end_reason="reconciliation",
+                extensions_used=row.extensions_used,
+            )
+        )
+        self.orchestrator.release_slot(row.docker_context)
+        db.session.delete(row)
+        db.session.commit()
+        return False
 
     @staticmethod
     def _timer_from_row(row: DesktopContainerInfoModel) -> TimerDict | None:

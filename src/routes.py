@@ -582,6 +582,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not row or port is None:
             return "", 404
 
+        if not container_manager._verify_or_reap(row):
+            return "", 404
+
         check_hostname = container_manager.host_manager.get_check_hostname(row.docker_context)
         if not check_hostname:
             return "", 502

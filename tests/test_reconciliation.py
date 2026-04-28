@@ -1,4 +1,7 @@
 from unittest.mock import patch, MagicMock
+
+import docker
+import paramiko
 from docker_host_manager import DockerHostManager
 from orchestrator import Orchestrator
 
@@ -122,3 +125,85 @@ def test_reconcile_mixed():
     assert kept == 2
     assert removed == 1
     assert orchestrator.container_counts["ctx1"] == 2
+
+
+def test_verify_or_reap_running_keeps_row(container_manager):
+    """live container, helper returns True without touching the DB"""
+    cm = container_manager
+    cm.host_manager.is_container_running.return_value = True
+
+    row = MagicMock(docker_context="ctx1", container_id="c1")
+
+    mock_db = MagicMock()
+    with patch("container_manager.db", mock_db):
+        result = cm._verify_or_reap(row)
+
+    assert result is True
+    mock_db.session.delete.assert_not_called()
+    mock_db.session.commit.assert_not_called()
+    cm.orchestrator.release_slot.assert_not_called()
+
+
+def test_verify_or_reap_vanished_reaps_row(container_manager):
+    """missing container, helper writes history, releases slot, deletes row"""
+    cm = container_manager
+    cm.host_manager.is_container_running.return_value = False
+
+    row = MagicMock(
+        docker_context="ctx1",
+        container_id="c1",
+        user_id=42,
+        created_at=1000.0,
+        extensions_used=2,
+    )
+
+    mock_db = MagicMock()
+    mock_users = MagicMock()
+    mock_users.query.filter_by.return_value.first.return_value = MagicMock(name="alice")
+    mock_history = MagicMock()
+
+    with (
+        patch("container_manager.db", mock_db),
+        patch("container_manager.Users", mock_users),
+        patch("container_manager.DesktopSessionHistoryModel", mock_history),
+    ):
+        result = cm._verify_or_reap(row)
+
+    assert result is False
+    mock_db.session.delete.assert_called_once_with(row)
+    mock_db.session.commit.assert_called_once()
+    cm.orchestrator.release_slot.assert_called_once_with("ctx1")
+    mock_history.assert_called_once()
+    assert mock_history.call_args.kwargs["end_reason"] == "reconciliation"
+
+
+def test_verify_or_reap_docker_exception_keeps_row(container_manager):
+    """transient docker error, helper returns True and leaves the row alone"""
+    cm = container_manager
+    cm.host_manager.is_container_running.side_effect = docker.errors.DockerException("boom")
+
+    row = MagicMock(docker_context="ctx1", container_id="c1")
+
+    mock_db = MagicMock()
+    with patch("container_manager.db", mock_db):
+        result = cm._verify_or_reap(row)
+
+    assert result is True
+    mock_db.session.delete.assert_not_called()
+    cm.orchestrator.release_slot.assert_not_called()
+
+
+def test_verify_or_reap_ssh_exception_keeps_row(container_manager):
+    """transient ssh error, helper returns True and leaves the row alone"""
+    cm = container_manager
+    cm.host_manager.is_container_running.side_effect = paramiko.ssh_exception.SSHException("boom")
+
+    row = MagicMock(docker_context="ctx1", container_id="c1")
+
+    mock_db = MagicMock()
+    with patch("container_manager.db", mock_db):
+        result = cm._verify_or_reap(row)
+
+    assert result is True
+    mock_db.session.delete.assert_not_called()
+    cm.orchestrator.release_slot.assert_not_called()
