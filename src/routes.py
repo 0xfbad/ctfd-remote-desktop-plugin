@@ -850,31 +850,42 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         return jsonify({"tools": tools})
 
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/activity", methods=["GET"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/heatmap", methods=["GET"])
     @admins_only
-    def admin_command_stats_activity():
+    def admin_command_stats_heatmap():
         period = request.args.get("period", "all")
-        user_id = request.args.get("user_id", type=int)
-        query = _cmd_log_query(period)
+        rows = _cmd_log_query(period).all()
 
-        if user_id:
-            query = query.filter_by(user_id=user_id)
+        counts = [[0] * 7 for _ in range(24)]
+        week_mode = period == "week"
 
-        rows = query.all()
+        if week_mode:
+            utc_now = datetime.datetime.now(datetime.UTC)
+            start_date = (utc_now - datetime.timedelta(days=6)).date()
 
-        hourly = defaultdict(int)
-        for row in rows:
-            hour_str = datetime.datetime.fromtimestamp(row.timestamp, tz=datetime.UTC).strftime("%Y-%m-%d %H:00")
-            hourly[hour_str] += 1
+        for r in rows:
+            dt = datetime.datetime.fromtimestamp(r.timestamp, tz=datetime.UTC)
+            if week_mode:
+                day_idx = (dt.date() - start_date).days
+                if not (0 <= day_idx < 7):
+                    continue
+            else:
+                day_idx = dt.weekday()
+            counts[dt.hour][day_idx] += 1
 
-        points = [
-            {
-                "time": datetime.datetime.strptime(h, "%Y-%m-%d %H:00").strftime("%b %-d, %Y %-I:00 %p"),
-                "commands": c,
-            }
-            for h, c in sorted(hourly.items())
-        ]
-        return jsonify({"points": points})
+        data = []
+        for hour in range(24):
+            for day in range(7):
+                if counts[hour][day] > 0:
+                    data.append([day, hour, counts[hour][day]])
+
+        result: dict = {"data": data}
+        if week_mode:
+            epoch = datetime.datetime(1970, 1, 1)
+            result["start_ts"] = int((datetime.datetime.combine(start_date, datetime.time()) - epoch).total_seconds())
+        else:
+            result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return jsonify(result)
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/summary", methods=["GET"])
     @admins_only

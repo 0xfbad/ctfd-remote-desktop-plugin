@@ -532,15 +532,15 @@
 			<div class="col-md-6">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Command Activity <span class="cfg-help" data-tip="Command execution volume over time. Correlate spikes with competition events like hint releases or new challenge drops.">?</span></h3>
-						<select id="period-cmd-activity" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdActivity()">
+						<h3 class="card-title">Command Activity <span class="cfg-help" data-tip="Command volume by hour and day of week. Spot peak shell-usage windows or correlate clusters with competition events.">?</span></h3>
+						<select id="period-cmd-heatmap" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdHeatmap()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
 						</select>
 					</div>
 					<div class="card-body">
-						<div class="chart-container" id="chart-cmd-activity"></div>
+						<div class="chart-container" id="chart-cmd-heatmap"></div>
 					</div>
 				</div>
 			</div>
@@ -1025,11 +1025,11 @@
 	let endReasonsChart = null;
 	let perHostChart = null;
 	let topToolsChart = null;
-	let cmdActivityChart = null;
+	let cmdHeatmapChart = null;
 	let heatmapChart = null;
 
 	function initCharts() {
-		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools', 'chart-cmd-activity'].forEach(id => {
+		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools'].forEach(id => {
 			const el = document.getElementById(id);
 			if (!el) return;
 			const chart = echarts.init(el);
@@ -1038,7 +1038,6 @@
 			else if (id === 'chart-end-reasons') endReasonsChart = chart;
 			else if (id === 'chart-per-host') perHostChart = chart;
 			else if (id === 'chart-top-tools') topToolsChart = chart;
-			else if (id === 'chart-cmd-activity') cmdActivityChart = chart;
 		});
 	}
 
@@ -1348,7 +1347,7 @@
 			if (wasHidden) {
 				setTimeout(function() {
 					if (topToolsChart) topToolsChart.resize();
-					if (cmdActivityChart) cmdActivityChart.resize();
+					if (cmdHeatmapChart) cmdHeatmapChart.resize();
 				}, 50);
 			}
 		});
@@ -1415,32 +1414,77 @@
 		});
 	}
 
-	function refreshCmdActivity() {
-		const period = getPeriod('period-cmd-activity');
-		fetch(`/remote-desktop/dashboard/api/command-logs/stats/activity?period=${period}`, {
+	function refreshCmdHeatmap() {
+		const period = getPeriod('period-cmd-heatmap');
+		fetch(`/remote-desktop/dashboard/api/command-logs/stats/heatmap?period=${period}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
 		.then(r => r.json())
 		.then(data => {
-			if (!cmdActivityChart) return;
-			const points = data.points || [];
-			cmdActivityChart.setOption({
-				tooltip: { trigger: 'axis' },
-				toolbox: { feature: { saveAsImage: {} } },
-				dataZoom: [
-					{ type: 'inside' },
-					{ type: 'slider', fillerColor: 'rgba(233, 236, 241, 0.4)' }
-				],
-				grid: { left: 60, right: 20, top: 30, bottom: 60 },
-				xAxis: { type: 'category', data: points.map(p => p.time), axisLabel: { rotate: 45 } },
-				yAxis: { type: 'value', name: 'Commands', minInterval: 1 },
+			const el = document.getElementById('chart-cmd-heatmap');
+			if (!el) return;
+			if (cmdHeatmapChart) cmdHeatmapChart.dispose();
+			cmdHeatmapChart = echarts.init(el);
+			const chart = cmdHeatmapChart;
+
+			if (!data.data || data.data.length === 0) {
+				chart.setOption({
+					title: { text: 'No data yet', left: 'center', top: 'center', textStyle: { color: '#999', fontSize: 14 } }
+				});
+				return;
+			}
+
+			const tzOffset = -(new Date().getTimezoneOffset() / 60);
+			const localData = data.data.map(d => {
+				const localHour = (d[1] + tzOffset + 24) % 24;
+				const dayShift = Math.floor((d[1] + tzOffset) / 24);
+				const localDay = (d[0] + dayShift + 7) % 7;
+				return [localDay, localHour, d[2]];
+			});
+			const hours = Array.from({length: 24}, (_, h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'));
+
+			var dayLabels;
+			const wdNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+			if (data.start_ts != null) {
+				dayLabels = [];
+				for (let i = 0; i < 7; i++) {
+					const d = new Date((data.start_ts + i * 86400) * 1000);
+					dayLabels.push(wdNames[d.getDay()] + ' ' + (d.getMonth()+1) + '/' + d.getDate());
+				}
+			} else {
+				dayLabels = data.days;
+			}
+
+			const maxVal = Math.max(...localData.map(d => d[2]));
+			chart.setOption({
+				tooltip: {
+					position: 'top',
+					formatter: function(p) {
+						return '<b>' + dayLabels[p.data[0]] + ' ' + hours[p.data[1]] + '</b><br/>' +
+							p.data[2].toLocaleString() + ' commands';
+					}
+				},
+				grid: { left: 50, right: 30, top: 10, bottom: 40 },
+				xAxis: { type: 'category', data: dayLabels, splitArea: { show: true } },
+				yAxis: { type: 'category', data: hours, splitArea: { show: true }, inverse: true },
+				visualMap: {
+					min: 0,
+					max: maxVal || 1,
+					dimension: 2,
+					calculable: true,
+					orient: 'horizontal',
+					left: 'center',
+					bottom: 0,
+					itemWidth: 10,
+					itemHeight: 80,
+					inRange: { color: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'] }
+				},
 				series: [{
-					type: 'line',
-					data: points.map(p => p.commands),
-					itemStyle: { color: '#e83e8c' },
-					lineStyle: { color: '#e83e8c' },
-					areaStyle: { color: 'rgba(232, 62, 140, 0.1)' }
+					type: 'heatmap',
+					data: localData,
+					label: { show: false },
+					emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
 				}]
 			});
 		});
@@ -1451,7 +1495,7 @@
 		refreshCommandFeed();
 		refreshCmdPerUser();
 		refreshCmdTools();
-		refreshCmdActivity();
+		refreshCmdHeatmap();
 	}
 
 	function showCmdHistory(userId, username) {
@@ -1512,7 +1556,7 @@
 	}
 
 	window.addEventListener('resize', function() {
-		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, topToolsChart, cmdActivityChart, heatmapChart].forEach(c => {
+		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, topToolsChart, cmdHeatmapChart, heatmapChart].forEach(c => {
 			if (c) c.resize();
 		});
 	});
