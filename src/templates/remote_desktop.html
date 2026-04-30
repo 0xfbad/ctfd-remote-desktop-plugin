@@ -731,8 +731,12 @@ function allowNavigation() {
 
 function reloadPage() {
     allowNavigation();
-    // kill iframes so their websockets don't block navigation
-    document.querySelectorAll('iframe').forEach(f => { f.src = 'about:blank'; f.remove(); });
+    // detach iframes directly - setting f.src=about:blank first queues a frame
+    // navigation whose beforeunload re-pops the leave dialog
+    document.querySelectorAll('iframe').forEach(f => {
+        try { f.contentWindow.onbeforeunload = null; } catch (_) {}
+        f.remove();
+    });
     window.location.href = window.location.pathname + window.location.search;
 }
 
