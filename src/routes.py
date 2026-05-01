@@ -675,12 +675,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if current_user.id != user_id and not is_admin():
             return "", 403
 
+        # auth_request fires on every static asset, keep it db-only
+        # liveness reap happens via /api/status calling get_container_info
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         port = getattr(row, port_attr, None) if row else None
         if not row or port is None:
-            return "", 404
-
-        if not container_manager._verify_or_reap(row):
             return "", 404
 
         check_hostname = container_manager.host_manager.get_check_hostname(row.docker_context)

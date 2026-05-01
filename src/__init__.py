@@ -74,7 +74,7 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
     for row in rows:
         try:
             running = host_manager.is_container_running(row.docker_context, row.container_id)
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
             # transient connectivity issue, keep the row and retry on next reconcile cycle
             kept += 1
             continue

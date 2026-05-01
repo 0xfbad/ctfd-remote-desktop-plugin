@@ -386,6 +386,7 @@ class DockerHostManager:
             return container.status == "running"
         except docker.errors.NotFound:
             return False
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
+            # ssh channel failure surfaces as raw EOFError when MaxSessions is exhausted
             self._clear_client(context_name)
             raise
