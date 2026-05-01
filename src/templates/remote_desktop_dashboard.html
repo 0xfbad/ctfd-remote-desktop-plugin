@@ -102,6 +102,17 @@
 	.badge-evt-host-up { background-color: #d4edda; color: #155724; }
 	.badge-evt-host-down { background-color: #f8d7da; color: #721c24; }
 
+	.report-content-full {
+		white-space: pre-wrap;
+		word-break: break-word;
+		background: #f8f9fa;
+		border: 1px solid #dee2e6;
+		border-radius: 4px;
+		padding: 12px;
+		font-family: inherit;
+		font-size: 14px;
+	}
+
 	.time-remaining {
 		font-family: monospace;
 		font-weight: 500;
@@ -326,6 +337,58 @@
 							</tbody>
 						</table>
 					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="row">
+		<div class="col-md-12">
+			<div class="card">
+				<div class="card-header">
+					<h3 class="card-title">Reports <span class="cfg-help" data-tip="Bug reports and feature requests submitted by users from the remote desktop bottom bar. Click a row to view the full message.">?</span></h3>
+					<button class="btn btn-outline-danger btn-sm" id="reports-clear-btn" onclick="clearAllReports()">
+						<i class="fas fa-trash"></i> Clear All
+					</button>
+				</div>
+				<div class="card-body">
+					<div class="table-responsive log-wrap">
+						<table class="table table-striped table-sm border">
+							<thead>
+								<tr>
+									<th><b>Time</b></th>
+									<th><b>User</b></th>
+									<th><b>Message</b></th>
+								</tr>
+							</thead>
+							<tbody id="reports-tbody">
+								<tr id="reports-empty">
+									<td colspan="3" class="text-center text-muted">No reports yet</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="modal fade" id="reportModal" tabindex="-1">
+		<div class="modal-dialog modal-lg">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title">Report from <span id="report-modal-user"></span></h5>
+					<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+				</div>
+				<div class="modal-body">
+					<div class="text-muted small mb-2" id="report-modal-time"></div>
+					<div class="report-content-full" id="report-modal-content"></div>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-outline-danger mr-auto" id="report-modal-delete" onclick="deleteCurrentReport()">
+						<i class="fas fa-trash"></i> Delete
+					</button>
+					<button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
 				</div>
 			</div>
 		</div>
@@ -855,6 +918,102 @@
 	function refreshAll() {
 		refreshContainers();
 		refreshSummaryStats();
+		refreshReports();
+	}
+
+	let reportsById = {};
+	let currentReportId = null;
+
+	function refreshReports() {
+		fetch('/remote-desktop/dashboard/api/reports', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(response => response.json())
+		.then(data => updateReportsTable(data.reports || []))
+		.catch(error => console.error('Error fetching reports:', error));
+	}
+
+	function updateReportsTable(reports) {
+		const tbody = document.getElementById('reports-tbody');
+		if (!tbody) return;
+
+		reportsById = {};
+
+		if (!reports.length) {
+			tbody.innerHTML = '<tr id="reports-empty"><td colspan="3" class="text-center text-muted">No reports yet</td></tr>';
+			return;
+		}
+
+		tbody.innerHTML = '';
+		reports.forEach(r => {
+			reportsById[r.id] = r;
+			const row = document.createElement('tr');
+			row.dataset.reportId = r.id;
+			// username and content are pre-escaped server-side with markupsafe
+			const titleText = r.content.replace(/<[^>]*>/g, '');
+			row.innerHTML = `
+				<td class="log-time">${escapeHtml(formatTimestamp(r.timestamp))}</td>
+				<td class="log-user">${userLink(r)}</td>
+				<td class="log-detail cell-clip" title="${titleText}">${r.content}</td>
+			`;
+			tbody.appendChild(row);
+		});
+	}
+
+	function openReportModal(id) {
+		const r = reportsById[id];
+		if (!r) return;
+		currentReportId = id;
+		// content and username are pre-escaped server-side
+		document.getElementById('report-modal-user').innerHTML = userLink(r);
+		document.getElementById('report-modal-time').textContent = formatTimestamp(r.timestamp);
+		document.getElementById('report-modal-content').innerHTML = r.content;
+		$('#reportModal').modal('show');
+	}
+
+	function deleteCurrentReport() {
+		if (!currentReportId) return;
+		const id = currentReportId;
+		const formData = new FormData();
+		formData.append('nonce', window.init.csrfNonce);
+		fetch(`/remote-desktop/dashboard/api/reports/${id}/delete`, {
+			method: 'POST',
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin',
+			body: formData
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.success) {
+				$('#reportModal').modal('hide');
+				currentReportId = null;
+				refreshReports();
+			}
+		})
+		.catch(error => console.error('Error deleting report:', error));
+	}
+
+	function clearAllReports() {
+		CTFd.ui.ezq.ezQuery({
+			title: 'Clear All Reports',
+			body: 'Delete every submitted report? This cannot be undone.',
+			success: () => {
+				const formData = new FormData();
+				formData.append('nonce', window.init.csrfNonce);
+				fetch('/remote-desktop/dashboard/api/reports/clear', {
+					method: 'POST',
+					headers: { 'X-Requested-With': 'XMLHttpRequest' },
+					credentials: 'same-origin',
+					body: formData
+				})
+				.then(response => response.json())
+				.then(data => {
+					if (data.success) refreshReports();
+				})
+				.catch(error => console.error('Error clearing reports:', error));
+			}
+		});
 	}
 
 	function updateContainersTable(containers) {
@@ -1583,6 +1742,13 @@
 			if (!link) return;
 			e.preventDefault();
 			showCmdHistory(parseInt(link.dataset.userid), link.dataset.username);
+		});
+
+		document.getElementById('reports-tbody').addEventListener('click', function(e) {
+			if (e.target.closest('a')) return;
+			const row = e.target.closest('tr[data-report-id]');
+			if (!row) return;
+			openReportModal(parseInt(row.dataset.reportId));
 		});
 	});
 

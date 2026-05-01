@@ -64,6 +64,11 @@
         color: white;
     }
 
+    .bar-btn.report:hover {
+        background: #fd7e14;
+        color: white;
+    }
+
     .bar-btn:disabled {
         opacity: 0.4;
         cursor: not-allowed;
@@ -89,30 +94,17 @@
         color: #dc3545;
     }
 
-    [data-tip] {
-        position: relative;
-    }
-
-    [data-tip]:hover::after {
-        content: attr(data-tip);
-        position: absolute;
-        bottom: calc(100% + 6px);
-        left: 50%;
-        transform: translateX(-50%);
+    #bar-tooltip {
+        position: fixed;
         background: #1a1e21;
         color: #e9ecef;
         padding: 4px 8px;
         border-radius: 3px;
         font-size: 11px;
         white-space: nowrap;
-        z-index: 100;
+        z-index: 1100;
         pointer-events: none;
-        opacity: 1;
-    }
-
-    .bar-left > [data-tip]:first-child:hover::after {
-        left: 0;
-        transform: none;
+        display: none;
     }
 
     .bar-divider {
@@ -241,6 +233,72 @@
         overflow-y: auto;
     }
 
+    .report-popover {
+        position: absolute;
+        bottom: calc(100% + 6px);
+        right: 0;
+        background: #2b3035;
+        border: 1px solid #495057;
+        border-radius: 6px;
+        padding: 6px;
+        width: 320px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        z-index: 200;
+        display: none;
+    }
+
+    .report-popover.open {
+        display: block;
+    }
+
+    .report-popover textarea {
+        width: 100%;
+        min-height: 150px;
+        background: #1a1e21;
+        color: #e9ecef;
+        border: 1px solid #495057;
+        border-radius: 4px;
+        padding: 8px;
+        font-size: 13px;
+        font-family: inherit;
+        resize: vertical;
+        outline: none;
+    }
+
+    .report-popover textarea:focus {
+        border-color: #fd7e14;
+    }
+
+    .report-popover textarea::placeholder {
+        color: #6c757d;
+    }
+
+    .report-send {
+        margin-top: 8px;
+        width: 100%;
+        background: #fd7e14;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 6px 10px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: filter 0.15s;
+    }
+
+    .report-send:hover {
+        filter: brightness(0.9);
+    }
+
+    .report-send:disabled {
+        background: #495057;
+        cursor: not-allowed;
+    }
+
+    .report-wrap {
+        position: relative;
+    }
 
 </style>
 {% endblock %}
@@ -330,6 +388,15 @@
                 {% endif %}
             </div>
             <div class="bar-divider"></div>
+            <div class="report-wrap">
+                <button class="bar-btn report" onclick="toggleReportPopover(event)" id="report-btn" data-tip="Report a bug or feature request">
+                    <i class="fas fa-exclamation-triangle"></i>
+                </button>
+                <div class="report-popover" id="report-popover">
+                    <textarea id="report-textarea" maxlength="5000" oninput="onReportInput()"></textarea>
+                    <button class="report-send" id="report-send-btn" onclick="sendReport()" disabled>Send</button>
+                </div>
+            </div>
             <button class="bar-btn" onclick="toggleFullscreen()" id="fullscreen-btn" data-tip="Fullscreen">
                 <i class="fas fa-expand"></i>
             </button>
@@ -705,6 +772,215 @@ document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) setFullscreen(false);
 });
 
+// shared tooltip, positions above the hovered [data-tip] element and clamps to viewport
+const _tooltipEl = document.createElement('div');
+_tooltipEl.id = 'bar-tooltip';
+document.body.appendChild(_tooltipEl);
+
+let _tooltipTarget = null;
+let _tooltipSticky = false;
+let _tooltipStickyTimer = null;
+
+function _positionTooltip() {
+    if (!_tooltipTarget) return;
+    const rect = _tooltipTarget.getBoundingClientRect();
+    const tipRect = _tooltipEl.getBoundingClientRect();
+    const margin = 8;
+
+    let left = rect.left + (rect.width / 2) - (tipRect.width / 2);
+    left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
+
+    let top = rect.top - tipRect.height - 6;
+    if (top < margin) top = rect.bottom + 6;
+
+    _tooltipEl.style.left = `${Math.round(left)}px`;
+    _tooltipEl.style.top = `${Math.round(top)}px`;
+}
+
+function _showTooltip(target) {
+    const text = target.getAttribute('data-tip');
+    if (!text) return;
+    _tooltipTarget = target;
+    _tooltipEl.textContent = text;
+    _tooltipEl.style.display = 'block';
+    _positionTooltip();
+}
+
+function _hideTooltip() {
+    if (_tooltipSticky) return;
+    _tooltipTarget = null;
+    _tooltipEl.style.display = 'none';
+}
+
+function showStickyTooltip(target, text, duration) {
+    if (!target) return;
+    if (_tooltipStickyTimer) clearTimeout(_tooltipStickyTimer);
+    _tooltipSticky = true;
+    _tooltipTarget = target;
+    _tooltipEl.textContent = text;
+    _tooltipEl.style.display = 'block';
+    _positionTooltip();
+    _tooltipStickyTimer = setTimeout(() => {
+        _tooltipSticky = false;
+        _tooltipStickyTimer = null;
+        _tooltipTarget = null;
+        _tooltipEl.style.display = 'none';
+    }, duration || 3000);
+}
+
+document.addEventListener('mouseover', function(e) {
+    if (_tooltipSticky) return;
+    const target = e.target.closest('[data-tip]');
+    if (target && target !== _tooltipTarget) _showTooltip(target);
+});
+
+document.addEventListener('mouseout', function(e) {
+    if (_tooltipSticky) return;
+    if (!_tooltipTarget) return;
+    const related = e.relatedTarget;
+    if (related && _tooltipTarget.contains(related)) return;
+    _hideTooltip();
+});
+
+function _onViewportChange() {
+    if (_tooltipSticky) {
+        _positionTooltip();
+    } else {
+        _hideTooltip();
+    }
+}
+
+window.addEventListener('scroll', _onViewportChange, true);
+window.addEventListener('resize', _onViewportChange);
+
+// report popover, content survives open/close in memory, lost on page reload
+let reportText = '';
+let reportSending = false;
+let reportShowingThanks = false;
+
+const REPORT_PLACEHOLDER =
+    "Describe the bug or feature.\n\n" +
+    "For bugs: what were you doing, what happened, what did you expect? " +
+    "If visual, paste an image link (imgur, 0x0.st).";
+
+function syncSendButton() {
+    const textarea = document.getElementById('report-textarea');
+    const sendBtn = document.getElementById('report-send-btn');
+    if (!textarea || !sendBtn) return;
+    const empty = textarea.value.trim().length === 0;
+    sendBtn.disabled = reportSending || empty || reportShowingThanks;
+
+    // sendReport manages its own button state during the request
+    if (reportSending) return;
+
+    if (reportShowingThanks) {
+        sendBtn.textContent = 'Thanks for your feedback!';
+        sendBtn.removeAttribute('data-tip');
+        return;
+    }
+
+    sendBtn.textContent = 'Send';
+    if (empty) {
+        sendBtn.setAttribute('data-tip', 'Type something to send');
+    } else {
+        sendBtn.removeAttribute('data-tip');
+    }
+}
+
+function isReportOpen() {
+    const popover = document.getElementById('report-popover');
+    return popover && popover.classList.contains('open');
+}
+
+function openReportPopover() {
+    const popover = document.getElementById('report-popover');
+    const textarea = document.getElementById('report-textarea');
+    if (!popover || !textarea) return;
+    popover.classList.add('open');
+    textarea.value = reportText;
+    syncSendButton();
+    textarea.focus();
+}
+
+function closeReportPopover() {
+    const popover = document.getElementById('report-popover');
+    if (!popover) return;
+    popover.classList.remove('open');
+}
+
+function toggleReportPopover(e) {
+    if (e) e.stopPropagation();
+    if (isReportOpen()) {
+        closeReportPopover();
+    } else {
+        openReportPopover();
+    }
+}
+
+function onReportInput() {
+    const textarea = document.getElementById('report-textarea');
+    if (!textarea) return;
+    reportText = textarea.value;
+    if (reportShowingThanks) reportShowingThanks = false;
+    syncSendButton();
+}
+
+function sendReport() {
+    const textarea = document.getElementById('report-textarea');
+    const sendBtn = document.getElementById('report-send-btn');
+    const reportBtn = document.getElementById('report-btn');
+    if (!textarea || !sendBtn) return;
+    const content = textarea.value.trim();
+    if (!content) return;
+
+    reportSending = true;
+    sendBtn.disabled = true;
+    sendBtn.removeAttribute('data-tip');
+    sendBtn.innerHTML = '<span class="loading-spinner"></span> Sending...';
+
+    const formData = new FormData();
+    formData.append('nonce', window.init.csrfNonce);
+    formData.append('content', content);
+
+    fetch('/remote-desktop/api/report', {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        credentials: 'same-origin',
+        body: formData
+    })
+    .then(response => response.json().then(data => ({ok: response.ok, data})))
+    .then(({ok, data}) => {
+        reportSending = false;
+        if (ok && data.success) {
+            reportText = '';
+            textarea.value = '';
+            reportShowingThanks = true;
+            setTimeout(() => {
+                reportShowingThanks = false;
+                syncSendButton();
+            }, 3500);
+        } else {
+            showStickyTooltip(reportBtn, data.error || 'Failed to send', 4000);
+        }
+        syncSendButton();
+    })
+    .catch(() => {
+        reportSending = false;
+        showStickyTooltip(reportBtn, 'Network error', 4000);
+        syncSendButton();
+    });
+}
+
+document.addEventListener('click', function(e) {
+    if (!isReportOpen()) return;
+    const wrap = document.querySelector('.report-wrap');
+    if (wrap && !wrap.contains(e.target)) closeReportPopover();
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && isReportOpen()) closeReportPopover();
+});
+
 // ssh helpers
 function copyField(elementId, btn) {
     const el = document.getElementById(elementId);
@@ -744,6 +1020,13 @@ document.addEventListener('DOMContentLoaded', function() {
     const navbar = document.querySelector('.navbar');
     if (navbar) {
         document.documentElement.style.setProperty('--navbar-height', navbar.offsetHeight + 'px');
+    }
+
+    // multi-line placeholder via JS, the attribute encoding for newlines is browser-inconsistent
+    const reportTextarea = document.getElementById('report-textarea');
+    if (reportTextarea) {
+        reportTextarea.placeholder = REPORT_PLACEHOLDER;
+        syncSendButton();
     }
 
     const modeParam = new URLSearchParams(window.location.search).get('mode');

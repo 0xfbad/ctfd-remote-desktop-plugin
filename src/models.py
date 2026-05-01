@@ -69,6 +69,15 @@ class CommandLogModel(db.Model):
     tty = db.Column(db.String(64), nullable=True)
 
 
+class DesktopReportModel(db.Model):
+    __tablename__ = "desktop_reports"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    username = db.Column(db.String(512), nullable=False)
+    timestamp = db.Column(db.Float(precision=53), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+
+
 class DesktopSettingsModel(db.Model):
     __tablename__ = "desktop_settings"
     key = db.Column(db.String(512), primary_key=True)

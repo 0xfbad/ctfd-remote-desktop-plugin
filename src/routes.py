@@ -268,6 +268,39 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         timer_status = container_manager.get_session_timer_status(user.id)
         return jsonify({"timer": _timer_dict(timer_status)})
 
+    @remote_desktop_bp.route("/remote-desktop/api/report", methods=["POST"])
+    @authed_only
+    @ratelimit(method="POST", limit=5, interval=3600)
+    def submit_report():
+        from .models import DesktopReportModel, get_setting
+
+        if not get_setting("remote_desktop_enabled", True):
+            return jsonify({"error": "Remote Desktop is currently disabled"}), 403
+
+        user = get_current_user()
+
+        if get_setting("require_verified") and not is_admin() and not is_verified():
+            return jsonify({"error": "Email verification required"}), 403
+
+        content = (request.form.get("content") or "").strip()
+        if not content:
+            return jsonify({"error": "Report cannot be empty"}), 400
+
+        # cap length so a single user can't dump megabytes via repeated posts under the rate limit
+        if len(content) > 5000:
+            return jsonify({"error": "Report is too long (5000 char max)"}), 400
+
+        report = DesktopReportModel(
+            user_id=user.id,
+            username=user.name,
+            timestamp=time.time(),
+            content=content,
+        )
+        db.session.add(report)
+        db.session.commit()
+
+        return jsonify({"success": True, "id": report.id})
+
     @remote_desktop_bp.route("/remote-desktop/api/cleanup", methods=["POST"])
     @admins_only
     def trigger_cleanup():
@@ -426,6 +459,58 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             metadata={"action": "clear_history", "sessions": session_count, "commands": cmd_count},
         )
         return jsonify({"success": True, "sessions": session_count, "commands": cmd_count})
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/reports", methods=["GET"])
+    @admins_only
+    def admin_list_reports():
+        from .models import DesktopReportModel
+
+        rows = DesktopReportModel.query.order_by(DesktopReportModel.timestamp.desc()).all()
+        target_users = {r.user_id: Users.query.filter_by(id=r.user_id).first() for r in rows}
+        reports = [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "username": _esc(r.username),
+                "timestamp": r.timestamp,
+                "content": _esc(r.content),
+                **_target_flags(target_users.get(r.user_id)),
+            }
+            for r in rows
+        ]
+        return jsonify({"reports": reports})
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/reports/<int:report_id>/delete", methods=["POST"])
+    @admins_only
+    def admin_delete_report(report_id: int):
+        from .models import DesktopReportModel
+
+        row = DesktopReportModel.query.filter_by(id=report_id).first()
+        if not row:
+            return jsonify({"error": "Report not found"}), 404
+        db.session.delete(row)
+        db.session.commit()
+        return jsonify({"success": True})
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/reports/clear", methods=["POST"])
+    @admins_only
+    def admin_clear_reports():
+        from .models import DesktopReportModel
+
+        count = DesktopReportModel.query.count()
+        DesktopReportModel.query.delete()
+        db.session.commit()
+
+        admin_user = get_current_user()
+        event_logger.log_event(
+            "admin_action",
+            f"cleared {count} reports",
+            user_id=admin_user.id if admin_user else None,
+            username=admin_user.name if admin_user else None,
+            level="warning",
+            metadata={"action": "clear_reports", "reports": count},
+        )
+        return jsonify({"success": True, "reports": count})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/images/matrix", methods=["GET"])
     @admins_only
