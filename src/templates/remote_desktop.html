@@ -20,6 +20,54 @@
         top: 0;
     }
 
+    {% if container_info %}
+    .workspace-container {
+        top: 0;
+    }
+
+    /* hide the navbar above the viewport, ::before is the hover hit zone
+       and ::after is the visible drawer-handle indicator. the dedicated
+       fullscreen button hides everything via inline display:none */
+    .navbar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 2000;
+        transform: translateY(-100%);
+        transition: transform 0.2s ease;
+    }
+    .navbar::before {
+        content: '';
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 42px;
+        height: 9px;
+    }
+    .navbar::after {
+        content: '';
+        position: absolute;
+        top: calc(100% + 3px);
+        left: 50%;
+        transform: translateX(-50%);
+        width: 36px;
+        height: 3px;
+        background: rgba(0,0,0,0.5);
+        box-shadow: 0 0 0 1px rgba(255,255,255,0.6);
+        border-radius: 2px;
+        pointer-events: none;
+        transition: opacity 0.2s ease;
+    }
+    .navbar:hover {
+        transform: translateY(0);
+    }
+    .navbar:hover::after {
+        opacity: 0;
+    }
+    {% endif %}
+
 
     .workspace-bar {
         background: #2b3035;
