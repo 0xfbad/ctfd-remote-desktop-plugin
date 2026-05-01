@@ -246,6 +246,7 @@ class DockerHostManager:
         memory: int | None = None,
         nano_cpus: int | None = None,
         hostname: str | None = None,
+        extra_hosts: dict[str, str] | None = None,
     ) -> ContainerResult:
         from .models import get_setting
 
@@ -275,6 +276,7 @@ class DockerHostManager:
                     cap_drop=cap_drop,
                     cap_add=cap_add,
                     pids_limit=pids_limit,
+                    extra_hosts=extra_hosts or {},
                 )
                 break
             except docker.errors.APIError as e:

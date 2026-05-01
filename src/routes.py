@@ -6,6 +6,7 @@ import logging
 import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only, ratelimit
@@ -194,7 +195,19 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             )
             return jsonify({"error": "Session creation already in progress"}), 400
 
-        result = container_manager.create_container(user.id)
+        # localhost in a container is the container itself, swap to
+        # host.docker.internal + extra_hosts so firefox can reach the host
+        parsed = urlparse(request.url_root)
+        if parsed.hostname in ("localhost", "127.0.0.1"):
+            container_host = "host.docker.internal"
+            extra_hosts = {"host.docker.internal": "host-gateway"}
+        else:
+            container_host = parsed.hostname or ""
+            extra_hosts = None
+        port_part = f":{parsed.port}" if parsed.port else ""
+        container_url = f"{parsed.scheme}://{container_host}{port_part}/"
+
+        result = container_manager.create_container(user.id, container_url, extra_hosts)
 
         if not result.get("success"):
             return jsonify({"error": result.get("error", "Creation failed")}), 500

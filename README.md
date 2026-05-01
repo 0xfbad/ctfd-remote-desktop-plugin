@@ -18,6 +18,12 @@ The workspace UI has three modes selectable from tabs in the bottom bar
 
 Desktop and Terminal go through the same nginx auth_request flow. SSH is a fallback for native terminal experience
 
+## Autologin
+
+The plugin mints a CTFd session for the user at spawn time and hands the cookie to the container along with the public CTFd URL. Firefox loads it at launch via autoconfig and the homepage points at `/challenges`
+
+If CTFd is reached at `localhost` (typical for dev), the plugin swaps to `host.docker.internal` with an `extra_hosts` entry so the container can reach the host. Public URLs pass through as-is
+
 ## Setup
 
 ### Install
@@ -92,7 +98,7 @@ docker context create server2 --docker "host=ssh://user@server2.example.com"
 
 ### Container image
 
-The image needs to be pre-pulled on every Docker host. It should expose VNC on 5900, noVNC on 6080, ttyd on 7682, and SSH on 22, and accept `CTFD_USERNAME`, `VNC_PASSWORD`, `RESOLUTION`, and `MAX_LIFETIME` env vars
+The image needs to be pre-pulled on every Docker host. It should expose VNC on 5900, noVNC on 6080, ttyd on 7682, and SSH on 22. Env vars consumed: `CTFD_USERNAME`, `VNC_PASSWORD`, `RESOLUTION`, `MAX_LIFETIME`, plus `CTFD_URL`, `CTFD_COOKIE_NAME`, `CTFD_COOKIE_VALUE` for autologin
 
 ## Configuration
 

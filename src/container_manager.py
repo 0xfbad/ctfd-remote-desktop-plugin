@@ -34,6 +34,25 @@ def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[typ
     return user, user.name if user else f"User {user_id}"
 
 
+def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str] | None:  # type: ignore[type-arg]
+    # CTFd uses server-side sessions, save_session writes to the cache
+    # backend so just signing the sid wouldn't populate it
+    from flask import session
+    from werkzeug.wrappers import Response
+    from CTFd.utils.security.auth import login_user
+
+    cookie_name = app.session_cookie_name
+    with app.test_request_context():
+        login_user(user)
+        resp = Response()
+        app.session_interface.save_session(app, session, resp)
+        for header in resp.headers.getlist("Set-Cookie"):
+            if header.startswith(f"{cookie_name}="):
+                value = header.split(f"{cookie_name}=", 1)[1].split(";", 1)[0]
+                return cookie_name, value
+    return None
+
+
 _USERNAME_RE = re.compile(r"[^a-z0-9_-]")
 _RESERVED_NAMES = {
     "root",
@@ -136,11 +155,22 @@ class ContainerManager:
         logger.warning(f"VNC not ready on {hostname}:{novnc_port} after {max_attempts} attempts")
         return False
 
-    def _create_container_background_wrapper(self, app: Flask, user_id: int) -> None:
+    def _create_container_background_wrapper(
+        self,
+        app: Flask,
+        user_id: int,
+        container_url: str,
+        extra_hosts: dict[str, str] | None,
+    ) -> None:
         with app.app_context():
-            self._create_container_background(user_id)
+            self._create_container_background(user_id, container_url, extra_hosts)
 
-    def _create_container_background(self, user_id: int) -> None:
+    def _create_container_background(
+        self,
+        user_id: int,
+        container_url: str,
+        extra_hosts: dict[str, str] | None,
+    ) -> None:
         logger.info(f"[BACKGROUND] creating container for user {user_id}")
 
         user, username = _display_name(user_id)
@@ -191,10 +221,22 @@ class ContainerManager:
                     "RESOLUTION": resolution,
                     "CTFD_USERNAME": container_username,
                     "MAX_LIFETIME": str(max_lifetime),
+                    "CTFD_URL": container_url,
                 }
 
                 if self._get_setting("command_logging_enabled"):
                     container_env["SHELL_LOGGING"] = "1"
+
+                from flask import current_app
+
+                if user is not None:
+                    minted = _mint_session_cookie(current_app._get_current_object(), user)  # type: ignore[attr-defined]
+                    if minted:
+                        cookie_name, cookie_value = minted
+                        container_env["CTFD_COOKIE_NAME"] = cookie_name
+                        container_env["CTFD_COOKIE_VALUE"] = cookie_value
+                    else:
+                        logger.warning(f"failed to mint session cookie for user {user_id}, autologin disabled")
 
                 result = self.host_manager.run_container(
                     context_name=context_name,
@@ -206,6 +248,7 @@ class ContainerManager:
                     shm_size=shm_size,
                     memory=memory_limit,
                     nano_cpus=nano_cpus,
+                    extra_hosts=extra_hosts,
                 )
             finally:
                 self.host_manager.release_semaphore(context_name)
@@ -338,7 +381,12 @@ class ContainerManager:
                 metadata={"error": str(e), "traceback": traceback.format_exc()},
             )
 
-    def create_container(self, user_id: int) -> ResultDict:
+    def create_container(
+        self,
+        user_id: int,
+        container_url: str,
+        extra_hosts: dict[str, str] | None = None,
+    ) -> ResultDict:
         from flask import current_app
 
         user, username = _display_name(user_id)
@@ -385,7 +433,7 @@ class ContainerManager:
         try:
             import gevent
 
-            gevent.spawn(self._create_container_background_wrapper, app, user_id)
+            gevent.spawn(self._create_container_background_wrapper, app, user_id, container_url, extra_hosts)
         except Exception as e:
             logger.error(f"failed to submit background task: {e}")
             logger.error(traceback.format_exc())
