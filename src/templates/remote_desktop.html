@@ -470,7 +470,8 @@
             </button>
             <div id="session-error" style="display:none; margin-top: 16px; padding: 12px 20px; background: #f8d7da; border: 1px solid #f5c6cb; border-radius: 4px; text-align: center;">
                 <p id="session-error-msg" style="color: #721c24; margin: 0;"></p>
-                <p id="session-error-detail" style="color: #856404; font-size: 12px; margin: 6px 0 0 0;"></p>
+                <p id="session-error-meta" style="color: #856404; font-size: 12px; margin: 6px 0 0 0;"></p>
+                <p id="session-error-detail" style="color: #721c24; font-size: 13px; margin: 4px 0 0 0;"></p>
             </div>
         </div>
         <div id="status-message" class="status-message hidden"></div>
@@ -500,13 +501,15 @@ function showStatusMessage(message, timeout = 3000) {
 function showSessionError(detail) {
     const el = document.getElementById('session-error');
     const msgEl = document.getElementById('session-error-msg');
+    const metaEl = document.getElementById('session-error-meta');
     const detailEl = document.getElementById('session-error-detail');
     if (!el) return;
     msgEl.textContent = 'Something went wrong on our end, please try again later or contact an administrator.';
     const d = new Date();
     const ts = d.toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true});
     const user = window.init.userName || 'unknown';
-    detailEl.textContent = user + ' at ' + ts + (detail ? ': ' + detail : '');
+    metaEl.textContent = user + ' at ' + ts;
+    detailEl.textContent = detail || 'unknown error';
     el.style.display = '';
 }
 
@@ -588,7 +591,7 @@ function checkStatus() {
                 startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
             }
 
-            showSessionError(data.error || 'Unknown error');
+            showSessionError(data.error || data.message);
         } else {
             const message = data.message || 'Creating container...';
 
@@ -628,12 +631,19 @@ function startSession() {
         if (ok && data.status === 'creating') {
             hideSessionError();
             pollCreationStatus();
+        } else if (data.error === 'Session creation already in progress') {
+            // session is being created already, latch onto the existing creation
+            hideSessionError();
+            pollCreationStatus();
+        } else if (data.error === 'Session already exists') {
+            // page state is stale, reload to show the active session
+            reloadPage();
         } else {
             if (startBtn) {
                 startBtn.disabled = false;
                 startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
             }
-            showSessionError(data.error);
+            showSessionError(data.error || data.message);
         }
     })
     .catch(error => {
