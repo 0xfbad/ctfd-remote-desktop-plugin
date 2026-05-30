@@ -499,7 +499,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         from .models import DesktopReportModel
 
         rows = DesktopReportModel.query.order_by(DesktopReportModel.timestamp.desc()).all()
-        target_users = {r.user_id: Users.query.filter_by(id=r.user_id).first() for r in rows}
+        user_ids = {r.user_id for r in rows}
+        users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
+        target_users = {r.user_id: users_by_id.get(r.user_id) for r in rows}
         reports = [
             {
                 "id": r.id,
@@ -868,11 +870,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         total = query.count()
         logs = query.order_by(CommandLogModel.timestamp.desc()).offset(offset).limit(limit).all()
 
-        user_map = {}
-        for log in logs:
-            if log.user_id not in user_map:
-                u = Users.query.filter_by(id=log.user_id).first()
-                user_map[log.user_id] = _user_info(u, log.user_id)
+        user_ids = {log.user_id for log in logs}
+        users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
+        user_map = {uid: _user_info(users_by_id.get(uid), uid) for uid in user_ids}
 
         return jsonify(
             {
@@ -916,12 +916,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         user_stats = defaultdict(lambda: {"total": 0, "sessions": set(), "commands": set(), "username": ""})
 
-        user_map = {}
-        for row in rows:
-            if row.user_id not in user_map:
-                user = Users.query.filter_by(id=row.user_id).first()
-                user_map[row.user_id] = _user_info(user, row.user_id)
+        user_ids = {row.user_id for row in rows}
+        users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
+        user_map = {uid: _user_info(users_by_id.get(uid), uid) for uid in user_ids}
 
+        for row in rows:
             entry = user_stats[row.user_id]
             entry["total"] += 1
             entry["user_info"] = user_map[row.user_id]
