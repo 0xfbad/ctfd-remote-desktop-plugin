@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
-from CTFd.utils.decorators import authed_only, admins_only, ratelimit
+from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.utils.user import get_current_user, is_admin, is_verified
 from .container_manager import ContainerManager, ContainerInfoDict, TimerStatusDict
 from .orchestrator import Orchestrator
@@ -17,6 +17,7 @@ from .event_logger import event_logger, EventDict
 from .models import user_flags, _esc
 from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
 from .exceptions import HostsUnavailableException
+from .utils import ratelimit_per_user
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
     @remote_desktop_bp.route("/remote-desktop/api/create", methods=["POST"])
     @authed_only
-    @ratelimit(method="POST", limit=5, interval=300)
+    @ratelimit_per_user(method="POST", limit=5, interval=300)
     def create_session():
         from .models import get_setting
 
@@ -285,7 +286,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
     @remote_desktop_bp.route("/remote-desktop/api/extend", methods=["POST"])
     @authed_only
-    @ratelimit(method="POST", limit=10, interval=300)
+    @ratelimit_per_user(method="POST", limit=10, interval=300)
     def extend_session():
         user = get_current_user()
 
@@ -301,7 +302,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
     @remote_desktop_bp.route("/remote-desktop/api/report", methods=["POST"])
     @authed_only
-    @ratelimit(method="POST", limit=5, interval=3600)
+    @ratelimit_per_user(method="POST", limit=5, interval=3600)
     def submit_report():
         from .models import DesktopReportModel, get_setting
 
