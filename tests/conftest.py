@@ -39,6 +39,7 @@ _stub_modules = [
     "apscheduler.schedulers.gevent",
     "gevent",
     "gevent.monkey",
+    "gevent.threadpool",
     "markupsafe",
 ]
 
@@ -105,6 +106,26 @@ _apscheduler_gevent.GeventScheduler = MagicMock()
 # gevent stubs
 sys.modules["gevent.monkey"].get_original = lambda mod, attr: __import__(mod).__dict__[attr]
 sys.modules["gevent"].spawn = MagicMock()
+
+# gevent threadpool stub: ThreadPool.apply runs the callable synchronously so tests
+# exercise the wrapped code paths without needing a real hub
+_gevent = sys.modules["gevent"]
+_gevent_threadpool = sys.modules["gevent.threadpool"]
+_gevent_monkey = sys.modules["gevent.monkey"]
+
+
+class _StubThreadPool:
+    def __init__(self, maxsize=None):
+        pass
+
+    def apply(self, fn, args=None, kwds=None):
+        return fn(*(args or ()), **(kwds or {}))
+
+
+_gevent_threadpool.ThreadPool = _StubThreadPool
+_gevent_monkey.is_module_patched = lambda name: True
+_gevent.threadpool = _gevent_threadpool
+_gevent.monkey = _gevent_monkey
 
 # register repo root as a package named "plugin" so relative imports resolve
 repo_root = Path(__file__).resolve().parent.parent

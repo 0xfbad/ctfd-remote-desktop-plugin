@@ -7,6 +7,8 @@ import threading
 import logging
 from datetime import datetime
 import docker
+import gevent.monkey
+import gevent.threadpool
 import paramiko
 
 from .models import DesktopDockerContextModel
@@ -16,6 +18,11 @@ logger = logging.getLogger(__name__)
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
+
+# docker SDK HTTP read timeout for control plane ops
+DEFAULT_CLIENT_TIMEOUT = 10
+# per-context pool size, caps concurrent in-flight blocking calls per host
+THREADPOOL_SIZE = 4
 
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
@@ -123,8 +130,31 @@ class DockerHostManager:
         self._clients: dict[str, docker.DockerClient] = {}
         self._config_generation: int = 0
         self._client_generation: int = -1
-        self._lock = threading.Lock()
+        # reentrant so a wrapped op can re-enter lock-protected helpers without
+        # tripping a deadlock if some future caller ever holds the lock across _call
+        self._lock: threading.RLock = threading.RLock()
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
+        # per-context threadpool keeps paramiko blocking off the gevent hub,
+        # so one hung host can't stop the worker from serving other requests
+        self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
+
+    def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
+        with self._lock:
+            pool = self._threadpools.get(context_name)
+            if pool is None:
+                pool = gevent.threadpool.ThreadPool(maxsize=THREADPOOL_SIZE)
+                self._threadpools[context_name] = pool
+            return pool
+
+    def _call(self, context_name: str, fn, *args, **kwargs):
+        # gevent.threadpool.ThreadPool.apply needs the gevent hub, which only
+        # exists when monkey-patching is active (gunicorn worker). during
+        # flask db upgrade or other cli paths the hub isn't initialized and
+        # apply() hangs in futex, so run inline in those cases
+        if not gevent.monkey.is_module_patched("threading"):
+            return fn(*args, **kwargs)
+        pool = self._get_threadpool(context_name)
+        return pool.apply(fn, args=args, kwds=kwargs)
 
     def _get_client(self, context_name: str) -> docker.DockerClient:
         with self._lock:
@@ -144,7 +174,7 @@ class DockerHostManager:
             if not url:
                 raise Exception(f"no client for context '{context_name}'")
 
-            client = docker.DockerClient(base_url=url, timeout=10)
+            client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
             self._clients[context_name] = client
             return client
 
@@ -168,7 +198,7 @@ class DockerHostManager:
 
         self._semaphores = new_semaphores
 
-    def acquire_semaphore(self, context_name: str, timeout: int = 30) -> bool:
+    def acquire_semaphore(self, context_name: str, timeout: int = 10) -> bool:
         sem = self._semaphores.get(context_name)
         if sem is None:
             return True
@@ -196,15 +226,32 @@ class DockerHostManager:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
 
+            def _check(endpoint=endpoint):
+                client = None
+                try:
+                    client = docker.DockerClient(base_url=endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
+                    client.ping()
+                    return None
+                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
+                    return e
+                finally:
+                    if client:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+
             try:
-                client = docker.DockerClient(base_url=endpoint)
-                client.ping()
-                client.close()
+                err = self._call(ctx.context_name, _check)
+            except Exception as e:
+                err = e
+
+            if err is None:
                 new_configs[ctx.context_name] = endpoint
                 new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
-                logger.error(f"could not connect to context '{ctx.context_name}': {e}")
+            else:
+                logger.error(f"could not connect to context '{ctx.context_name}': {err}")
 
         with self._lock:
             self._context_configs = new_configs
@@ -227,13 +274,16 @@ class DockerHostManager:
         return list(self._context_configs.keys())
 
     def ping(self, context_name: str) -> bool:
-        try:
-            client = self._get_client(context_name)
-            client.ping()
-            return True
-        except Exception:
-            self._clear_client(context_name)
-            return False
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                client.ping()
+                return True
+            except Exception:
+                self._clear_client(context_name)
+                return False
+
+        return self._call(context_name, _do)
 
     def run_container(
         self,
@@ -250,7 +300,6 @@ class DockerHostManager:
     ) -> ContainerResult:
         from .models import get_setting
 
-        client = self._get_client(context_name)
         pids_limit = get_setting("pids_limit")
         cap_drop = [c.strip() for c in str(get_setting("cap_drop")).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(get_setting("cap_add")).split(",") if c.strip()]
@@ -258,135 +307,168 @@ class DockerHostManager:
         import secrets
 
         _sysrand = secrets.SystemRandom()
-        last_err: Exception | None = None
-        for _ in range(50):
-            port_bindings = {p: _sysrand.randint(40000, 59999) for p in ports}
+
+        def _do():
+            client = self._get_client(context_name)
+            last_err: Exception | None = None
+            container = None
+            for _ in range(50):
+                port_bindings = {p: _sysrand.randint(40000, 59999) for p in ports}
+                try:
+                    container = client.containers.run(
+                        image,
+                        name=name,
+                        hostname=hostname or name,
+                        detach=True,
+                        auto_remove=True,
+                        environment=env,
+                        ports=port_bindings,
+                        shm_size=shm_size,
+                        mem_limit=memory,
+                        nano_cpus=nano_cpus,
+                        cap_drop=cap_drop,
+                        cap_add=cap_add,
+                        pids_limit=pids_limit,
+                        extra_hosts=extra_hosts or {},
+                    )
+                    break
+                except docker.errors.APIError as e:
+                    if "port is already allocated" in str(e) or "address already in use" in str(e):
+                        last_err = e
+                        continue
+                    self._clear_client(context_name)
+                    raise
+                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                    self._clear_client(context_name)
+                    raise
+            else:
+                raise docker.errors.DockerException(f"failed to find available ports after retries: {last_err}")
+
+            port_map: dict[str, int] = {}
+            for attempt in range(5):
+                container.reload()
+                network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+
+                all_mapped = True
+                for p in ports:
+                    bindings = network_ports.get(p)
+                    if bindings and len(bindings) > 0:
+                        port_map[p] = int(bindings[0]["HostPort"])
+                    else:
+                        all_mapped = False
+
+                if all_mapped and port_map:
+                    break
+
+                if attempt < 4:
+                    time.sleep(0.3)
+
+            if not port_map:
+                raise Exception(f"could not get port mappings for {name}")
+
+            return {
+                "container_id": container.id,
+                "container_name": name,
+                "ports": port_map,
+            }
+
+        return self._call(context_name, _do)
+
+    def stop_container(self, context_name: str, container_name: str, timeout: int = 10) -> None:
+        def _do():
+            client = self._get_client(context_name)
             try:
-                container = client.containers.run(
-                    image,
-                    name=name,
-                    hostname=hostname or name,
-                    detach=True,
-                    auto_remove=True,
-                    environment=env,
-                    ports=port_bindings,
-                    shm_size=shm_size,
-                    mem_limit=memory,
-                    nano_cpus=nano_cpus,
-                    cap_drop=cap_drop,
-                    cap_add=cap_add,
-                    pids_limit=pids_limit,
-                    extra_hosts=extra_hosts or {},
-                )
-                break
-            except docker.errors.APIError as e:
-                if "port is already allocated" in str(e) or "address already in use" in str(e):
-                    last_err = e
-                    continue
-                self._clear_client(context_name)
-                raise
+                container = client.containers.get(container_name)
+                container.stop(timeout=timeout)
+            except docker.errors.NotFound:
+                logger.debug(f"container {container_name} already removed")
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
-        else:
-            raise docker.errors.DockerException(f"failed to find available ports after retries: {last_err}")
 
-        port_map: dict[str, int] = {}
-        for attempt in range(5):
-            container.reload()
-            network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
-
-            all_mapped = True
-            for p in ports:
-                bindings = network_ports.get(p)
-                if bindings and len(bindings) > 0:
-                    port_map[p] = int(bindings[0]["HostPort"])
-                else:
-                    all_mapped = False
-
-            if all_mapped and port_map:
-                break
-
-            if attempt < 4:
-                time.sleep(0.3)
-
-        if not port_map:
-            raise Exception(f"could not get port mappings for {name}")
-
-        return {
-            "container_id": container.id,
-            "container_name": name,
-            "ports": port_map,
-        }
-
-    def stop_container(self, context_name: str, container_name: str, timeout: int = 10) -> None:
-        client = self._get_client(context_name)
-        try:
-            container = client.containers.get(container_name)
-            container.stop(timeout=timeout)
-        except docker.errors.NotFound:
-            logger.debug(f"container {container_name} already removed")
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-            self._clear_client(context_name)
-            raise
+        return self._call(context_name, _do)
 
     def check_image(self, context_name: str, image: str) -> bool:
-        try:
-            client = self._get_client(context_name)
-            client.images.get(image)
-            return True
-        except Exception:
-            return False
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                client.images.get(image)
+                return True
+            except docker.errors.ImageNotFound:
+                return False
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                return False
+            except Exception:
+                self._clear_client(context_name)
+                return False
+
+        return self._call(context_name, _do)
 
     def get_image_info(self, context_name: str, image: str) -> ImageInfo | None:
-        try:
-            client = self._get_client(context_name)
-            img = client.images.get(image)
-            attrs = img.attrs or {}
-            size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
-            raw = attrs.get("Created", "")[:19]
-            # images built with reproducible timestamps (nix, bazel) report 1980-01-01,
-            # fall back to LastTagTime which is when it was last built/pulled locally
-            if raw.startswith("1980"):
-                last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
-                if last_tag:
-                    raw = last_tag[:19]
+        def _do():
             try:
-                created = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").strftime(
-                    "%b %-d, %Y %-I:%M:%S %p"
-                )
-            except (ValueError, AttributeError):
-                created = raw.replace("T", " ")
-            short_id = img.short_id.replace("sha256:", "")
-            return {"size_mb": size_mb, "created": created, "id": short_id}
-        except Exception:
-            return None
+                client = self._get_client(context_name)
+                img = client.images.get(image)
+                attrs = img.attrs or {}
+                size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
+                raw = attrs.get("Created", "")[:19]
+                # images built with reproducible timestamps (nix, bazel) report 1980-01-01,
+                # fall back to LastTagTime which is when it was last built/pulled locally
+                if raw.startswith("1980"):
+                    last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
+                    if last_tag:
+                        raw = last_tag[:19]
+                try:
+                    created = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").strftime(
+                        "%b %-d, %Y %-I:%M:%S %p"
+                    )
+                except (ValueError, AttributeError):
+                    created = raw.replace("T", " ")
+                short_id = img.short_id.replace("sha256:", "")
+                return {"size_mb": size_mb, "created": created, "id": short_id}
+            except docker.errors.ImageNotFound:
+                return None
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                return None
+            except Exception:
+                self._clear_client(context_name)
+                return None
+
+        return self._call(context_name, _do)
 
     def exec_in_container(self, context_name: str, container_name_or_id: str, cmd: list[str]) -> tuple[int, str]:
-        try:
-            client = self._get_client(context_name)
-            container = client.containers.get(container_name_or_id)
-            exit_code, output = container.exec_run(cmd)
-            if isinstance(output, bytes):
-                output = output.decode("utf-8", errors="replace")
-            return exit_code, output
-        except docker.errors.NotFound:
-            return -1, ""
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-            self._clear_client(context_name)
-            return -1, ""
-        except Exception:
-            self._clear_client(context_name)
-            return -1, ""
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                container = client.containers.get(container_name_or_id)
+                exit_code, output = container.exec_run(cmd)
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                return exit_code, output
+            except docker.errors.NotFound:
+                return -1, ""
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                return -1, ""
+            except Exception:
+                self._clear_client(context_name)
+                return -1, ""
+
+        return self._call(context_name, _do)
 
     def is_container_running(self, context_name: str, container_id: str) -> bool:
-        try:
-            client = self._get_client(context_name)
-            container = client.containers.get(container_id)
-            return container.status == "running"
-        except docker.errors.NotFound:
-            return False
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
-            # ssh channel failure surfaces as raw EOFError when MaxSessions is exhausted
-            self._clear_client(context_name)
-            raise
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                container = client.containers.get(container_id)
+                return container.status == "running"
+            except docker.errors.NotFound:
+                return False
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
+                # ssh channel failure surfaces as raw EOFError when MaxSessions is exhausted
+                self._clear_client(context_name)
+                raise
+
+        return self._call(context_name, _do)
