@@ -161,6 +161,7 @@ def _load_module(name):
 # load in dependency order (leaf modules first)
 _load_module("models")
 _load_module("event_logger")
+_load_module("event_bus")
 _load_module("docker_host_manager")
 _load_module("orchestrator")
 _load_module("container_manager")

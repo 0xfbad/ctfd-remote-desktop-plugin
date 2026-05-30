@@ -18,6 +18,8 @@ from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SO
 from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
+from .event_logger import event_logger
+from . import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,8 @@ def load(app: Flask) -> None:
         _reconcile_containers(app, host_manager, orchestrator)
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
+
+    event_bus.init(app, on_message=event_logger._deliver_local)
 
     remote_desktop_bp = create_routes(container_manager, orchestrator)
 

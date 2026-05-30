@@ -49,8 +49,10 @@ class EventLogger:
         metadata: dict[str, int | float | str | bool | None] | None = None,
         user_flags: dict[str, bool] | None = None,
     ) -> EventDict:
+        from . import event_bus
+
         with self.lock:
-            event_id = self._next_id
+            event_id = f"{event_bus.WORKER_ID}:{self._next_id}"
             self._next_id += 1
 
         if user_flags is None:
@@ -76,6 +78,30 @@ class EventLogger:
             "metadata": _esc_deep(metadata) if metadata else {},
         }
 
+        self._deliver_local(event)
+
+        try:
+            from . import event_bus
+
+            event_bus.publish(event)
+        except Exception:
+            logger.warning("event bus publish failed", exc_info=True)
+
+        log_msg = f"[{event_type}] {message}"
+        if username:
+            log_msg = f"[{event_type}] User {username} (ID: {user_id}): {message}"
+
+        if level == "error":
+            logger.error(log_msg)
+        elif level == "warning":
+            logger.warning(log_msg)
+        else:
+            logger.info(log_msg)
+
+        return event
+
+    def _deliver_local(self, event: EventDict) -> None:
+        """append to local deque and fire local listeners. used by both log_event and the redis subscriber"""
         with self.lock:
             self.events.append(event)
             listeners = self.listeners[:]
@@ -93,19 +119,6 @@ class EventLogger:
                 for listener in failed:
                     if listener in self.listeners:
                         self.listeners.remove(listener)
-
-        log_msg = f"[{event_type}] {message}"
-        if username:
-            log_msg = f"[{event_type}] User {username} (ID: {user_id}): {message}"
-
-        if level == "error":
-            logger.error(log_msg)
-        elif level == "warning":
-            logger.warning(log_msg)
-        else:
-            logger.info(log_msg)
-
-        return event
 
     def get_recent_events(self, limit: int = 100) -> list[EventDict]:
         with self.lock:
