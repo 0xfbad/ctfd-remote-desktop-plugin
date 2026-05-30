@@ -105,7 +105,7 @@ def test_create_rejects_existing_session(container_manager):
         patch("container_manager.DesktopContainerInfoModel", mock_model),
         patch("container_manager.Users", mock_users),
     ):
-        result = cm.create_container(1)
+        result = cm.create_container(1, "http://test/", None)
 
     assert not result["success"]
     assert "already exists" in result["error"]
