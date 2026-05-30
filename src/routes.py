@@ -347,7 +347,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/user-flags", methods=["GET"])
     @admins_only
     def admin_user_flags():
-        rows = Users.query.all()
+        # cap at 1000 to avoid scanning the whole users table on large instances
+        rows = Users.query.limit(1000).all()
         flags = {}
         for u in rows:
             f = user_flags(u)
