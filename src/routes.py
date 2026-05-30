@@ -11,7 +11,7 @@ from flask import Blueprint, request, jsonify, render_template, Response, stream
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.utils.user import get_current_user, is_admin, is_verified
-from .container_manager import ContainerManager, ContainerInfoDict, TimerStatusDict
+from .container_manager import ContainerManager, ContainerInfoDict, TimerDict, TimerStatusDict
 from .orchestrator import Orchestrator
 from .event_logger import event_logger, EventDict
 from .models import user_flags, _esc
@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 UserInfoDict = dict[str, str | bool]
-SessionDict = dict[str, float | str | dict[str, bool | int] | None]
-TimerDisplayDict = dict[str, bool | int]
+SessionDict = dict[str, float | str | TimerDict | None]
 
 
 def _user_info(user: Users | None, fallback_id: int | None = None) -> UserInfoDict:  # type: ignore[type-arg]
@@ -63,7 +62,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         static_url_path="/remote-desktop/static",
     )
 
-    def _timer_dict(timer_status: TimerStatusDict) -> TimerDisplayDict | None:
+    def _timer_dict(timer_status: TimerStatusDict) -> TimerDict | None:
         if not timer_status.get("success"):
             return None
         return {
