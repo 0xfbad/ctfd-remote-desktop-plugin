@@ -24,7 +24,7 @@ from .models import (
 from .event_logger import event_logger
 from .docker_host_manager import DockerHostManager, parse_size
 from .orchestrator import Orchestrator
-from .exceptions import HostsUnavailableException, RemoteDesktopException  # noqa: F401
+from .exceptions import HostsUnavailableException
 
 logger = logging.getLogger(__name__)
 
