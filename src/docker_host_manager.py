@@ -12,6 +12,7 @@ import gevent.threadpool
 import paramiko
 
 from .models import DesktopDockerContextModel
+from .exceptions import HostsUnavailableException
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,10 @@ class DockerHostManager:
 
             url = self._context_configs.get(context_name)
             if not url:
-                raise Exception(f"no client for context '{context_name}'")
+                # typed so _verify_or_reap and route handlers can map this to a
+                # graceful 503 instead of a generic 500 when a stale row points
+                # at a context that's been unloaded
+                raise HostsUnavailableException(f"no client for context '{context_name}'")
 
             client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
             self._clients[context_name] = client
