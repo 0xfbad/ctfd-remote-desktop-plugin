@@ -150,9 +150,6 @@ def load(app: Flask) -> None:
 
     scheduler = GeventScheduler()
 
-    # wrap periodic jobs so they run within app context. must be defined before
-    # add_job because apscheduler captures the function reference at registration
-    # time, reassigning the bound methods afterward has no effect on scheduled jobs
     def _with_app_ctx(fn: Callable[[], None]) -> Callable[[], None]:
         def wrapper() -> None:
             with app.app_context():
@@ -171,7 +168,6 @@ def load(app: Flask) -> None:
         id="expiry_check",
     )
 
-    # health_check needs app context for DB-backed event logging
     scheduler.add_job(
         func=_with_app_ctx(orchestrator.health_check),
         trigger="interval",
@@ -199,8 +195,7 @@ def load(app: Flask) -> None:
         try:
             scheduler.shutdown(wait=False)
         except (SchedulerNotRunningError, RuntimeError):
-            # atexit fires from a job greenlet, apscheduler may raise
-            # "cannot join thread before it is started", swallow it
+            # atexit can fire from a job greenlet before its thread started
             pass
 
     atexit.register(_safe_shutdown_scheduler)

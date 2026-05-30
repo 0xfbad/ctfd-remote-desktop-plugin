@@ -769,7 +769,6 @@ function syncWithServer() {
     .catch(error => { console.error('Sync error:', error); });
 }
 
-// mode switching
 function switchMode(mode, tabEl) {
     document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
     tabEl.classList.add('active');
@@ -803,7 +802,6 @@ function switchMode(mode, tabEl) {
     }
 }
 
-// fullscreen
 let isFullscreen = false;
 
 function setFullscreen(on) {
@@ -1039,7 +1037,6 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape' && isReportOpen()) closeReportPopover();
 });
 
-// ssh helpers
 function copyField(elementId, btn) {
     const el = document.getElementById(elementId);
     if (!el) return;

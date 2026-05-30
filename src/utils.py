@@ -12,12 +12,8 @@ def _response_status(response):
 
 
 def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_user", count_4xx=True):
-    # ctfd's @ratelimit keys on ip, which falsely throttles students who share an
-    # egress ip (campus wifi, nat, vpn). this version keys on user_id when authed
-    # and falls back to ip otherwise. also adds retry-after for polite client backoff.
-    # count_4xx=False switches to post-counting so validation rejections (e.g. empty
-    # report body) don't burn the user's budget without ever surfacing the friendlier
-    # 400 message. only safe on endpoints where the 4xx path is cheap server-side
+    # keyed on user_id (not ip) so shared-egress students aren't throttled together.
+    # count_4xx=False post-counts so cheap 4xx rejections don't burn the user's budget
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):

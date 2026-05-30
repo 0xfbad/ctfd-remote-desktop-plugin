@@ -651,6 +651,10 @@
 	integrity="sha384-F07Cpw5v8spSU0H113F33m2NQQ/o6GqPTnTjf45ssG4Q6q58ZwhxBiQtIaqvnSpR"
 	crossorigin="anonymous"></script>
 <script>
+	// values returned by the dashboard API (username, command, target, context names,
+	// content, host, tool, container_name, docker_context) are pre-escaped server-side
+	// via markupsafe, so they go straight into innerHTML without escapeHtml here
+
 	let autoRefreshInterval = null;
 	let eventSource = null;
 	let maxEvents = 500;
@@ -753,7 +757,6 @@
 			_userFlags[uid] = {is_admin: obj.is_admin, is_hidden: obj.is_hidden, is_banned: obj.is_banned};
 		}
 		const flags = _userFlags[uid] || obj;
-		// username is pre-escaped server-side with markupsafe
 		const name = obj.username || `User ${parseInt(uid)}`;
 		return `<a href="/admin/users/${parseInt(uid)}">${name}</a>${userBadges(flags)}`;
 	}
@@ -817,7 +820,6 @@
 					if (m.target_id && (m.target_is_admin || m.target_is_hidden || m.target_is_banned)) {
 						_userFlags[m.target_id] = {is_admin: m.target_is_admin, is_hidden: m.target_is_hidden, is_banned: m.target_is_banned};
 					}
-					// m.target is pre-escaped server-side
 					const target = m.target_id
 						? '<a href="/admin/users/' + parseInt(m.target_id) + '">' + (m.target || '') + '</a>' + userBadges(_userFlags[m.target_id] || {})
 						: (m.target || '');
@@ -857,7 +859,6 @@
 		const details = formatEventDetails(event);
 		const detailsText = details.replace(/<[^>]*>/g, '');
 
-		// event data (username, message, metadata) is pre-escaped server-side
 		row.innerHTML = `
 			<td class="log-time">${escapeHtml(formatTimestamp(event.timestamp))}</td>
 			<td class="log-user">${event.username ? userLink({user_id: event.user_id, username: event.username}, event.user_id) : ''}</td>
@@ -902,8 +903,6 @@
 		if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
 		return `${minutes}m ${secs}s`;
 	}
-
-	// containers
 
 	function refreshContainers() {
 		fetch('/remote-desktop/dashboard/api/containers', {
@@ -950,7 +949,6 @@
 			reportsById[r.id] = r;
 			const row = document.createElement('tr');
 			row.dataset.reportId = r.id;
-			// username and content are pre-escaped server-side with markupsafe
 			const titleText = r.content.replace(/<[^>]*>/g, '');
 			row.innerHTML = `
 				<td class="log-time">${escapeHtml(formatTimestamp(r.timestamp))}</td>
@@ -965,7 +963,6 @@
 		const r = reportsById[id];
 		if (!r) return;
 		currentReportId = id;
-		// content and username are pre-escaped server-side
 		document.getElementById('report-modal-user').innerHTML = userLink(r);
 		document.getElementById('report-modal-time').textContent = formatTimestamp(r.timestamp);
 		document.getElementById('report-modal-content').innerHTML = r.content;
@@ -1038,7 +1035,6 @@
 						  timeRemaining <= 0 ? 'EXPIRED' :
 						  timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
 
-			// container_name, docker_context, username are pre-escaped server-side
 			const row = `
 				<tr>
 					<td class="log-user">${userLink(container)}</td>
@@ -1130,8 +1126,6 @@
 		});
 	}
 
-	// purge all
-
 	function clearHistory() {
 		if (!confirm('Clear all session history? This resets stats and charts.')) return;
 		const fd = new FormData();
@@ -1176,8 +1170,6 @@
 		})
 		.catch(() => { btn.disabled = false; });
 	}
-
-	// stats
 
 	let topUsersChart = null;
 	let durationDistChart = null;
@@ -1249,7 +1241,6 @@
 						const p = params[0];
 						const user = data.users.find(u => u.username === p.name) || {};
 						const uid = user.user_id;
-						// username is pre-escaped server-side
 						const nameHtml = uid
 							? '<a href="/admin/users/' + parseInt(uid) + '" style="color:inherit;text-decoration:underline">' + p.name + '</a>' + userBadges(user)
 							: p.name;
@@ -1342,7 +1333,6 @@
 					trigger: 'axis',
 					axisPointer: { type: 'shadow' },
 					formatter: function(params) {
-						// host is pre-escaped server-side
 						const host = params[0].name;
 						const sessions = params[0].value;
 						const h = hosts.find(h => h.host === host) || {};
@@ -1449,8 +1439,6 @@
 		refreshHeatmap();
 	}
 
-	// command log stats
-
 	function refreshCommandFeed() {
 		fetch('/remote-desktop/dashboard/api/command-logs?limit=50', {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
@@ -1465,7 +1453,6 @@
 			if (!logs.length) return;
 			if (empty) empty.remove();
 
-			// command, username are pre-escaped server-side
 			feed.innerHTML = logs.map(log => {
 				const exitBadge = log.exit_code === 0 ? 'badge-success' :
 								  log.exit_code !== null ? 'badge-danger' : 'badge-secondary';
@@ -1526,7 +1513,6 @@
 				tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No command data</td></tr>';
 				return;
 			}
-			// username is pre-escaped server-side
 			tbody.innerHTML = users.map(u => `
 				<tr>
 					<td class="log-user">${userLink(u)}</td>
@@ -1555,7 +1541,6 @@
 					formatter: function(params) {
 						const p = params[0];
 						const t = tools.find(t => t.tool === p.name) || {};
-						// tool name is pre-escaped server-side
 						return p.name + '<br/>' +
 							p.value + ' uses' + (t.errors ? '<br/>' + t.errors + ' errors' : '');
 					}
@@ -1661,7 +1646,6 @@
 		cmdHistoryUserId = userId;
 		cmdHistoryOffset = 0;
 		const flags = _userFlags[userId] || {};
-		// username is pre-escaped server-side
 		document.getElementById('cmd-history-username').innerHTML =
 			'<a href="/admin/users/' + parseInt(userId) + '">' + username + '</a>' + userBadges(flags);
 		loadCmdHistory();
@@ -1682,7 +1666,6 @@
 			if (!logs.length) {
 				tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No commands</td></tr>';
 			} else {
-				// command, cwd are pre-escaped server-side
 				tbody.innerHTML = logs.map(log => {
 					const exitClass = log.exit_code === 0 ? 'text-success' : (log.exit_code !== null ? 'text-danger' : '');
 					const exitTip = exitCodeTitle(log.exit_code);

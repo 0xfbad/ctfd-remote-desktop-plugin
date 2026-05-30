@@ -131,12 +131,11 @@ class DockerHostManager:
         self._clients: dict[str, docker.DockerClient] = {}
         self._config_generation: int = 0
         self._client_generation: int = -1
-        # reentrant so a wrapped op can re-enter lock-protected helpers without
-        # tripping a deadlock if some future caller ever holds the lock across _call
+        # reentrant so wrapped ops can re-enter lock-protected helpers
         self._lock: threading.RLock = threading.RLock()
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
-        # per-context threadpool keeps paramiko blocking off the gevent hub,
-        # so one hung host can't stop the worker from serving other requests
+        # per-context pool isolates blocking paramiko calls so one hung host
+        # doesn't starve the others
         self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
 
     def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
@@ -148,10 +147,8 @@ class DockerHostManager:
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
-        # gevent.threadpool.ThreadPool.apply needs the gevent hub, which only
-        # exists when monkey-patching is active (gunicorn worker). during
-        # flask db upgrade or other cli paths the hub isn't initialized and
-        # apply() hangs in futex, so run inline in those cases
+        # pool.apply needs the gevent hub. cli paths (flask db upgrade) have no
+        # hub and apply() hangs in futex, so fall back to inline there
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
         pool = self._get_threadpool(context_name)
@@ -173,9 +170,7 @@ class DockerHostManager:
 
             url = self._context_configs.get(context_name)
             if not url:
-                # typed so _verify_or_reap and route handlers can map this to a
-                # graceful 503 instead of a generic 500 when a stale row points
-                # at a context that's been unloaded
+                # typed so callers can map a stale-row miss to a 503 instead of a 500
                 raise HostsUnavailableException(f"no client for context '{context_name}'")
 
             client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
@@ -417,8 +412,8 @@ class DockerHostManager:
                 attrs = img.attrs or {}
                 size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
                 raw = attrs.get("Created", "")[:19]
-                # images built with reproducible timestamps (nix, bazel) report 1980-01-01,
-                # fall back to LastTagTime which is when it was last built/pulled locally
+                # reproducible-build images (nix, bazel) report 1980-01-01,
+                # fall back to LastTagTime for a meaningful date
                 if raw.startswith("1980"):
                     last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                     if last_tag:
@@ -471,7 +466,7 @@ class DockerHostManager:
             except docker.errors.NotFound:
                 return False
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
-                # ssh channel failure surfaces as raw EOFError when MaxSessions is exhausted
+                # raw EOFError surfaces when ssh MaxSessions is exhausted
                 self._clear_client(context_name)
                 raise
 
