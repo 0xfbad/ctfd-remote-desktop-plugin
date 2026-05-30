@@ -107,6 +107,18 @@ class ContainerManager:
         self.creation_status: dict[int, CreationStatusDict] = {}
         self.lock = Lock()
         self._log_offsets: dict[str, int] = {}
+        # per-user locks serialize destroy_container so concurrent admin-kill +
+        # user-destroy don't produce duplicate history rows for one teardown
+        self._destroy_locks: dict[int, Lock] = {}
+        self._destroy_locks_lock = Lock()
+
+    def _get_destroy_lock(self, user_id: int) -> Lock:
+        with self._destroy_locks_lock:
+            lock = self._destroy_locks.get(user_id)
+            if lock is None:
+                lock = Lock()
+                self._destroy_locks[user_id] = lock
+            return lock
 
     def _get_setting(self, key: str) -> SettingValue:
         from .models import get_setting
@@ -456,46 +468,58 @@ class ContainerManager:
     ) -> ResultDict:
         _user, username = _display_name(user_id)
 
-        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+        # per-user lock serializes admin-kill vs user-destroy on the same user.
+        # rollback ends any open mariadb transaction (route handlers do a select
+        # before calling here, which pins a REPEATABLE READ snapshot) so the
+        # next query begins a fresh transaction after the winner's commit.
+        # without this, the loser still sees the pre-delete row and double-inserts
+        # history
+        with self._get_destroy_lock(user_id):
+            db.session.rollback()
+            row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
 
-        with self.lock:
-            status = self.creation_status.get(user_id)
-            if status and status.get("status") not in (None, "failed", "ready"):
-                # creation is in-flight, signal the background greenlet to abort
-                self.creation_status[user_id] = {"status": "cancelled"}
-            else:
-                self.creation_status.pop(user_id, None)
+            with self.lock:
+                status = self.creation_status.get(user_id)
+                if status and status.get("status") not in (None, "failed", "ready"):
+                    # creation is in-flight, signal the background greenlet to abort
+                    self.creation_status[user_id] = {"status": "cancelled"}
+                else:
+                    self.creation_status.pop(user_id, None)
 
-        if row is None:
-            return {"success": False, "error": "No active container found"}
+            if row is None:
+                return {"success": False, "error": "No active container found"}
 
-        context_name = row.docker_context
-        container_name = row.container_name
+            context_name = row.docker_context
+            container_name = row.container_name
+
+            try:
+                self._collect_logs_for_container(row)
+            except Exception as e:
+                logger.debug(f"failed to collect final logs for {container_name}: {e}")
+
+            self._log_offsets.pop(row.container_id, None)
+
+            ended_at = time.time()
+            history = DesktopSessionHistoryModel(
+                user_id=row.user_id,
+                username=username,
+                docker_context=context_name,
+                started_at=row.created_at,
+                ended_at=ended_at,
+                duration=ended_at - row.created_at,
+                end_reason=reason,
+                extensions_used=row.extensions_used,
+            )
+            db.session.add(history)
+
+            db.session.delete(row)
+            db.session.commit()
 
         try:
-            self._collect_logs_for_container(row)
-        except Exception as e:
-            logger.debug(f"failed to collect final logs for {container_name}: {e}")
-
-        self._log_offsets.pop(row.container_id, None)
-
-        ended_at = time.time()
-        history = DesktopSessionHistoryModel(
-            user_id=row.user_id,
-            username=username,
-            docker_context=context_name,
-            started_at=row.created_at,
-            ended_at=ended_at,
-            duration=ended_at - row.created_at,
-            end_reason=reason,
-            extensions_used=row.extensions_used,
-        )
-        db.session.add(history)
-
-        db.session.delete(row)
-        db.session.commit()
-
-        self.host_manager.stop_container(context_name, container_name)
+            self.host_manager.stop_container(context_name, container_name)
+        except HostsUnavailableException:
+            # host is gone; row is already removed, best-effort cleanup
+            logger.info(f"stop_container skipped for {container_name}: context unavailable")
         self.orchestrator.release_slot(context_name)
 
         if log_destruction:
