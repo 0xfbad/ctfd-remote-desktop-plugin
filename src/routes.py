@@ -1116,7 +1116,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def admin_add_context():
         from .models import DesktopDockerContextModel
 
-        if not request.is_json:
+        if not isinstance(request.json, dict):
             return jsonify({"error": "invalid request"}), 400
 
         context_name = request.json.get("context_name")
@@ -1160,7 +1160,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def admin_update_context(context_id):
         from .models import DesktopDockerContextModel
 
-        if not request.is_json:
+        if not isinstance(request.json, dict):
             return jsonify({"error": "invalid request"}), 400
 
         context = DesktopDockerContextModel.query.get(context_id)
@@ -1246,7 +1246,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def admin_update_settings():
         from .models import set_setting, SETTING_DEFAULTS
 
-        if not request.is_json:
+        if not isinstance(request.json, dict):
             return jsonify({"error": "invalid request"}), 400
 
         for key, value in request.json.items():
