@@ -585,7 +585,13 @@ class ContainerManager:
         # returns False if the container vanished and we deleted the row.
         try:
             running = self.host_manager.is_container_running(row.docker_context, row.container_id)
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError, HostsUnavailableException):
+        except (
+            docker.errors.DockerException,
+            paramiko.ssh_exception.SSHException,
+            EOFError,
+            OSError,
+            HostsUnavailableException,
+        ):
             return True
         if running:
             return True
