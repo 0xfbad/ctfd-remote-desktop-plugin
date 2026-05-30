@@ -23,7 +23,6 @@ _subscriber_lock = threading.Lock()
 
 
 def init(app, on_message: Callable[[dict], None] | None = None) -> None:
-    """call from plugin load. captures app for greenlet context, optionally starts subscriber"""
     global _app
     _app = app
     if on_message is not None:
@@ -37,7 +36,6 @@ def _get_redis_url():
 
 
 def _get_publish_client():
-    """publish client has a short socket_timeout so a hung redis can't park the request greenlet"""
     global _pub_client
     if _pub_client is not None:
         return _pub_client
@@ -50,6 +48,7 @@ def _get_publish_client():
         try:
             import redis
 
+            # short socket_timeout so a hung redis can't park the request greenlet
             client = redis.from_url(url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
             client.ping()
             _pub_client = client
@@ -60,13 +59,13 @@ def _get_publish_client():
 
 
 def _new_subscribe_client():
-    """subscribe client uses no socket_timeout so pubsub.listen() can block forever waiting for messages"""
     url = _get_redis_url()
     if not url:
         return None
     try:
         import redis
 
+        # no socket_timeout: pubsub.listen() must block forever waiting for messages
         client = redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True)
         client.ping()
         return client
@@ -76,7 +75,6 @@ def _new_subscribe_client():
 
 
 def publish(event: dict) -> bool:
-    """fire-and-forget cross-worker publish. returns True if message was sent, False otherwise"""
     client = _get_publish_client()
     if client is None:
         return False
@@ -91,7 +89,6 @@ def publish(event: dict) -> bool:
 
 
 def start_subscriber(on_message: Callable[[dict], None]) -> None:
-    """idempotently spawn a greenlet that subscribes and delivers each remote event to on_message"""
     global _subscriber_started
     if _subscriber_started:
         return

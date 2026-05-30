@@ -101,7 +101,6 @@ class EventLogger:
         return event
 
     def _deliver_local(self, event: EventDict) -> None:
-        """append to local deque and fire local listeners. used by both log_event and the redis subscriber"""
         with self.lock:
             self.events.append(event)
             listeners = self.listeners[:]

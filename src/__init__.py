@@ -27,7 +27,6 @@ _scheduler_lock_fd = None
 
 
 def _claim_scheduler_leader() -> bool:
-    """try to take the cross-worker scheduler lock. returns True if this worker should run jobs"""
     global _scheduler_lock_fd
     lock_path = os.environ.get(
         "REMOTE_DESKTOP_SCHEDULER_LOCK", os.path.join(tempfile.gettempdir(), "ctfd-remote-desktop-scheduler.lock")
