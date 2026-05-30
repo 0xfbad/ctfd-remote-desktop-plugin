@@ -10,6 +10,7 @@ import paramiko
 from types import FrameType
 from typing import Callable
 
+from apscheduler.schedulers import SchedulerNotRunningError
 from flask import Flask
 from CTFd.plugins import register_user_page_menu_bar
 
@@ -149,10 +150,20 @@ def load(app: Flask) -> None:
 
     scheduler = GeventScheduler()
 
+    # wrap periodic jobs so they run within app context. must be defined before
+    # add_job because apscheduler captures the function reference at registration
+    # time, reassigning the bound methods afterward has no effect on scheduled jobs
+    def _with_app_ctx(fn: Callable[[], None]) -> Callable[[], None]:
+        def wrapper() -> None:
+            with app.app_context():
+                fn()
+
+        return wrapper
+
     cleanup_interval = get_setting("cleanup_interval")
 
     scheduler.add_job(
-        func=container_manager.periodic_cleanup,
+        func=_with_app_ctx(container_manager.periodic_cleanup),
         trigger="interval",
         seconds=cleanup_interval,
         misfire_grace_time=30,
@@ -160,8 +171,9 @@ def load(app: Flask) -> None:
         id="expiry_check",
     )
 
+    # health_check needs app context for DB-backed event logging
     scheduler.add_job(
-        func=orchestrator.health_check,
+        func=_with_app_ctx(orchestrator.health_check),
         trigger="interval",
         seconds=30,
         misfire_grace_time=30,
@@ -171,7 +183,7 @@ def load(app: Flask) -> None:
 
     cmd_log_interval = get_setting("command_log_interval")
     scheduler.add_job(
-        func=container_manager.collect_all_command_logs,
+        func=_with_app_ctx(container_manager.collect_all_command_logs),
         trigger="interval",
         seconds=cmd_log_interval,
         misfire_grace_time=30,
@@ -179,31 +191,27 @@ def load(app: Flask) -> None:
         id="command_log_collection",
     )
 
-    # wrap periodic jobs so they run within app context
-    def _with_app_ctx(fn: Callable[[], None]) -> Callable[[], None]:
-        def wrapper() -> None:
-            with app.app_context():
-                fn()
-
-        return wrapper
-
-    container_manager.periodic_cleanup = _with_app_ctx(container_manager.periodic_cleanup)  # type: ignore[method-assign]
-    container_manager.collect_all_command_logs = _with_app_ctx(container_manager.collect_all_command_logs)  # type: ignore[method-assign]
-
     scheduler.start()
 
     def _safe_shutdown_scheduler() -> None:
-        if scheduler.running:
+        if not scheduler.running:
+            return
+        try:
             scheduler.shutdown(wait=False)
+        except (SchedulerNotRunningError, RuntimeError):
+            # atexit fires from a job greenlet, apscheduler may raise
+            # "cannot join thread before it is started", swallow it
+            pass
 
     atexit.register(_safe_shutdown_scheduler)
 
     def signal_handler(signum: int, _frame: FrameType | None) -> None:
         logger.info(f"received signal {signum}, cleaning up containers...")
-        try:
-            scheduler.shutdown(wait=False)
-        except Exception:
-            pass
+        if scheduler.running:
+            try:
+                scheduler.shutdown(wait=False)
+            except (SchedulerNotRunningError, RuntimeError):
+                pass
         try:
             with app.app_context():
                 container_manager.cleanup_all_containers()
