@@ -302,7 +302,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
     @remote_desktop_bp.route("/remote-desktop/api/report", methods=["POST"])
     @authed_only
-    @ratelimit_per_user(method="POST", limit=5, interval=3600)
+    @ratelimit_per_user(method="POST", limit=5, interval=3600, count_4xx=False)
     def submit_report():
         from .models import DesktopReportModel, get_setting
 
