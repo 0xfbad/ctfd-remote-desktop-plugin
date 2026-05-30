@@ -24,6 +24,7 @@ from .models import (
 from .event_logger import event_logger
 from .docker_host_manager import DockerHostManager, parse_size
 from .orchestrator import Orchestrator
+from .exceptions import HostsUnavailableException, RemoteDesktopException  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,7 @@ class ContainerManager:
             return {"success": False, "error": "Session already exists"}
 
         if not self.orchestrator.has_healthy_context():
-            return {"success": False, "error": "no healthy contexts available"}
+            raise HostsUnavailableException("no healthy docker contexts available")
 
         with self.lock:
             self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}

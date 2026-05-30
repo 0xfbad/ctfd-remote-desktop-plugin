@@ -16,6 +16,7 @@ from .orchestrator import Orchestrator
 from .event_logger import event_logger, EventDict
 from .models import user_flags, _esc
 from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
+from .exceptions import HostsUnavailableException
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,18 @@ def _target_flags(user: Users | None) -> dict[str, bool]:  # type: ignore[type-a
 def _direct_vnc_url(host: str, novnc_port: int, password: str) -> str:
     # password in fragment so it never appears in server logs or referer headers
     return f"http://{host}:{novnc_port}/vnc.html?autoconnect=true&resize=remote&reconnect=true#password={password}"
+
+
+_INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "no healthy contexts")
+
+
+def _infra_status(error: str | None) -> int:
+    # 503 when the failure is infrastructure (no host, unreachable context), 500 otherwise.
+    # signals to clients (and probes) that retry is worthwhile vs a hard server bug
+    if not error:
+        return 500
+    lowered = error.lower()
+    return 503 if any(tok in lowered for tok in _INFRA_ERROR_TOKENS) else 500
 
 
 def create_routes(container_manager: ContainerManager, orchestrator: Orchestrator) -> Blueprint:
@@ -207,10 +220,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         port_part = f":{parsed.port}" if parsed.port else ""
         container_url = f"{parsed.scheme}://{container_host}{port_part}/"
 
-        result = container_manager.create_container(user.id, container_url, extra_hosts)
+        try:
+            result = container_manager.create_container(user.id, container_url, extra_hosts)
+        except HostsUnavailableException as err:
+            return jsonify({"error": str(err)}), 503
 
         if not result.get("success"):
-            return jsonify({"error": result.get("error", "Creation failed")}), 500
+            error = result.get("error", "Creation failed")
+            return jsonify({"error": error}), _infra_status(error)
 
         return jsonify(
             {
@@ -261,7 +278,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         result = container_manager.destroy_container(user.id)
         if not result.get("success"):
-            return jsonify({"error": result.get("error", "Destruction failed")}), 500
+            error = result.get("error", "Destruction failed")
+            return jsonify({"error": error}), _infra_status(error)
 
         return jsonify({"session": None})
 
@@ -383,7 +401,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         if result.get("success"):
             return jsonify({"success": True})
-        return jsonify({"error": result.get("error", "Failed to kill container")}), 500
+        error = result.get("error", "Failed to kill container")
+        return jsonify({"error": error}), _infra_status(error)
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
     @admins_only
@@ -1198,12 +1217,12 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         ping_ok = container_manager.host_manager.ping(context.context_name)
         if not ping_ok:
-            return jsonify({"error": "context unreachable (ping failed)"}), 500
+            return jsonify({"error": "context unreachable (ping failed)"}), 503
 
         docker_image = get_setting("docker_image")
         image_ok = container_manager.host_manager.check_image(context.context_name, docker_image)
         if not image_ok:
-            return jsonify({"error": f"image {docker_image} not found on context"}), 500
+            return jsonify({"error": f"image {docker_image} not found on context"}), 503
 
         return jsonify({"success": True})
 
