@@ -384,6 +384,10 @@ class DockerHostManager:
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
+            except Exception:
+                # see is_container_running for context on the broad catch
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}")
 
         return self._call(context_name, _do)
 
@@ -508,5 +512,11 @@ class DockerHostManager:
                 # raw EOFError surfaces when ssh MaxSessions is exhausted
                 self._clear_client(context_name)
                 raise
+            except Exception:
+                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
+                # client is reused from a different gevent hub. drop the client and surface as a typed
+                # transient so _verify_or_reap treats it optimistically instead of 500'ing the route
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}")
 
         return self._call(context_name, _do)
