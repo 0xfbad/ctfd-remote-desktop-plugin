@@ -128,7 +128,9 @@ class DockerHostManager:
     def __init__(self) -> None:
         self._context_configs: dict[str, str] = {}
         self._pub_hostnames: dict[str, str] = {}
-        self._clients: dict[str, docker.DockerClient] = {}
+        # keyed by (context_name, thread_ident) because paramiko Channels bind
+        # gevent.Event to the Hub of the creating thread, see module docstring
+        self._clients: dict[tuple[str, int], docker.DockerClient] = {}
         self._config_generation: int = 0
         self._client_generation: int = -1
         # reentrant so wrapped ops can re-enter lock-protected helpers
@@ -155,32 +157,52 @@ class DockerHostManager:
         return pool.apply(fn, args=args, kwds=kwargs)
 
     def _get_client(self, context_name: str) -> docker.DockerClient:
+        tid = threading.get_ident()
+        to_close: list[docker.DockerClient] = []
         with self._lock:
             if self._client_generation != self._config_generation:
-                for old in self._clients.values():
-                    try:
-                        old.close()
-                    except Exception:
-                        pass
+                to_close.extend(self._clients.values())
                 self._clients = {}
                 self._client_generation = self._config_generation
+            else:
+                # prune entries for dead threads. gevent threadpool workers
+                # rarely die so this is a cheap safety net, not a hot path.
+                # bounded by num_contexts * THREADPOOL_SIZE (3 * 4 = 12)
+                live_idents = {t.ident for t in threading.enumerate()}
+                dead_keys = [k for k in self._clients if k[1] not in live_idents]
+                for k in dead_keys:
+                    to_close.append(self._clients.pop(k))
 
-            if context_name in self._clients:
-                return self._clients[context_name]
+            key = (context_name, tid)
+            if key in self._clients:
+                client = self._clients[key]
+            else:
+                url = self._context_configs.get(context_name)
+                if not url:
+                    # typed so callers can map a stale-row miss to a 503 instead of a 500
+                    raise HostsUnavailableException(f"no client for context '{context_name}'")
+                client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
+                self._clients[key] = client
 
-            url = self._context_configs.get(context_name)
-            if not url:
-                # typed so callers can map a stale-row miss to a 503 instead of a 500
-                raise HostsUnavailableException(f"no client for context '{context_name}'")
-
-            client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
-            self._clients[context_name] = client
-            return client
+        # close outside the lock, paramiko teardown can block on SSH for seconds
+        for old in to_close:
+            try:
+                old.close()
+            except Exception:
+                pass
+        return client
 
     def _clear_client(self, context_name: str) -> None:
+        # drop EVERY cached client for this context across all threads so any
+        # worker that next calls _get_client builds a fresh one. preserves the
+        # original contract (next call gets a new client) but accounts for N
+        # cached entries instead of 1
+        to_close: list[docker.DockerClient] = []
         with self._lock:
-            old = self._clients.pop(context_name, None)
-        if old:
+            keys = [k for k in self._clients if k[0] == context_name]
+            for k in keys:
+                to_close.append(self._clients.pop(k))
+        for old in to_close:
             try:
                 old.close()
             except Exception:
