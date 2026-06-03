@@ -387,6 +387,45 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
+    def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]]:
+        # used by the reconcile sweep; returns [{"name": str, "created_ts": float}] for matching containers (any state).
+        # swallows errors and returns [] so a flapping host can't break the sweep loop
+        def _do() -> list[dict[str, str | float]]:
+            try:
+                client = self._get_client(context_name)
+                containers = client.containers.list(all=True, filters={"name": name_prefix})
+                results: list[dict[str, str | float]] = []
+                for c in containers:
+                    created_raw = c.attrs.get("Created", "") if c.attrs else ""
+                    created_ts = 0.0
+                    if created_raw:
+                        try:
+                            from datetime import datetime
+
+                            iso = created_raw.replace("Z", "+00:00")
+                            # strip nanoseconds past microsecond precision (docker emits 9-digit fractional)
+                            if "." in iso:
+                                head, tail = iso.split(".", 1)
+                                tz_idx = max(tail.find("+"), tail.find("-"))
+                                if tz_idx == -1:
+                                    frac, tz_suffix = tail, ""
+                                else:
+                                    frac, tz_suffix = tail[:tz_idx], tail[tz_idx:]
+                                iso = f"{head}.{frac[:6]}{tz_suffix}"
+                            created_ts = datetime.fromisoformat(iso).timestamp()
+                        except (ValueError, AttributeError):
+                            created_ts = 0.0
+                    results.append({"name": c.name or "", "created_ts": created_ts})
+                return results
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                return []
+            except Exception:
+                self._clear_client(context_name)
+                return []
+
+        return self._call(context_name, _do)
+
     def check_image(self, context_name: str, image: str) -> bool:
         def _do():
             try:

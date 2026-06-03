@@ -765,6 +765,56 @@ class ContainerManager:
                 except Exception as e:
                     logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
+            self._reconcile_orphans()
+
+    # destroy_container commits the row delete before calling stop_container, so a paramiko/docker
+    # error from stop leaves the container running with no DB row. periodic_cleanup never sees it
+    # again because expiry is row-driven. this sweep catches those orphans by diffing actual
+    # docker state against the DB
+    RECONCILE_NAME_PREFIX = "rd-session-"
+    RECONCILE_SAFETY_AGE_SECONDS = 300
+
+    def _reconcile_orphans(self) -> None:
+        db_names = {
+            r.container_name
+            for r in DesktopContainerInfoModel.query.with_entities(DesktopContainerInfoModel.container_name).all()
+        }
+        now = time.time()
+
+        for ctx_name in self.host_manager.get_connected_contexts():
+            try:
+                containers = self.host_manager.list_containers_by_prefix(ctx_name, self.RECONCILE_NAME_PREFIX)
+            except Exception as e:
+                logger.warning(f"reconcile: list failed on {ctx_name}: {e}")
+                continue
+
+            for entry in containers:
+                name = str(entry.get("name", ""))
+                if not name or name in db_names:
+                    continue
+                created_ts = float(entry.get("created_ts", 0) or 0)
+                # safety window guards against racing a brand-new container whose DB row hasn't
+                # committed yet. created_ts == 0 means parse failed; treat as too-young
+                age = now - created_ts if created_ts > 0 else 0
+                if age < self.RECONCILE_SAFETY_AGE_SECONDS:
+                    continue
+
+                logger.warning(f"reconcile: stopping orphan {name} on {ctx_name} (age {int(age)}s)")
+                try:
+                    self.host_manager.stop_container(ctx_name, name)
+                    event_logger.log_event(
+                        "orphan_reaped",
+                        f"reaped orphan container {name} on {ctx_name}",
+                        level="warning",
+                        metadata={
+                            "context": ctx_name,
+                            "container_name": name,
+                            "age_seconds": int(age),
+                        },
+                    )
+                except Exception as e:
+                    logger.error(f"reconcile: failed to stop {name} on {ctx_name}: {e}")
+
     def destroy_all_containers_admin(self, admin_user: Users) -> int:  # type: ignore[type-arg]
         rows = DesktopContainerInfoModel.query.all()
         killed = 0
