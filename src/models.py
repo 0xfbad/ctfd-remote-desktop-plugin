@@ -97,7 +97,7 @@ SETTING_DEFAULTS: dict[str, SettingValue] = {
     "vnc_ready_attempts": 180,
     "http_request_timeout": 3,
     "cleanup_interval": 300,
-    "pids_limit": 512,
+    "pids_limit": 4096,
     "max_concurrent_creates": 2,
     "username_source": "name",
     "require_verified": True,
