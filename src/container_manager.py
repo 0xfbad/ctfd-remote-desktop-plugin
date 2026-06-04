@@ -379,10 +379,12 @@ class ContainerManager:
             logger.error(traceback.format_exc())
 
             with self.lock:
+                # don't pre-escape, frontend assigns these to textContent which is xss-safe
+                # by default. pre-escaping causes &lt;...&gt; to render as literal entity text
                 self.creation_status[user_id] = {
                     "status": "failed",
-                    "error": _esc(str(e)),
-                    "hostname": _esc(context_name or ""),
+                    "error": str(e),
+                    "hostname": context_name or "",
                 }
 
             event_logger.log_event(
