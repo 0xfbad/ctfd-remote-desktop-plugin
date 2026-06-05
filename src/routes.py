@@ -53,6 +53,14 @@ def _infra_status(error: str | None) -> int:
     return 503 if any(tok in lowered for tok in _INFRA_ERROR_TOKENS) else 500
 
 
+def _require_confirm():
+    # guard against stray POSTs (admin xss, hijacked session, fat finger) wiping audit data
+    payload = request.get_json(silent=True) or {}
+    if payload.get("confirm") != "DELETE":
+        return jsonify({"error": 'confirmation required: post body must contain {"confirm": "DELETE"}'}), 400
+    return None
+
+
 def create_routes(container_manager: ContainerManager, orchestrator: Orchestrator) -> Blueprint:
     remote_desktop_bp = Blueprint(
         "remote_desktop",
@@ -481,6 +489,10 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/clear_history", methods=["POST"])
     @admins_only
     def admin_clear_history():
+        rejection = _require_confirm()
+        if rejection is not None:
+            return rejection
+
         from .models import DesktopSessionHistoryModel, CommandLogModel
 
         session_count = DesktopSessionHistoryModel.query.count()
@@ -537,6 +549,10 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/reports/clear", methods=["POST"])
     @admins_only
     def admin_clear_reports():
+        rejection = _require_confirm()
+        if rejection is not None:
+            return rejection
+
         from .models import DesktopReportModel
 
         count = DesktopReportModel.query.count()
