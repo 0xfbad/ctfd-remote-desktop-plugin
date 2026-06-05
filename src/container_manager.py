@@ -679,39 +679,53 @@ class ContainerManager:
         if new_duration is None:
             new_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
 
+        # fast-path: no row clearly means no work, skip the lock
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if not row:
             return {"success": False, "error": "No active session"}
 
-        if not row.timer_started:
-            return {"success": False, "error": "Timer not started"}
+        # serialize against destroy_container so we don't mutate a row that's
+        # about to be deleted (leaks extensions_used increments, can race
+        # history insertion). rollback ends the snapshot from the fast-path
+        # select so the re-query sees the latest committed state
+        with self._get_destroy_lock(user_id):
+            db.session.rollback()
+            row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+            if not row:
+                return {"success": False, "error": "No active session"}
 
-        if row.extensions_used >= row.max_extensions:
-            return {"success": False, "error": "Maximum extensions reached"}
+            if not row.timer_started:
+                return {"success": False, "error": "Timer not started"}
 
-        elapsed = time.time() - row.timer_start_time
-        remaining = max(0, row.timer_duration - elapsed)
-        row.timer_start_time = time.time()
-        row.timer_duration = remaining + new_duration
-        row.extensions_used += 1
-        db.session.commit()
+            if row.extensions_used >= row.max_extensions:
+                return {"success": False, "error": "Maximum extensions reached"}
 
-        logger.info(f"extended timer for user {user_id}: {row.extensions_used}/{row.max_extensions}")
+            elapsed = time.time() - row.timer_start_time
+            remaining = max(0, row.timer_duration - elapsed)
+            row.timer_start_time = time.time()
+            row.timer_duration = remaining + new_duration
+            row.extensions_used += 1
+            db.session.commit()
+
+            extensions_used = row.extensions_used
+            max_extensions = row.max_extensions
+
+        logger.info(f"extended timer for user {user_id}: {extensions_used}/{max_extensions}")
 
         event_logger.log_event(
             "session_extended",
-            f"session extended ({row.extensions_used}/{row.max_extensions} extensions used)",
+            f"session extended ({extensions_used}/{max_extensions} extensions used)",
             user_id=user_id,
             username=username,
             level="info",
             metadata={
-                "extensions_used": row.extensions_used,
-                "max_extensions": row.max_extensions,
+                "extensions_used": extensions_used,
+                "max_extensions": max_extensions,
                 "new_duration": new_duration,
             },
         )
 
-        return {"success": True, "extensions_used": row.extensions_used, "max_extensions": row.max_extensions}
+        return {"success": True, "extensions_used": extensions_used, "max_extensions": max_extensions}
 
     def get_session_timer_status(self, user_id: int) -> TimerStatusDict:
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
