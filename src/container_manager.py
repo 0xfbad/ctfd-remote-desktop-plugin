@@ -107,6 +107,7 @@ class ContainerManager:
         self.creation_status: dict[int, CreationStatusDict] = {}
         self.lock = Lock()
         self._log_offsets: dict[str, int] = {}
+        self._log_offsets_lock = Lock()
         # per-user locks serialize destroy_container so concurrent admin-kill +
         # user-destroy don't produce duplicate history rows for one teardown
         self._destroy_locks: dict[int, Lock] = {}
@@ -503,7 +504,8 @@ class ContainerManager:
             except Exception as e:
                 logger.debug(f"failed to collect final logs for {container_name}: {e}")
 
-            self._log_offsets.pop(row.container_id, None)
+            with self._log_offsets_lock:
+                self._log_offsets.pop(row.container_id, None)
 
             ended_at = time.time()
             history = DesktopSessionHistoryModel(
@@ -886,14 +888,16 @@ class ContainerManager:
         logger.info("cleanup completed")
 
     def _get_log_offset(self, container_id: str) -> int:
-        # on restart, derive from DB count to avoid re-ingesting existing lines
-        offset = self._log_offsets.get(container_id)
-        if offset is not None:
-            return offset
+        # on restart, derive from DB count to avoid re-ingesting existing lines.
+        # check-then-set must be atomic so concurrent destroy.pop can't slip between
+        with self._log_offsets_lock:
+            offset = self._log_offsets.get(container_id)
+            if offset is not None:
+                return offset
 
-        offset = CommandLogModel.query.filter_by(container_id=container_id).count()
-        self._log_offsets[container_id] = offset
-        return offset
+            offset = CommandLogModel.query.filter_by(container_id=container_id).count()
+            self._log_offsets[container_id] = offset
+            return offset
 
     def _collect_logs_for_container(self, row: DesktopContainerInfoModel) -> None:
         if not self._get_setting("command_logging_enabled"):
@@ -940,7 +944,8 @@ class ContainerManager:
 
         # only advance offset by lines we actually parsed and committed,
         # so truncated/partial lines get retried next cycle
-        self._log_offsets[row.container_id] = offset + parsed
+        with self._log_offsets_lock:
+            self._log_offsets[row.container_id] = offset + parsed
 
     def collect_all_command_logs(self) -> None:
         with self.app.app_context():  # type: ignore[union-attr]

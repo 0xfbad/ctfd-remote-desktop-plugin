@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import patch, MagicMock
 
 
@@ -190,3 +191,60 @@ def test_periodic_cleanup_destroys_expired(container_manager):
         cm.periodic_cleanup()
 
     cm.host_manager.stop_container.assert_called_once()
+
+
+def test_log_offsets_concurrent_get_and_pop(container_manager):
+    cm = container_manager
+
+    mock_model = MagicMock()
+    mock_model.query.filter_by.return_value.count.return_value = 0
+
+    errors: list[BaseException] = []
+    iterations = 200
+    container_ids = [f"c{i}" for i in range(50)]
+
+    with patch("container_manager.CommandLogModel", mock_model):
+
+        def hammer_get():
+            try:
+                for _ in range(iterations):
+                    for cid in container_ids:
+                        cm._get_log_offset(cid)
+            except BaseException as e:
+                errors.append(e)
+
+        def hammer_pop():
+            try:
+                for _ in range(iterations):
+                    for cid in container_ids:
+                        with cm._log_offsets_lock:
+                            cm._log_offsets.pop(cid, None)
+            except BaseException as e:
+                errors.append(e)
+
+        def hammer_advance():
+            try:
+                for _ in range(iterations):
+                    for cid in container_ids:
+                        with cm._log_offsets_lock:
+                            cm._log_offsets[cid] = cm._log_offsets.get(cid, 0) + 1
+            except BaseException as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=hammer_get),
+            threading.Thread(target=hammer_get),
+            threading.Thread(target=hammer_pop),
+            threading.Thread(target=hammer_advance),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert errors == []
+    # final state must only contain non-negative ints, no half-written objects
+    for k, v in cm._log_offsets.items():
+        assert isinstance(k, str)
+        assert isinstance(v, int)
+        assert v >= 0
