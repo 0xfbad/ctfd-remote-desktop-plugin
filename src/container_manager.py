@@ -227,6 +227,7 @@ class ContainerManager:
                 memory_limit = parse_size(self._get_setting("memory_limit"))  # type: ignore[arg-type]
                 cpu_limit = self._get_setting("cpu_limit")
                 nano_cpus = int(float(cpu_limit) * 1e9)  # type: ignore[arg-type]
+                rd_network = str(self._get_setting("rd_network_name") or "rd-isolated")
 
                 initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
                 extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
@@ -268,6 +269,7 @@ class ContainerManager:
                     memory=memory_limit,
                     nano_cpus=nano_cpus,
                     extra_hosts=extra_hosts,
+                    network=rd_network,
                 )
             finally:
                 self.host_manager.release_semaphore(context_name)

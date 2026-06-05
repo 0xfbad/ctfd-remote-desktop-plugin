@@ -123,6 +123,7 @@ SETTING_DEFAULTS: dict[str, SettingValue] = {
     "cap_drop": "ALL",
     "cap_add": "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE",
     "retention_days": 60,
+    "rd_network_name": "rd-isolated",
 }
 
 

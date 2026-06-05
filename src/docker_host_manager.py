@@ -238,8 +238,12 @@ class DockerHostManager:
                 pass
 
     def load_contexts(self, contexts: list[DesktopDockerContextModel]) -> None:
+        from .models import get_setting
+
         new_configs: dict[str, str] = {}
         new_pub_hostnames: dict[str, str] = {}
+
+        rd_network = str(get_setting("rd_network_name") or "rd-isolated")
 
         for ctx in contexts:
             endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
@@ -247,11 +251,24 @@ class DockerHostManager:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
 
-            def _check(endpoint=endpoint):
+            def _check(endpoint=endpoint, ctx_name=ctx.context_name):
                 client = None
                 try:
                     client = docker.DockerClient(base_url=endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
                     client.ping()
+                    # bridge is the docker default and always present, skip the probe so an operator
+                    # using bridge as an emergency rollback doesn't see spurious warnings
+                    if rd_network != "bridge":
+                        try:
+                            found = client.networks.list(names=[rd_network])
+                            if not found:
+                                logger.warning(
+                                    f"context {ctx_name} missing docker network '{rd_network}' "
+                                    "- container creates will fail. run the rd-isolated network "
+                                    "runbook on this host"
+                                )
+                        except Exception as e:
+                            logger.warning(f"context {ctx_name} network check failed for '{rd_network}': {e}")
                     return None
                 except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
                     return e
@@ -318,6 +335,7 @@ class DockerHostManager:
         nano_cpus: int | None = None,
         hostname: str | None = None,
         extra_hosts: dict[str, str] | None = None,
+        network: str | None = None,
     ) -> ContainerResult:
         from .models import get_setting
 
@@ -351,6 +369,7 @@ class DockerHostManager:
                         cap_add=cap_add,
                         pids_limit=pids_limit,
                         extra_hosts=extra_hosts or {},
+                        network=network,
                     )
                     break
                 except docker.errors.APIError as e:
