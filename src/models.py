@@ -41,6 +41,10 @@ class DesktopContainerInfoModel(db.Model):
     timer_duration = db.Column(db.Float(precision=53), default=0)
     extensions_used = db.Column(db.Integer, default=0)
     max_extensions = db.Column(db.Integer, default=3)
+    # raw sid of the CTFd session minted for autologin into the container.
+    # nullable=True so legacy rows from before this column existed survive
+    # without a data migration. on destroy, a NULL skips the cache revocation
+    cookie_sid = db.Column(db.String(128), nullable=True)
 
 
 class DesktopSessionHistoryModel(db.Model):

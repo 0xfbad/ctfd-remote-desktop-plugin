@@ -35,9 +35,12 @@ def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[typ
     return user, user.name if user else f"User {user_id}"
 
 
-def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str] | None:  # type: ignore[type-arg]
+def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None:  # type: ignore[type-arg]
     # CTFd uses server-side sessions, save_session writes to the cache
-    # backend so just signing the sid wouldn't populate it
+    # backend so just signing the sid wouldn't populate it.
+    # returns (cookie_name, signed_cookie_value, raw_sid). the raw sid is
+    # needed to revoke the cache entry on container destroy (the cookie value
+    # is itsdangerous-signed and not directly usable as a cache key)
     from flask import session
     from werkzeug.wrappers import Response
     from CTFd.utils.security.auth import login_user
@@ -45,12 +48,13 @@ def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str] | None:  # 
     cookie_name = app.session_cookie_name
     with app.test_request_context():
         login_user(user)
+        sid = session.sid
         resp = Response()
         app.session_interface.save_session(app, session, resp)
         for header in resp.headers.getlist("Set-Cookie"):
             if header.startswith(f"{cookie_name}="):
                 value = header.split(f"{cookie_name}=", 1)[1].split(";", 1)[0]
-                return cookie_name, value
+                return cookie_name, value, sid
     return None
 
 
@@ -243,10 +247,11 @@ class ContainerManager:
 
                 from flask import current_app
 
+                cookie_sid: str | None = None
                 if user is not None:
                     minted = _mint_session_cookie(current_app._get_current_object(), user)  # type: ignore[attr-defined]
                     if minted:
-                        cookie_name, cookie_value = minted
+                        cookie_name, cookie_value, cookie_sid = minted
                         container_env["CTFD_COOKIE_NAME"] = cookie_name
                         container_env["CTFD_COOKIE_VALUE"] = cookie_value
                     else:
@@ -323,6 +328,7 @@ class ContainerManager:
                 timer_duration=float(initial_duration),
                 extensions_used=0,
                 max_extensions=max_extensions,
+                cookie_sid=cookie_sid,
             )
             try:
                 db.session.add(row)
@@ -519,6 +525,19 @@ class ContainerManager:
                 extensions_used=row.extensions_used,
             )
             db.session.add(history)
+
+            # revoke the minted CTFd session before deleting the row so the
+            # cookie embedded in the container can't be replayed. legacy rows
+            # predating this column have cookie_sid=None and are skipped
+            cookie_sid = row.cookie_sid
+            if cookie_sid:
+                try:
+                    from flask import current_app
+                    from CTFd.cache import cache
+
+                    cache.delete(current_app.session_interface.key_prefix + cookie_sid)
+                except Exception as e:
+                    logger.warning(f"failed to revoke cookie_sid for user {user_id}: {e}")
 
             db.session.delete(row)
             db.session.commit()
