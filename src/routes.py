@@ -382,6 +382,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "user_id must be an integer"}), 400
 
         target_user = Users.query.filter_by(id=user_id).first()
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
         target_username = target_user.name if target_user else f"User {user_id}"
 
         event_logger.log_event(
@@ -413,6 +415,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if user_id is None:
             return jsonify({"error": "user_id must be an integer"}), 400
         target_user = Users.query.filter_by(id=user_id).first()
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
         target_username = target_user.name if target_user else f"User {user_id}"
 
         event_logger.log_event(
@@ -442,6 +446,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "No active session for user"}), 400
 
         target_user = Users.query.filter_by(id=user_id).first()
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
         target_username = target_user.name if target_user else f"User {user_id}"
 
         event_logger.log_event(
