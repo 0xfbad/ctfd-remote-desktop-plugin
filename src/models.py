@@ -84,6 +84,19 @@ class DesktopSettingsModel(db.Model):
     value = db.Column(db.Text)
 
 
+class DesktopEventLogModel(db.Model):
+    __tablename__ = "desktop_event_log"
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    # no FK on user_id, deleting a user should not cascade-wipe their audit trail
+    timestamp = db.Column(db.Float(precision=53), nullable=False, index=True)
+    event_type = db.Column(db.String(128), nullable=False, index=True)
+    level = db.Column(db.String(16), nullable=False)
+    user_id = db.Column(db.Integer, nullable=True)
+    username = db.Column(db.String(512), nullable=True)
+    message = db.Column(db.Text, nullable=False)
+    metadata_json = db.Column(db.Text, nullable=True)
+
+
 SETTING_DEFAULTS: dict[str, SettingValue] = {
     "remote_desktop_enabled": False,
     "docker_image": "ctfd-remote-desktop:latest",
@@ -105,6 +118,7 @@ SETTING_DEFAULTS: dict[str, SettingValue] = {
     "command_log_interval": 30,
     "cap_drop": "ALL",
     "cap_add": "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE",
+    "retention_days": 60,
 }
 
 

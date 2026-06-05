@@ -21,6 +21,7 @@ from .container_manager import ContainerManager
 from .routes import create_routes
 from .event_logger import event_logger
 from . import event_bus
+from . import event_logger as event_logger_module
 
 # module-global keeps the lock fd alive for the worker's lifetime, kernel releases on exit
 _scheduler_lock_fd = None
@@ -225,6 +226,27 @@ def load(app: Flask) -> None:
         misfire_grace_time=30,
         coalesce=True,
         id="command_log_collection",
+    )
+
+    # leader-only: drain queued events into persistent storage so the audit trail
+    # survives worker restarts and is queryable across workers
+    event_logger_module.start_persistence_drainer(app)
+
+    def _prune_event_log() -> None:
+        days = get_setting("retention_days")
+        try:
+            days_int = int(days) if days is not None else 60
+        except (TypeError, ValueError):
+            days_int = 60
+        event_logger_module.prune_event_log(days_int)
+
+    scheduler.add_job(
+        func=_with_app_ctx(_prune_event_log),
+        trigger="interval",
+        seconds=86400,
+        misfire_grace_time=3600,
+        coalesce=True,
+        id="event_log_prune",
     )
 
     scheduler.start()
