@@ -270,6 +270,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
     @remote_desktop_bp.route("/remote-desktop/api/destroy", methods=["POST"])
     @authed_only
+    @ratelimit_per_user(method="POST", limit=20, interval=300)
     def destroy_session():
         user = get_current_user()
 
