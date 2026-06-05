@@ -157,6 +157,30 @@ def test_destroy_all_containers_admin(container_manager):
     assert cm.orchestrator.release_slot.call_count == 2
 
 
+def test_destroy_all_containers_admin_empty_fleet_still_logs(container_manager):
+    cm = container_manager
+
+    mock_model = MagicMock()
+    mock_model.query.all.return_value = []
+
+    admin_user = MagicMock()
+    admin_user.name = "admin"
+    admin_user.id = 99
+
+    with (
+        patch("container_manager.DesktopContainerInfoModel", mock_model),
+        patch("container_manager.event_logger") as mock_event_logger,
+    ):
+        killed = cm.destroy_all_containers_admin(admin_user)
+
+    assert killed == 0
+    mock_event_logger.log_event.assert_called_once()
+    args, kwargs = mock_event_logger.log_event.call_args
+    assert args[0] == "admin_action"
+    assert kwargs["metadata"] == {"killed_count": 0}
+    assert kwargs["user_id"] == 99
+
+
 def test_periodic_cleanup_destroys_expired(container_manager):
     cm = container_manager
 

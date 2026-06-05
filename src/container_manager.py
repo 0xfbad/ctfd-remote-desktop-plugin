@@ -861,15 +861,16 @@ class ContainerManager:
             except Exception as e:
                 logger.error(f"failed to kill session for user {row.user_id}: {e}")
 
-        if killed:
-            event_logger.log_event(
-                "admin_action",
-                f"admin {admin_user.name} killed all sessions ({killed} total)",
-                user_id=admin_user.id,
-                username=admin_user.name,
-                level="warning",
-                metadata={"killed_count": killed},
-            )
+        # log unconditionally so an admin pressing kill-all on an empty fleet
+        # still leaves an attributable audit trail (killed=0)
+        event_logger.log_event(
+            "admin_action",
+            f"admin {admin_user.name} killed all sessions ({killed} total)",
+            user_id=admin_user.id,
+            username=admin_user.name,
+            level="warning",
+            metadata={"killed_count": killed},
+        )
 
         return killed
 
