@@ -164,6 +164,12 @@ def load(app: Flask) -> None:
 
     remote_desktop_bp = create_routes(container_manager, orchestrator)
 
+    @remote_desktop_bp.after_request
+    def _add_frame_headers(resp):
+        resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'self'")
+        return resp
+
     app.register_blueprint(remote_desktop_bp)
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
 
