@@ -408,20 +408,24 @@ class ContainerManager:
 
         logger.info(f"create_container called for user {user_id} ({username})")
 
+        # single critical section serializes the check-and-claim. without this,
+        # two near-simultaneous POSTs can both pass the in-progress check and
+        # both spawn background greenlets, leaking a host slot
         with self.lock:
             existing = self.creation_status.get(user_id)
             if existing and existing.get("status") not in (None, "failed", "ready"):
                 return {"success": False, "error": "Creation already in progress"}
 
-        existing_row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
-        if existing_row:
-            return {"success": False, "error": "Session already exists"}
+            existing_row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+            if existing_row:
+                return {"success": False, "error": "Session already exists"}
+
+            self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
 
         if not self.orchestrator.has_healthy_context():
+            with self.lock:
+                self.creation_status.pop(user_id, None)
             raise HostsUnavailableException("no healthy docker contexts available")
-
-        with self.lock:
-            self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
 
         host_status = self.orchestrator.get_status()
         event_logger.log_event(
