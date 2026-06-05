@@ -589,6 +589,9 @@ class ContainerManager:
     def _verify_or_reap(self, row: DesktopContainerInfoModel) -> bool:
         # returns True if the row is live or unverifiable (transient error).
         # returns False if the container vanished and we deleted the row.
+        user_id = row.user_id
+        # is_container_running does a paramiko ssh round-trip, keep it out of
+        # the per-user lock so we don't block destroy_container on the network
         try:
             running = self.host_manager.is_container_running(row.docker_context, row.container_id)
         except (
@@ -602,24 +605,34 @@ class ContainerManager:
         if running:
             return True
 
-        ended_at = time.time()
-        user = Users.query.filter_by(id=row.user_id).first()
-        db.session.add(
-            DesktopSessionHistoryModel(
-                user_id=row.user_id,
-                username=user.name if user else f"User {row.user_id}",
-                docker_context=row.docker_context,
-                started_at=row.created_at,
-                ended_at=ended_at,
-                duration=ended_at - row.created_at,
-                end_reason="reconciliation",
-                extensions_used=row.extensions_used,
+        # serialize with destroy_container so a concurrent admin-kill or
+        # user-destroy can't double-insert history for the same teardown.
+        # rollback ends the snapshot from the caller's earlier select so the
+        # re-query inside the lock sees the latest committed state
+        with self._get_destroy_lock(user_id):
+            db.session.rollback()
+            row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+            if not row:
+                return False
+
+            ended_at = time.time()
+            user = Users.query.filter_by(id=user_id).first()
+            db.session.add(
+                DesktopSessionHistoryModel(
+                    user_id=user_id,
+                    username=user.name if user else f"User {user_id}",
+                    docker_context=row.docker_context,
+                    started_at=row.created_at,
+                    ended_at=ended_at,
+                    duration=ended_at - row.created_at,
+                    end_reason="reconciliation",
+                    extensions_used=row.extensions_used,
+                )
             )
-        )
-        self.orchestrator.release_slot(row.docker_context)
-        db.session.delete(row)
-        db.session.commit()
-        return False
+            self.orchestrator.release_slot(row.docker_context)
+            db.session.delete(row)
+            db.session.commit()
+            return False
 
     @staticmethod
     def _timer_from_row(row: DesktopContainerInfoModel) -> TimerDict | None:
