@@ -14,7 +14,15 @@ from CTFd.utils.user import get_current_user, is_admin, is_verified
 from .container_manager import ContainerManager, ContainerInfoDict, TimerDict, TimerStatusDict
 from .orchestrator import Orchestrator
 from .event_logger import event_logger, EventDict
-from .models import user_flags, _esc
+from .models import (
+    user_flags,
+    username_or_fallback,
+    SETTING_DEFAULTS,
+    VNC_VIEWER_QUERY,
+    END_REASON_RECONCILIATION,
+    END_REASON_ADMIN_KILLED,
+    _esc,
+)
 from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
 from .exceptions import HostsUnavailableException
 from .utils import ratelimit_per_user
@@ -38,7 +46,7 @@ def _target_flags(user: Users | None) -> dict[str, bool]:  # type: ignore[type-a
 
 def _direct_vnc_url(host: str, novnc_port: int, password: str) -> str:
     # password in fragment so it never appears in server logs or referer headers
-    return f"http://{host}:{novnc_port}/vnc.html?autoconnect=true&resize=remote&reconnect=true#password={password}"
+    return f"http://{host}:{novnc_port}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
 
 
 _INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "no healthy contexts")
@@ -51,6 +59,24 @@ def _infra_status(error: str | None) -> int:
         return 500
     lowered = error.lower()
     return 503 if any(tok in lowered for tok in _INFRA_ERROR_TOKENS) else 500
+
+
+def _heatmap_window(period: str) -> tuple[bool, datetime.date]:
+    """(week_mode, start_date) shared by the heatmap endpoints; 7-day window ending today (UTC)"""
+    week_mode = period == "week"
+    start_date = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=6)).date()
+    return week_mode, start_date
+
+
+def _heatmap_result(data: list, week_mode: bool, start_date: datetime.date) -> dict:  # type: ignore[type-arg]
+    """frame heatmap data points with either a week start_ts or the Mon..Sun day labels"""
+    result: dict = {"data": data}
+    if week_mode:
+        epoch = datetime.datetime(1970, 1, 1)
+        result["start_ts"] = int((datetime.datetime.combine(start_date, datetime.time()) - epoch).total_seconds())
+    else:
+        result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    return result
 
 
 def _require_confirm():
@@ -70,6 +96,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         static_url_path="/remote-desktop/static",
     )
 
+    # builds the frontend TimerDict shape; keep in sync with
+    # container_manager._timer_from_row which builds the same shape
     def _timer_dict(timer_status: TimerStatusDict) -> TimerDict | None:
         if not timer_status.get("success"):
             return None
@@ -77,7 +105,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             "active": bool(timer_status.get("started", False)),
             "time_remaining": int(timer_status.get("time_remaining", 0)),
             "extensions_used": int(timer_status.get("extensions_used", 0)),
-            "max_extensions": int(timer_status.get("max_extensions", 3)),
+            "max_extensions": int(timer_status.get("max_extensions", SETTING_DEFAULTS["max_extensions"])),  # type: ignore[arg-type]
         }
 
     def _session_dict(container_info: ContainerInfoDict, timer_status: TimerStatusDict) -> SessionDict:
@@ -393,7 +421,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         target_user = Users.query.filter_by(id=user_id).first()
         if not target_user:
             return jsonify({"error": "User not found"}), 404
-        target_username = target_user.name if target_user else f"User {user_id}"
+        target_username = username_or_fallback(target_user, user_id)
 
         event_logger.log_event(
             "admin_action",
@@ -409,7 +437,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             },
         )
 
-        result = container_manager.destroy_container(user_id, reason="admin_killed")
+        result = container_manager.destroy_container(user_id, reason=END_REASON_ADMIN_KILLED)
 
         if result.get("success"):
             return jsonify({"success": True})
@@ -426,7 +454,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         target_user = Users.query.filter_by(id=user_id).first()
         if not target_user:
             return jsonify({"error": "User not found"}), 404
-        target_username = target_user.name if target_user else f"User {user_id}"
+        target_username = username_or_fallback(target_user, user_id)
 
         event_logger.log_event(
             "admin_action",
@@ -457,7 +485,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         target_user = Users.query.filter_by(id=user_id).first()
         if not target_user:
             return jsonify({"error": "User not found"}), 404
-        target_username = target_user.name if target_user else f"User {user_id}"
+        target_username = username_or_fallback(target_user, user_id)
 
         event_logger.log_event(
             "admin_action",
@@ -757,7 +785,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             ctx = row.docker_context
             hosts[ctx]["sessions"] += 1
             hosts[ctx]["total_duration"] += row.duration
-            if row.end_reason == "reconciliation":
+            if row.end_reason == END_REASON_RECONCILIATION:
                 hosts[ctx]["failures"] += 1
 
         result = [{"host": _esc(h), **hosts[h]} for h in sorted(hosts.keys())]
@@ -771,11 +799,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         counts = [[0] * 7 for _ in range(24)]
         durations = [[0.0] * 7 for _ in range(24)]
-        week_mode = period == "week"
-
-        if week_mode:
-            utc_now = datetime.datetime.now(datetime.UTC)
-            start_date = (utc_now - datetime.timedelta(days=6)).date()
+        week_mode, start_date = _heatmap_window(period)
 
         for r in rows:
             if not r.started_at:
@@ -796,13 +820,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 if counts[hour][day] > 0:
                     data.append([day, hour, counts[hour][day], round(durations[hour][day] / 3600, 1)])
 
-        result: dict = {"data": data}
-        if week_mode:
-            epoch = datetime.datetime(1970, 1, 1)
-            result["start_ts"] = int((datetime.datetime.combine(start_date, datetime.time()) - epoch).total_seconds())
-        else:
-            result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        return jsonify(result)
+        return jsonify(_heatmap_result(data, week_mode, start_date))
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/duration-distribution", methods=["GET"])
     @admins_only
@@ -996,11 +1014,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         rows = _cmd_log_query(period).all()
 
         counts = [[0] * 7 for _ in range(24)]
-        week_mode = period == "week"
-
-        if week_mode:
-            utc_now = datetime.datetime.now(datetime.UTC)
-            start_date = (utc_now - datetime.timedelta(days=6)).date()
+        week_mode, start_date = _heatmap_window(period)
 
         for r in rows:
             dt = datetime.datetime.fromtimestamp(r.timestamp, tz=datetime.UTC)
@@ -1018,13 +1032,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 if counts[hour][day] > 0:
                     data.append([day, hour, counts[hour][day]])
 
-        result: dict = {"data": data}
-        if week_mode:
-            epoch = datetime.datetime(1970, 1, 1)
-            result["start_ts"] = int((datetime.datetime.combine(start_date, datetime.time()) - epoch).total_seconds())
-        else:
-            result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        return jsonify(result)
+        return jsonify(_heatmap_result(data, week_mode, start_date))
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/summary", methods=["GET"])
     @admins_only

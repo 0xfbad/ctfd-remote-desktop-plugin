@@ -116,14 +116,18 @@ All settings live in the database and are managed through Admin > Config > Remot
 | extension_duration | 1800 | seconds added per extension |
 | max_extensions | 3 | max extension count |
 | vnc_ready_attempts | 180 | polls waiting for noVNC, 0.5s each |
+| http_request_timeout | 3 | seconds per noVNC readiness poll request |
 | cleanup_interval | 300 | seconds between expired session scans |
-| pids_limit | 512 | max processes per container |
+| pids_limit | 4096 | max processes per container |
 | max_concurrent_creates | 2 | concurrent creates per host |
 | username_source | name | derive container username from CTFd `name` or `email` |
 | require_verified | true | require email verification, only applies if CTFd has verification enabled |
 | command_logging_enabled | false | periodically ingest shell command logs from running containers |
+| command_log_interval | 30 | seconds between command log collection runs |
 | cap_drop | ALL | linux capabilities to drop |
-| cap_add | CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE,SYS_CHROOT | linux capabilities to add back |
+| cap_add | CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE | linux capabilities to add back |
+| retention_days | 60 | days of event log history to keep before pruning |
+| rd_network_name | rd-isolated | docker network containers attach to |
 
 ## Troubleshooting
 

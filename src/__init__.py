@@ -100,7 +100,12 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
     import time as _time
 
     from CTFd.models import db, Users
-    from .models import DesktopContainerInfoModel, DesktopSessionHistoryModel
+    from .models import (
+        DesktopContainerInfoModel,
+        DesktopSessionHistoryModel,
+        END_REASON_RECONCILIATION,
+        username_or_fallback,
+    )
 
     rows = DesktopContainerInfoModel.query.all()
     removed = 0
@@ -124,7 +129,7 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
         else:
             ended_at = _time.time()
             user = Users.query.filter_by(id=row.user_id).first()
-            username = user.name if user else f"User {row.user_id}"
+            username = username_or_fallback(user, row.user_id)
             history = DesktopSessionHistoryModel(
                 user_id=row.user_id,
                 username=username,
@@ -132,7 +137,7 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
                 started_at=row.created_at,
                 ended_at=ended_at,
                 duration=ended_at - row.created_at,
-                end_reason="reconciliation",
+                end_reason=END_REASON_RECONCILIATION,
                 extensions_used=row.extensions_used,
             )
             db.session.add(history)

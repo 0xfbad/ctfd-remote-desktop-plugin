@@ -11,7 +11,7 @@ import gevent.monkey
 import gevent.threadpool
 import paramiko
 
-from .models import DesktopDockerContextModel
+from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
 
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ class DockerHostManager:
         self._context_configs: dict[str, str] = {}
         self._pub_hostnames: dict[str, str] = {}
         # keyed by (context_name, thread_ident) because paramiko Channels bind
-        # gevent.Event to the Hub of the creating thread, see module docstring
+        # gevent.Event to the Hub of the creating thread
         self._clients: dict[tuple[str, int], docker.DockerClient] = {}
         self._config_generation: int = 0
         self._client_generation: int = -1
@@ -504,7 +504,7 @@ class DockerHostManager:
                         raw = last_tag[:19]
                 try:
                     created = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").strftime(
-                        "%b %-d, %Y %-I:%M:%S %p"
+                        DISPLAY_DATETIME_FORMAT
                     )
                 except (ValueError, AttributeError):
                     created = raw.replace("T", " ")

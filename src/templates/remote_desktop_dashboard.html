@@ -815,7 +815,7 @@
 			case 'session_extended':
 				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
 			case 'session_error':
-				// inv: event.message for session_error is _esc'd at event_logger.py:74;
+				// inv: event.message for session_error is _esc'd in event_logger.log_event();
 				// all call sites pass static text or str(e). new call sites must preserve this.
 				return event.message;
 			case 'admin_action': {

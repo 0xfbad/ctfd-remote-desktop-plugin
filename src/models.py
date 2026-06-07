@@ -1,14 +1,33 @@
 from __future__ import annotations
 
-from CTFd.models import db
+from CTFd.models import db, Users
 from markupsafe import escape as _markup_escape
 
 SettingValue = bool | int | float | str | None
+
+# end_reason values persisted to the desktop_session_history.end_reason column.
+# these strings live in the DB, the names exist only to prevent typo drift at call sites
+END_REASON_RECONCILIATION = "reconciliation"
+END_REASON_USER_DESTROYED = "user_destroyed"
+END_REASON_ADMIN_KILLED = "admin_killed"
+END_REASON_EXPIRED = "expired"
+
+# noVNC viewer query string shared by the absolute and relative vnc.html URL builders
+VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true"
+
+# strftime format for human-facing timestamps (event log datetime, image build date).
+# %-d / %-I are glibc-specific no-pad directives, fine on the linux deploy target
+DISPLAY_DATETIME_FORMAT = "%b %-d, %Y %-I:%M:%S %p"
 
 
 def _esc(val: str | None) -> str:
     """html-escape a string for safe embedding in JSON / innerHTML contexts"""
     return str(_markup_escape(val)) if val else ""
+
+
+def username_or_fallback(user: Users | None, user_id: int) -> str:  # type: ignore[type-arg]
+    """display name for a user, falling back to "User {id}" when the row is gone"""
+    return user.name if user else f"User {user_id}"
 
 
 class DesktopDockerContextModel(db.Model):

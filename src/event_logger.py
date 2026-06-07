@@ -13,8 +13,12 @@ from markupsafe import escape as _markup_escape
 logger = logging.getLogger(__name__)
 
 
-def _esc(val: Any) -> Any:
-    """html-escape strings, pass through everything else"""
+def _esc_passthrough(val: Any) -> Any:
+    """html-escape strings, pass through everything else.
+
+    distinct from models._esc, which coerces to str and returns "" for falsy.
+    that differing falsy/passthrough behavior is load-bearing, do not merge them
+    """
     if isinstance(val, str):
         return str(_markup_escape(val))
     return val
@@ -23,10 +27,10 @@ def _esc(val: Any) -> Any:
 def _esc_deep(obj: Any) -> Any:
     """recursively html-escape all string values (and dict keys) in a structure"""
     if isinstance(obj, dict):
-        return {_esc(k): _esc_deep(v) for k, v in obj.items()}
+        return {_esc_passthrough(k): _esc_deep(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return type(obj)(_esc_deep(v) for v in obj)
-    return _esc(obj)
+    return _esc_passthrough(obj)
 
 
 EventDict = dict[str, int | float | str | bool | None | dict[str, int | float | str | bool | None]]
@@ -91,8 +95,11 @@ def _event_to_row(event: EventDict) -> dict[str, Any]:
         meta_json = json.dumps(metadata, default=str) if metadata else None
     except Exception:
         meta_json = None
+    # timestamp is always a float at the source; narrow the EventDict union for mypy
+    ts = event.get("timestamp") or time.time()
+    timestamp = float(ts) if isinstance(ts, (int, float, str)) else time.time()
     return {
-        "timestamp": float(event.get("timestamp") or time.time()),
+        "timestamp": timestamp,
         "event_type": str(event.get("type") or "")[:128],
         "level": str(event.get("level") or "info")[:16],
         "user_id": event.get("user_id"),
@@ -120,6 +127,7 @@ class EventLogger:
         user_flags: dict[str, bool] | None = None,
     ) -> EventDict:
         from . import event_bus
+        from .models import DISPLAY_DATETIME_FORMAT
 
         with self.lock:
             event_id = f"{event_bus.WORKER_ID}:{self._next_id}"
@@ -138,12 +146,12 @@ class EventLogger:
         event: EventDict = {
             "id": event_id,
             "timestamp": time.time(),
-            "datetime": datetime.now(UTC).strftime("%b %-d, %Y %-I:%M:%S %p"),
+            "datetime": datetime.now(UTC).strftime(DISPLAY_DATETIME_FORMAT),
             "type": event_type,
             "level": level,
-            "message": _esc(message),
+            "message": _esc_passthrough(message),
             "user_id": user_id,
-            "username": _esc(username),
+            "username": _esc_passthrough(username),
             **user_flags,
             "metadata": _esc_deep(metadata) if metadata else {},
         }

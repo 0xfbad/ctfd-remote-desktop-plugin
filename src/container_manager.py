@@ -18,7 +18,13 @@ from .models import (
     DesktopSessionHistoryModel,
     CommandLogModel,
     SettingValue,
+    VNC_VIEWER_QUERY,
+    END_REASON_RECONCILIATION,
+    END_REASON_USER_DESTROYED,
+    END_REASON_ADMIN_KILLED,
+    END_REASON_EXPIRED,
     user_flags,
+    username_or_fallback,
     _esc,
 )
 from .event_logger import event_logger
@@ -32,7 +38,7 @@ logger = logging.getLogger(__name__)
 def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[type-arg]
     """fetch user from DB and return (user_obj, display_name) tuple"""
     user = Users.query.filter_by(id=user_id).first()
-    return user, user.name if user else f"User {user_id}"
+    return user, username_or_fallback(user, user_id)
 
 
 def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None:  # type: ignore[type-arg]
@@ -303,7 +309,7 @@ class ContainerManager:
             if not vnc_ready:
                 raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
 
-            vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?autoconnect=true&resize=remote&reconnect=true#password={vnc_password}"
+            vnc_url = f"/remote-desktop/vnc/{user_id}/vnc.html?{VNC_VIEWER_QUERY}#password={vnc_password}"
 
             # check if destroy was called while we were setting up
             with self.lock:
@@ -479,7 +485,7 @@ class ContainerManager:
             return self.creation_status.get(user_id)
 
     def destroy_container(
-        self, user_id: int, reason: str = "user_destroyed", log_destruction: bool = True
+        self, user_id: int, reason: str = END_REASON_USER_DESTROYED, log_destruction: bool = True
     ) -> ResultDict:
         _user, username = _display_name(user_id)
 
@@ -582,7 +588,7 @@ class ContainerManager:
             return None
 
         if self._is_expired(row):
-            self.destroy_container(user_id, reason="expired")
+            self.destroy_container(user_id, reason=END_REASON_EXPIRED)
             return None
 
         if not self._verify_or_reap(row):
@@ -643,12 +649,12 @@ class ContainerManager:
             db.session.add(
                 DesktopSessionHistoryModel(
                     user_id=user_id,
-                    username=user.name if user else f"User {user_id}",
+                    username=username_or_fallback(user, user_id),
                     docker_context=row.docker_context,
                     started_at=row.created_at,
                     ended_at=ended_at,
                     duration=ended_at - row.created_at,
-                    end_reason="reconciliation",
+                    end_reason=END_REASON_RECONCILIATION,
                     extensions_used=row.extensions_used,
                 )
             )
@@ -657,6 +663,8 @@ class ContainerManager:
             db.session.commit()
             return False
 
+    # builds the frontend TimerDict shape; keep in sync with
+    # routes._timer_dict which builds the same shape
     @staticmethod
     def _timer_from_row(row: DesktopContainerInfoModel) -> TimerDict | None:
         if not row.timer_started:
@@ -680,7 +688,7 @@ class ContainerManager:
         expired = [row for row in rows if self._is_expired(row)]
         for row in expired:
             try:
-                self.destroy_container(row.user_id, reason="expired")
+                self.destroy_container(row.user_id, reason=END_REASON_EXPIRED)
             except Exception as e:
                 logger.error(f"inline expiry cleanup failed for user {row.user_id}: {e}")
 
@@ -818,7 +826,7 @@ class ContainerManager:
             for user_id in expired_user_ids:
                 logger.info(f"auto-destroying expired session for user {user_id}")
                 try:
-                    self.destroy_container(user_id, reason="expired")
+                    self.destroy_container(user_id, reason=END_REASON_EXPIRED)
                 except Exception as e:
                     logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
@@ -878,7 +886,7 @@ class ContainerManager:
 
         for row in rows:
             try:
-                self.destroy_container(row.user_id, reason="admin_killed", log_destruction=False)
+                self.destroy_container(row.user_id, reason=END_REASON_ADMIN_KILLED, log_destruction=False)
                 killed += 1
             except Exception as e:
                 logger.error(f"failed to kill session for user {row.user_id}: {e}")
