@@ -19,9 +19,13 @@ from .docker_host_manager import DockerHostManager, LOCAL_CONTEXT_NAME, LOCAL_SO
 from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
-from .event_logger import event_logger
 from . import event_bus
+# import the submodule FIRST, before pulling `event_logger` (the instance) into this
+# namespace. otherwise line 22 overwrites the package's `event_logger` attribute with the
+# instance, and `from . import event_logger as event_logger_module` resolves to the
+# instance, not the submodule. then event_logger_module.start_persistence_drainer crashes
 from . import event_logger as event_logger_module
+from .event_logger import event_logger
 
 # module-global keeps the lock fd alive for the worker's lifetime, kernel releases on exit
 _scheduler_lock_fd = None
