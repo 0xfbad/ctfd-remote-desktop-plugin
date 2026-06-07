@@ -432,6 +432,27 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
+    def force_remove_container(self, context_name: str, container_name: str) -> None:
+        # stop() is a no-op against Created-state containers (never started, so nothing to stop) and they don't
+        # auto_remove from a no-op stop, so reconciler-style cleanup needs remove(force=True) instead.
+        # also covers Running and Exited in one call without the stop->auto_remove timing dance
+        def _do():
+            client = self._get_client(context_name)
+            try:
+                container = client.containers.get(container_name)
+                container.remove(force=True)
+            except docker.errors.NotFound:
+                logger.debug(f"container {container_name} already removed")
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                raise
+            except Exception:
+                # see is_container_running for context on the broad catch
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}")
+
+        return self._call(context_name, _do)
+
     def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]]:
         # used by the reconcile sweep; returns [{"name": str, "created_ts": float}] for matching containers (any state).
         # swallows errors and returns [] so a flapping host can't break the sweep loop
