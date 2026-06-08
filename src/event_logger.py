@@ -251,22 +251,24 @@ def start_persistence_drainer(app: Any, interval: float = 1.0, batch_size: int =
                 q = _get_persist_queue()
                 batch = _drain_batch(q, batch_size)
                 if batch:
+                    # Flask-SQLAlchemy's session teardown only fires reliably on REQUEST contexts.
+                    # manually-opened app contexts don't auto-remove the scoped session, so each
+                    # iteration leaked a connection to the pool. explicit remove() releases it.
                     try:
                         with app.app_context():
                             from CTFd.models import db
                             from .models import DesktopEventLogModel
 
-                            db.session.bulk_insert_mappings(DesktopEventLogModel, batch)
-                            db.session.commit()
-                    except Exception:
-                        logger.warning("event log persistence batch failed", exc_info=True)
-                        try:
-                            with app.app_context():
-                                from CTFd.models import db
-
+                            try:
+                                db.session.bulk_insert_mappings(DesktopEventLogModel, batch)
+                                db.session.commit()
+                            except Exception:
+                                logger.warning("event log persistence batch failed", exc_info=True)
                                 db.session.rollback()
-                        except Exception:
-                            pass
+                            finally:
+                                db.session.remove()
+                    except Exception:
+                        logger.warning("event log drainer iteration crashed", exc_info=True)
             except Exception:
                 logger.warning("event log drainer iteration crashed", exc_info=True)
             gevent.sleep(interval)
@@ -292,6 +294,10 @@ def prune_event_log(retention_days: int) -> int:
     from .models import DesktopEventLogModel
 
     cutoff = time.time() - (retention_days * 86400)
-    deleted = DesktopEventLogModel.query.filter(DesktopEventLogModel.timestamp < cutoff).delete()
-    db.session.commit()
-    return deleted
+    try:
+        deleted = DesktopEventLogModel.query.filter(DesktopEventLogModel.timestamp < cutoff).delete()
+        db.session.commit()
+        return deleted
+    finally:
+        # explicit remove so scheduled job doesn't leak its connection
+        db.session.remove()
