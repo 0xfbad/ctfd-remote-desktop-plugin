@@ -79,6 +79,26 @@ class DesktopSessionHistoryModel(db.Model):
     extensions_used = db.Column(db.Integer, default=0)
 
 
+def history_from_row(
+    row: DesktopContainerInfoModel,
+    username: str,
+    ended_at: float,
+    reason: str,
+) -> DesktopSessionHistoryModel:
+    """build a history row from a live container row, snapshotting the session.
+    ended_at is passed in so the caller controls the teardown timestamp"""
+    return DesktopSessionHistoryModel(
+        user_id=row.user_id,
+        username=username,
+        docker_context=row.docker_context,
+        started_at=row.created_at,
+        ended_at=ended_at,
+        duration=ended_at - row.created_at,
+        end_reason=reason,
+        extensions_used=row.extensions_used,
+    )
+
+
 class CommandLogModel(db.Model):
     __tablename__ = "desktop_command_logs"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)

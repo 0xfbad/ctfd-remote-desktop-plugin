@@ -15,7 +15,6 @@ from flask import Flask
 from CTFd.models import db, Users
 from .models import (
     DesktopContainerInfoModel,
-    DesktopSessionHistoryModel,
     CommandLogModel,
     SettingValue,
     VNC_VIEWER_QUERY,
@@ -23,6 +22,7 @@ from .models import (
     END_REASON_USER_DESTROYED,
     END_REASON_ADMIN_KILLED,
     END_REASON_EXPIRED,
+    history_from_row,
     user_flags,
     username_or_fallback,
     _esc,
@@ -522,16 +522,7 @@ class ContainerManager:
                 self._log_offsets.pop(row.container_id, None)
 
             ended_at = time.time()
-            history = DesktopSessionHistoryModel(
-                user_id=row.user_id,
-                username=username,
-                docker_context=context_name,
-                started_at=row.created_at,
-                ended_at=ended_at,
-                duration=ended_at - row.created_at,
-                end_reason=reason,
-                extensions_used=row.extensions_used,
-            )
+            history = history_from_row(row, username, ended_at, reason)
             db.session.add(history)
 
             # revoke the minted CTFd session before deleting the row so the
@@ -647,15 +638,11 @@ class ContainerManager:
             ended_at = time.time()
             user = Users.query.filter_by(id=user_id).first()
             db.session.add(
-                DesktopSessionHistoryModel(
-                    user_id=user_id,
-                    username=username_or_fallback(user, user_id),
-                    docker_context=row.docker_context,
-                    started_at=row.created_at,
-                    ended_at=ended_at,
-                    duration=ended_at - row.created_at,
-                    end_reason=END_REASON_RECONCILIATION,
-                    extensions_used=row.extensions_used,
+                history_from_row(
+                    row,
+                    username_or_fallback(user, user_id),
+                    ended_at,
+                    END_REASON_RECONCILIATION,
                 )
             )
             self.orchestrator.release_slot(row.docker_context)
