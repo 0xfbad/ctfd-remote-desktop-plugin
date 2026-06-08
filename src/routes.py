@@ -6,6 +6,7 @@ import logging
 import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import NotRequired, TypedDict
 from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
@@ -32,6 +33,14 @@ logger = logging.getLogger(__name__)
 
 UserInfoDict = dict[str, str | bool]
 SessionDict = dict[str, float | str | TimerDict | None]
+
+
+class StatsAccum(TypedDict):
+    total: int
+    sessions: set[str]
+    commands: set[str]
+    username: str
+    user_info: NotRequired[UserInfoDict]
 
 
 def _user_info(user: Users | None, fallback_id: int | None = None) -> UserInfoDict:
@@ -837,9 +846,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         period = request.args.get("period", "all")
         rows = _session_query(period).all()
 
-        initial = get_setting("initial_duration")
-        ext_dur = get_setting("extension_duration")
-        max_ext = get_setting("max_extensions")
+        initial = int(get_setting("initial_duration") or 3600)
+        ext_dur = int(get_setting("extension_duration") or 1800)
+        max_ext = int(get_setting("max_extensions") or 3)
 
         def _fmt(s: int | float) -> str:
             if s < 3600:
@@ -962,7 +971,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         period = request.args.get("period", "all")
         rows = _cmd_log_query(period).all()
 
-        user_stats = defaultdict(lambda: {"total": 0, "sessions": set(), "commands": set(), "username": ""})
+        user_stats: defaultdict[int, StatsAccum] = defaultdict(
+            lambda: {"total": 0, "sessions": set(), "commands": set(), "username": ""}
+        )
 
         user_ids = {row.user_id for row in rows}
         users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
@@ -1254,7 +1265,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not ping_ok:
             return jsonify({"error": "context unreachable (ping failed)"}), 503
 
-        docker_image = get_setting("docker_image")
+        docker_image = str(get_setting("docker_image"))
         image_ok = container_manager.host_manager.check_image(context.context_name, docker_image)
         if not image_ok:
             return jsonify({"error": f"image {docker_image} not found on context"}), 503
