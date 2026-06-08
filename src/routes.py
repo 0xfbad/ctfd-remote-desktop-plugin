@@ -34,13 +34,13 @@ UserInfoDict = dict[str, str | bool]
 SessionDict = dict[str, float | str | TimerDict | None]
 
 
-def _user_info(user: Users | None, fallback_id: int | None = None) -> UserInfoDict:  # type: ignore[type-arg]
+def _user_info(user: Users | None, fallback_id: int | None = None) -> UserInfoDict:
     if not user:
         return {"username": f"User {fallback_id}"}
     return {"username": _esc(user.name), **user_flags(user)}
 
 
-def _target_flags(user: Users | None) -> dict[str, bool]:  # type: ignore[type-arg]
+def _target_flags(user: Users | None) -> dict[str, bool]:
     return {f"target_{k}": v for k, v in user_flags(user).items()}
 
 
@@ -68,7 +68,7 @@ def _heatmap_window(period: str) -> tuple[bool, datetime.date]:
     return week_mode, start_date
 
 
-def _heatmap_result(data: list, week_mode: bool, start_date: datetime.date) -> dict:  # type: ignore[type-arg]
+def _heatmap_result(data: list, week_mode: bool, start_date: datetime.date) -> dict:
     """frame heatmap data points with either a week start_ts or the Mon..Sun day labels"""
     result: dict = {"data": data}
     if week_mode:
@@ -77,6 +77,16 @@ def _heatmap_result(data: list, week_mode: bool, start_date: datetime.date) -> d
     else:
         result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return result
+
+
+def _heatmap_day_index(dt: datetime.datetime, week_mode: bool, start_date: datetime.date) -> int | None:
+    """column index 0..6 for a timestamp; None when week_mode and the row falls outside the 7-day window"""
+    if not week_mode:
+        return dt.weekday()
+    day_idx = (dt.date() - start_date).days
+    if not (0 <= day_idx < 7):
+        return None
+    return day_idx
 
 
 def _require_confirm():
@@ -115,7 +125,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             "timer": _timer_dict(timer_status),
         }
 
-    def _apply_period_filter(query: db.Query, column: db.Column, period: str | None) -> db.Query:  # type: ignore[name-defined]
+    def _apply_period_filter(query: db.Query, column: db.Column, period: str | None) -> db.Query:
         if period == "week":
             query = query.filter(column >= time.time() - 7 * 86400)
         elif period == "month":
@@ -805,12 +815,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             if not r.started_at:
                 continue
             dt = datetime.datetime.fromtimestamp(r.started_at, tz=datetime.UTC)
-            if week_mode:
-                day_idx = (dt.date() - start_date).days
-                if not (0 <= day_idx < 7):
-                    continue
-            else:
-                day_idx = dt.weekday()
+            day_idx = _heatmap_day_index(dt, week_mode, start_date)
+            if day_idx is None:
+                continue
             counts[dt.hour][day_idx] += 1
             durations[dt.hour][day_idx] += r.duration or 0
 
@@ -935,7 +942,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             }
         )
 
-    def _session_query(period: str | None = None, limit: int = 10000) -> db.Query:  # type: ignore[name-defined]
+    def _session_query(period: str | None = None, limit: int = 10000) -> db.Query:
         from .models import DesktopSessionHistoryModel
 
         query = DesktopSessionHistoryModel.query.join(Users, DesktopSessionHistoryModel.user_id == Users.id).filter(
@@ -943,7 +950,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         )
         return _apply_period_filter(query, DesktopSessionHistoryModel.started_at, period).limit(limit)
 
-    def _cmd_log_query(period: str | None = None, limit: int = 10000) -> db.Query:  # type: ignore[name-defined]
+    def _cmd_log_query(period: str | None = None, limit: int = 10000) -> db.Query:
         from .models import CommandLogModel
 
         query = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden.is_(False))
@@ -1018,12 +1025,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         for r in rows:
             dt = datetime.datetime.fromtimestamp(r.timestamp, tz=datetime.UTC)
-            if week_mode:
-                day_idx = (dt.date() - start_date).days
-                if not (0 <= day_idx < 7):
-                    continue
-            else:
-                day_idx = dt.weekday()
+            day_idx = _heatmap_day_index(dt, week_mode, start_date)
+            if day_idx is None:
+                continue
             counts[dt.hour][day_idx] += 1
 
         data = []
@@ -1288,7 +1292,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/events/stream")
     @admins_only
     def admin_events_stream():
-        def event_stream():  # type: ignore[return]
+        def event_stream():
             import queue
 
             event_queue: queue.Queue[EventDict] = queue.Queue(maxsize=100)

@@ -157,7 +157,7 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
 
 
 def load(app: Flask) -> None:
-    app.db.create_all()  # type: ignore[attr-defined]
+    app.db.create_all()
 
     host_manager = DockerHostManager()
     orchestrator = Orchestrator(host_manager)
@@ -187,7 +187,7 @@ def load(app: Flask) -> None:
     # /admin/config can find it without hardcoding the plugin folder name
     config_tpl = os.path.join(os.path.dirname(__file__), "templates", "remote_desktop_config.html")
     with open(config_tpl) as f:
-        app.overridden_templates["remote_desktop_config.html"] = f.read()  # type: ignore[attr-defined]
+        app.overridden_templates["remote_desktop_config.html"] = f.read()
 
     # only when serving HTTP, not CLI commands where scheduler threads prevent exit
     _serving = (

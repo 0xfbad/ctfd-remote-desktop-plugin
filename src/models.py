@@ -25,7 +25,7 @@ def _esc(val: str | None) -> str:
     return str(_markup_escape(val)) if val else ""
 
 
-def username_or_fallback(user: Users | None, user_id: int) -> str:  # type: ignore[type-arg]
+def username_or_fallback(user: Users | None, user_id: int) -> str:
     """display name for a user, falling back to "User {id}" when the row is gone"""
     return user.name if user else f"User {user_id}"
 

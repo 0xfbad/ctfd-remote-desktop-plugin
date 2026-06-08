@@ -35,13 +35,13 @@ from .exceptions import HostsUnavailableException
 logger = logging.getLogger(__name__)
 
 
-def _display_name(user_id: int) -> tuple[Users | None, str]:  # type: ignore[type-arg]
+def _display_name(user_id: int) -> tuple[Users | None, str]:
     """fetch user from DB and return (user_obj, display_name) tuple"""
     user = Users.query.filter_by(id=user_id).first()
     return user, username_or_fallback(user, user_id)
 
 
-def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None:  # type: ignore[type-arg]
+def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None:
     # CTFd uses server-side sessions, save_session writes to the cache
     # backend so just signing the sid wouldn't populate it.
     # returns (cookie_name, signed_cookie_value, raw_sid). the raw sid is
@@ -136,7 +136,7 @@ class ContainerManager:
 
         return get_setting(key)
 
-    def _resolve_username(self, user: Users) -> str:  # type: ignore[type-arg]
+    def _resolve_username(self, user: Users) -> str:
         source = self._get_setting("username_source")
 
         if source == "email" and user.email:
@@ -256,7 +256,7 @@ class ContainerManager:
 
                 cookie_sid: str | None = None
                 if user is not None:
-                    minted = _mint_session_cookie(current_app._get_current_object(), user)  # type: ignore[attr-defined]
+                    minted = _mint_session_cookie(current_app._get_current_object(), user)
                     if minted:
                         cookie_name, cookie_value, cookie_sid = minted
                         container_env["CTFD_COOKIE_NAME"] = cookie_name
@@ -462,7 +462,7 @@ class ContainerManager:
             },
         )
 
-        app: Flask = current_app._get_current_object()  # type: ignore[assignment]
+        app: Flask = current_app._get_current_object()
 
         try:
             import gevent
@@ -882,7 +882,7 @@ class ContainerManager:
                 except Exception as e:
                     logger.error(f"reconcile: failed to remove {name} on {ctx_name}: {e}")
 
-    def destroy_all_containers_admin(self, admin_user: Users) -> int:  # type: ignore[type-arg]
+    def destroy_all_containers_admin(self, admin_user: Users) -> int:
         rows = DesktopContainerInfoModel.query.all()
         killed = 0
 
