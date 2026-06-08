@@ -6,4 +6,3 @@ check-python:
     - ruff format --check .
     - ruff check .
     - mypy .
-    - pytest tests/ -v

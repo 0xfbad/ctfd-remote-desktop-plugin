@@ -20,6 +20,7 @@ from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
 from . import event_bus
+
 # import the submodule FIRST, before pulling `event_logger` (the instance) into this
 # namespace. otherwise line 22 overwrites the package's `event_logger` attribute with the
 # instance, and `from . import event_logger as event_logger_module` resolves to the
