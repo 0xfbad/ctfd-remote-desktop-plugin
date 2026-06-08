@@ -209,8 +209,16 @@ def load(app: Flask) -> None:
 
     def _with_app_ctx(fn: Callable[[], None]) -> Callable[[], None]:
         def wrapper() -> None:
+            # Flask-SQLAlchemy auto-teardown fires reliably only on REQUEST contexts; manually-opened
+            # app contexts leak the scoped session's connection on exit. explicit remove() in finally
+            # covers every scheduled job (periodic_cleanup, collect_all_command_logs, _prune_event_log)
             with app.app_context():
-                fn()
+                from CTFd.models import db
+
+                try:
+                    fn()
+                finally:
+                    db.session.remove()
 
         return wrapper
 
