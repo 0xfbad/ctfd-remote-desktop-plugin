@@ -312,16 +312,16 @@ class DockerHostManager:
         return list(self._context_configs.keys())
 
     def ping(self, context_name: str) -> bool:
-        def _do():
-            try:
-                client = self._get_client(context_name)
-                client.ping()
-                return True
-            except Exception:
-                self._clear_client(context_name)
-                return False
-
-        return self._call(context_name, _do)
+        # use a fresh ephemeral client. cached clients share paramiko transports
+        # that wedge on dead-but-unreaped TCP sockets after idle periods, blocking
+        # the 30s health_check past its interval for the full kernel retransmit cycle
+        url = self._context_configs.get(context_name)
+        if not url:
+            return False
+        if ping_endpoint(url, timeout=3):
+            return True
+        self._clear_client(context_name)
+        return False
 
     def run_container(
         self,
