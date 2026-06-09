@@ -101,6 +101,7 @@
 	.badge-evt-admin { background-color: #fff3cd; color: #856404; }
 	.badge-evt-host-up { background-color: #d4edda; color: #155724; }
 	.badge-evt-host-down { background-color: #f8d7da; color: #721c24; }
+	.badge-evt-orphan { background-color: #ffd9a8; color: #7a3d00; }
 
 	.report-content-full {
 		white-space: pre-wrap;
@@ -689,6 +690,7 @@
 		'admin_action': 'Admin',
 		'host_unhealthy': 'Host Down',
 		'host_healthy': 'Host Up',
+		'orphan_reaped': 'Orphan Reaped',
 	};
 
 	const EXIT_CODE_LABELS = {
@@ -778,6 +780,7 @@
 		'admin_action': 'badge-evt-admin',
 		'host_unhealthy': 'badge-evt-host-down',
 		'host_healthy': 'badge-evt-host-up',
+		'orphan_reaped': 'badge-evt-orphan',
 	};
 
 	function formatDuration(secs) {
@@ -839,6 +842,11 @@
 				const img = m.image;
 				if (img) return `${m.context_name}: image ${img.id} (${img.size_mb}MB, built ${img.created})`;
 				return `${m.context_name}: reachable`;
+			}
+			case 'orphan_reaped': {
+				const parts = [m.context, m.container_name].filter(Boolean).join(' / ');
+				const age = formatDuration(m.age_seconds);
+				return age ? `${parts} (age ${age}, leftover with no db row)` : parts;
 			}
 			default:
 				return event.message || '';
