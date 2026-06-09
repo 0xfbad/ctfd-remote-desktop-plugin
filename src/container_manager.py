@@ -12,6 +12,7 @@ from threading import Lock
 import docker
 import paramiko
 from flask import Flask
+from sqlalchemy.orm.exc import ObjectDeletedError
 from CTFd.models import db, Users
 from .models import (
     DesktopContainerInfoModel,
@@ -974,7 +975,15 @@ class ContainerManager:
 
             rows = DesktopContainerInfoModel.query.all()
             for row in rows:
+                # snapshot name before the call so the except branch doesn't
+                # re-trigger ObjectDeletedError when logging a deleted row
+                try:
+                    name = row.container_name
+                except ObjectDeletedError:
+                    continue
                 try:
                     self._collect_logs_for_container(row)
+                except ObjectDeletedError:
+                    continue
                 except Exception as e:
-                    logger.debug(f"log collection failed for {row.container_name}: {e}")
+                    logger.debug(f"log collection failed for {name}: {e}")
