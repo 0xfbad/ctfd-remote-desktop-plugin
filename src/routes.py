@@ -65,6 +65,33 @@ def _target_flags(user: Users | None) -> dict[str, bool]:
     return {f"target_{k}": v for k, v in user_flags(user).items()}
 
 
+def _log_admin_target_action(
+    admin_user: Users,
+    message: str,
+    action: str,
+    user_id: int,
+    target_username: str,
+    target_user: Users | None,
+    *,
+    level: str,
+) -> None:
+    # shared audit tail for the per-user admin actions (kill/peek/extend); each
+    # handler keeps its own user lookup and pre-checks, only this log call is common
+    event_logger.log_event(
+        "admin_action",
+        message,
+        user_id=admin_user.id,
+        username=admin_user.name,
+        level=level,
+        metadata={
+            "action": action,
+            "target_id": user_id,
+            "target": target_username,
+            **_target_flags(target_user),
+        },
+    )
+
+
 def _direct_vnc_url(host: str, novnc_port: int, password: str) -> str:
     # password in fragment so it never appears in server logs or referer headers
     return f"http://{host}:{novnc_port}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
@@ -463,18 +490,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "User not found"}), 404
         target_username = username_or_fallback(target_user, user_id)
 
-        event_logger.log_event(
-            "admin_action",
+        _log_admin_target_action(
+            admin_user,
             f"admin {admin_user.name} killed session for {target_username}",
-            user_id=admin_user.id,
-            username=admin_user.name,
+            "kill",
+            user_id,
+            target_username,
+            target_user,
             level="warning",
-            metadata={
-                "action": "kill",
-                "target_id": user_id,
-                "target": target_username,
-                **_target_flags(target_user),
-            },
         )
 
         result = container_manager.destroy_container(user_id, reason=END_REASON_ADMIN_KILLED)
@@ -496,18 +519,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "User not found"}), 404
         target_username = username_or_fallback(target_user, user_id)
 
-        event_logger.log_event(
-            "admin_action",
+        _log_admin_target_action(
+            admin_user,
             f"admin {admin_user.name} viewing session for {target_username}",
-            user_id=admin_user.id,
-            username=admin_user.name,
+            "peek",
+            user_id,
+            target_username,
+            target_user,
             level="info",
-            metadata={
-                "action": "peek",
-                "target_id": user_id,
-                "target": target_username,
-                **_target_flags(target_user),
-            },
         )
         return jsonify({"success": True})
 
@@ -527,18 +546,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "User not found"}), 404
         target_username = username_or_fallback(target_user, user_id)
 
-        event_logger.log_event(
-            "admin_action",
+        _log_admin_target_action(
+            admin_user,
             f"admin {admin_user.name} extended session for {target_username}",
-            user_id=admin_user.id,
-            username=admin_user.name,
+            "extend",
+            user_id,
+            target_username,
+            target_user,
             level="info",
-            metadata={
-                "action": "extend",
-                "target_id": user_id,
-                "target": target_username,
-                **_target_flags(target_user),
-            },
         )
 
         result = container_manager.extend_session_timer(user_id)
