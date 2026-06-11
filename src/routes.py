@@ -43,6 +43,18 @@ class StatsAccum(TypedDict):
     user_info: NotRequired[UserInfoDict]
 
 
+class TopUserAccum(TypedDict):
+    total_duration: float
+    session_count: int
+    username: str
+
+
+class HostAccum(TypedDict):
+    sessions: int
+    total_duration: float
+    failures: int
+
+
 def _user_info(user: Users | None, fallback_id: int | None = None) -> UserInfoDict:
     if not user:
         return {"username": f"User {fallback_id}"}
@@ -169,7 +181,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         vnc_url = ""
         if container_info:
-            vnc_url = container_info.get("vnc_url", "")
+            vnc_url = str(container_info.get("vnc_url", ""))
 
         template_container_info = None
         ssh_info = None
@@ -188,7 +200,10 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
             if not behind_proxy:
                 host = request.host.split(":")[0]
-                vnc_url = _direct_vnc_url(host, container_info["novnc_port"], container_info["vnc_password"])
+                # novnc_port and vnc_password are NOT NULL columns, always present here
+                novnc_port = container_info["novnc_port"]
+                assert novnc_port is not None
+                vnc_url = _direct_vnc_url(host, int(novnc_port), str(container_info["vnc_password"]))
                 if container_info.get("ttyd_port"):
                     terminal_url = f"http://{host}:{container_info['ttyd_port']}/"
             else:
@@ -281,7 +296,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": str(err)}), 503
 
         if not result.get("success"):
-            error = result.get("error", "Creation failed")
+            error = str(result.get("error", "Creation failed"))
             return jsonify({"error": error}), _infra_status(error)
 
         return jsonify(
@@ -312,6 +327,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         if status.get("status") == "ready":
             container_info = container_manager.get_container_info(user.id)
+            # status can say ready while the container has since expired or been
+            # reaped (get_container_info returns None), in which case there is no
+            # session to describe
+            if not container_info:
+                return jsonify({"status": "none"})
             timer_status = container_manager.get_session_timer_status(user.id)
             return jsonify(
                 {
@@ -334,7 +354,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         result = container_manager.destroy_container(user.id)
         if not result.get("success"):
-            error = result.get("error", "Destruction failed")
+            error = str(result.get("error", "Destruction failed"))
             return jsonify({"error": error}), _infra_status(error)
 
         return jsonify({"session": None})
@@ -419,8 +439,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not behind_proxy:
             host = request.host.split(":")[0]
             for c in containers:
-                if c.get("novnc_port"):
-                    c["vnc_url"] = _direct_vnc_url(host, c["novnc_port"], c.get("vnc_password", ""))
+                novnc_port = c.get("novnc_port")
+                if isinstance(novnc_port, int):
+                    c["vnc_url"] = _direct_vnc_url(host, novnc_port, str(c.get("vnc_password", "")))
         return jsonify({"containers": containers})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/hosts", methods=["GET"])
@@ -460,7 +481,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         if result.get("success"):
             return jsonify({"success": True})
-        error = result.get("error", "Failed to kill container")
+        error = str(result.get("error", "Failed to kill container"))
         return jsonify({"error": error}), _infra_status(error)
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
@@ -623,14 +644,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         from .models import get_all_settings, set_setting
 
         settings = get_all_settings()
-        docker_image = settings.get("docker_image", "ctfd-remote-desktop:latest")
+        docker_image = str(settings.get("docker_image", "ctfd-remote-desktop:latest"))
         display = docker_image.removesuffix(":latest")
 
         connected = container_manager.host_manager.get_connected_contexts()
         if not connected:
             return jsonify(images=[display], contexts=[], matrix={})
 
-        matrix = {display: {}}
+        matrix: dict[str, dict[str, dict[str, object]]] = {display: {}}
 
         def _info(ctx_name):
             return ctx_name, container_manager.host_manager.get_image_info(ctx_name, docker_image)
@@ -641,7 +662,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 for future in as_completed(futures, timeout=15):
                     try:
                         ctx_name, info = future.result()
-                        entry = {"available": info is not None}
+                        entry: dict[str, object] = {"available": info is not None}
                         if info:
                             entry["info"] = info
                         matrix[display][ctx_name] = entry
@@ -667,7 +688,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not raw:
             return jsonify(cached=False)
         try:
-            cache = json.loads(raw)
+            cache = json.loads(str(raw))
         except (json.JSONDecodeError, TypeError):
             return jsonify(cached=False)
 
@@ -685,7 +706,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         period = request.args.get("period", "all")
         rows = _session_query(period).all()
 
-        user_stats = defaultdict(lambda: {"total_duration": 0.0, "session_count": 0, "username": ""})
+        user_stats: defaultdict[int, TopUserAccum] = defaultdict(
+            lambda: {"total_duration": 0.0, "session_count": 0, "username": ""}
+        )
         for row in rows:
             entry = user_stats[row.user_id]
             entry["total_duration"] += row.duration
@@ -696,11 +719,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_([uid for uid, _ in top])).all()}
         users = []
         for uid, stats in top:
-            entry = {"user_id": uid, **stats}
+            out: dict[str, object] = {"user_id": uid, **stats}
             u = users_by_id.get(uid)
             if u:
-                entry.update(_user_info(u))
-            users.append(entry)
+                out.update(_user_info(u))
+            users.append(out)
         return jsonify({"users": users})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/summary", methods=["GET"])
@@ -799,7 +822,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         period = request.args.get("period", "all")
         rows = _session_query(period).all()
 
-        hosts = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0, "failures": 0})
+        hosts: defaultdict[str, HostAccum] = defaultdict(lambda: {"sessions": 0, "total_duration": 0.0, "failures": 0})
         for row in rows:
             ctx = row.docker_context
             hosts[ctx]["sessions"] += 1
@@ -898,8 +921,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         period = request.args.get("period", "all")
         rows = _session_query(period).all()
 
-        ext_counts = defaultdict(int)
-        end_reasons = defaultdict(int)
+        ext_counts: defaultdict[int, int] = defaultdict(int)
+        end_reasons: defaultdict[str, int] = defaultdict(int)
         for row in rows:
             ext_counts[row.extensions_used] += 1
             end_reasons[row.end_reason] += 1
@@ -1007,8 +1030,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         period = request.args.get("period", "all")
         rows = _cmd_log_query(period).all()
 
-        tool_counts = defaultdict(int)
-        tool_errors = defaultdict(int)
+        tool_counts: defaultdict[str, int] = defaultdict(int)
+        tool_errors: defaultdict[str, int] = defaultdict(int)
         for row in rows:
             tool = _extract_tool(row.command)
             if not tool:
@@ -1017,11 +1040,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             if row.exit_code and row.exit_code != 0:
                 tool_errors[tool] += 1
 
-        tools = sorted(
-            [{"tool": _esc(t), "count": c, "errors": tool_errors.get(t, 0)} for t, c in tool_counts.items()],
-            key=lambda x: x["count"],
-            reverse=True,
-        )[:30]
+        top_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)[:30]
+        tools = [{"tool": _esc(t), "count": c, "errors": tool_errors.get(t, 0)} for t, c in top_tools]
 
         return jsonify({"tools": tools})
 
