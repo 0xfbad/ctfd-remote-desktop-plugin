@@ -1366,7 +1366,8 @@
 
 	function refreshHeatmap(period) {
 		if (!period) period = document.getElementById('heatmap-period').value;
-		fetch(`/remote-desktop/dashboard/api/stats/heatmap?period=${period}`, {
+		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+		fetch(`/remote-desktop/dashboard/api/stats/heatmap?period=${period}&tz=${encodeURIComponent(tz)}`, {
 			headers: { 'CSRF-Token': init.csrfNonce }
 		})
 		.then(r => r.json())
@@ -1383,28 +1384,9 @@
 				return;
 			}
 
-			const tzOffset = -(new Date().getTimezoneOffset() / 60);
-			const localData = data.data.map(d => {
-				const localHour = (d[1] + tzOffset + 24) % 24;
-				const dayShift = Math.floor((d[1] + tzOffset) / 24);
-				const localDay = (d[0] + dayShift + 7) % 7;
-				return [localDay, localHour, d[2], d[3]];
-			});
 			const hours = Array.from({length: 24}, (_, h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'));
-
-			var dayLabels;
-			const wdNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-			if (data.start_ts != null) {
-				dayLabels = [];
-				for (let i = 0; i < 7; i++) {
-					const d = new Date((data.start_ts + i * 86400) * 1000);
-					dayLabels.push(wdNames[d.getDay()] + ' ' + (d.getMonth()+1) + '/' + d.getDate());
-				}
-			} else {
-				dayLabels = data.days;
-			}
-
-			const maxVal = Math.max(...localData.map(d => d[2]));
+			const dayLabels = data.days;
+			const maxVal = Math.max(...data.data.map(d => d[2]));
 			chart.setOption({
 				tooltip: {
 					position: 'top',
@@ -1431,7 +1413,7 @@
 				},
 				series: [{
 					type: 'heatmap',
-					data: localData,
+					data: data.data,
 					label: { show: false },
 					emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
 				}]
@@ -1570,7 +1552,8 @@
 
 	function refreshCmdHeatmap() {
 		const period = getPeriod('period-cmd-heatmap');
-		fetch(`/remote-desktop/dashboard/api/command-logs/stats/heatmap?period=${period}`, {
+		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+		fetch(`/remote-desktop/dashboard/api/command-logs/stats/heatmap?period=${period}&tz=${encodeURIComponent(tz)}`, {
 			headers: { 'X-Requested-With': 'XMLHttpRequest' },
 			credentials: 'same-origin'
 		})
@@ -1589,28 +1572,9 @@
 				return;
 			}
 
-			const tzOffset = -(new Date().getTimezoneOffset() / 60);
-			const localData = data.data.map(d => {
-				const localHour = (d[1] + tzOffset + 24) % 24;
-				const dayShift = Math.floor((d[1] + tzOffset) / 24);
-				const localDay = (d[0] + dayShift + 7) % 7;
-				return [localDay, localHour, d[2]];
-			});
 			const hours = Array.from({length: 24}, (_, h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'));
-
-			var dayLabels;
-			const wdNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-			if (data.start_ts != null) {
-				dayLabels = [];
-				for (let i = 0; i < 7; i++) {
-					const d = new Date((data.start_ts + i * 86400) * 1000);
-					dayLabels.push(wdNames[d.getDay()] + ' ' + (d.getMonth()+1) + '/' + d.getDate());
-				}
-			} else {
-				dayLabels = data.days;
-			}
-
-			const maxVal = Math.max(...localData.map(d => d[2]));
+			const dayLabels = data.days;
+			const maxVal = Math.max(...data.data.map(d => d[2]));
 			chart.setOption({
 				tooltip: {
 					position: 'top',
@@ -1636,7 +1600,7 @@
 				},
 				series: [{
 					type: 'heatmap',
-					data: localData,
+					data: data.data,
 					label: { show: false },
 					emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
 				}]

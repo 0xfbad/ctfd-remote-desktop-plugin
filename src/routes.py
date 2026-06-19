@@ -8,6 +8,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NotRequired, TypedDict
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
@@ -109,32 +110,15 @@ def _infra_status(error: str | None) -> int:
     return 503 if any(tok in lowered for tok in _INFRA_ERROR_TOKENS) else 500
 
 
-def _heatmap_window(period: str) -> tuple[bool, datetime.date]:
-    """(week_mode, start_date) shared by the heatmap endpoints; 7-day window ending today (UTC)"""
-    week_mode = period == "week"
-    start_date = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=6)).date()
-    return week_mode, start_date
-
-
-def _heatmap_result(data: list, week_mode: bool, start_date: datetime.date) -> dict:
-    """frame heatmap data points with either a week start_ts or the Mon..Sun day labels"""
-    result: dict = {"data": data}
-    if week_mode:
-        epoch = datetime.datetime(1970, 1, 1)
-        result["start_ts"] = int((datetime.datetime.combine(start_date, datetime.time()) - epoch).total_seconds())
-    else:
-        result["days"] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    return result
-
-
-def _heatmap_day_index(dt: datetime.datetime, week_mode: bool, start_date: datetime.date) -> int | None:
-    """column index 0..6 for a timestamp; None when week_mode and the row falls outside the 7-day window"""
-    if not week_mode:
-        return dt.weekday()
-    day_idx = (dt.date() - start_date).days
-    if not (0 <= day_idx < 7):
-        return None
-    return day_idx
+def _request_tz() -> datetime.tzinfo:
+    """viewer's IANA timezone for localizing heatmap buckets; falls back to UTC"""
+    name = request.args.get("tz", "")
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return datetime.UTC
 
 
 def _require_confirm():
@@ -853,18 +837,16 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def admin_stats_heatmap():
         period = request.args.get("period", "all")
         rows = _session_query(period).all()
+        tz = _request_tz()
 
         counts = [[0] * 7 for _ in range(24)]
         durations = [[0.0] * 7 for _ in range(24)]
-        week_mode, start_date = _heatmap_window(period)
 
         for r in rows:
             if not r.started_at:
                 continue
-            dt = datetime.datetime.fromtimestamp(r.started_at, tz=datetime.UTC)
-            day_idx = _heatmap_day_index(dt, week_mode, start_date)
-            if day_idx is None:
-                continue
+            dt = datetime.datetime.fromtimestamp(r.started_at, tz=tz)
+            day_idx = dt.weekday()
             counts[dt.hour][day_idx] += 1
             durations[dt.hour][day_idx] += r.duration or 0
 
@@ -874,7 +856,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 if counts[hour][day] > 0:
                     data.append([day, hour, counts[hour][day], round(durations[hour][day] / 3600, 1)])
 
-        return jsonify(_heatmap_result(data, week_mode, start_date))
+        return jsonify({"data": data, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/duration-distribution", methods=["GET"])
     @admins_only
@@ -1065,15 +1047,13 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def admin_command_stats_heatmap():
         period = request.args.get("period", "all")
         rows = _cmd_log_query(period).all()
+        tz = _request_tz()
 
         counts = [[0] * 7 for _ in range(24)]
-        week_mode, start_date = _heatmap_window(period)
 
         for r in rows:
-            dt = datetime.datetime.fromtimestamp(r.timestamp, tz=datetime.UTC)
-            day_idx = _heatmap_day_index(dt, week_mode, start_date)
-            if day_idx is None:
-                continue
+            dt = datetime.datetime.fromtimestamp(r.timestamp, tz=tz)
+            day_idx = dt.weekday()
             counts[dt.hour][day_idx] += 1
 
         data = []
@@ -1082,7 +1062,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 if counts[hour][day] > 0:
                     data.append([day, hour, counts[hour][day]])
 
-        return jsonify(_heatmap_result(data, week_mode, start_date))
+        return jsonify({"data": data, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/summary", methods=["GET"])
     @admins_only
