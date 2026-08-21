@@ -244,6 +244,9 @@ class DockerHostManager:
         new_pub_hostnames: dict[str, str] = {}
 
         rd_network = str(get_setting("rd_network_name") or "rd-isolated")
+        network_isolation = bool(get_setting("network_isolation"))
+        network_pool_size = int(get_setting("network_pool_size") or 0)
+        storage_limit = str(get_setting("storage_limit") or "").strip()
 
         for ctx in contexts:
             endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
@@ -252,13 +255,28 @@ class DockerHostManager:
                 continue
 
             def _check(endpoint=endpoint, ctx_name=ctx.context_name):
+                from .models import network_slot_name
+
                 client = None
                 try:
                     client = docker.DockerClient(base_url=endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
                     client.ping()
-                    # bridge is the docker default and always present, skip the probe so an operator
-                    # using bridge as an emergency rollback doesn't see spurious warnings
-                    if rd_network != "bridge":
+                    if network_isolation:
+                        # warn-only at load; the hard fail-closed happens at create
+                        # (the daemon rejects a create against a missing network)
+                        try:
+                            present = {n.name for n in client.networks.list()}
+                            for i in range(network_pool_size):
+                                if network_slot_name(i) not in present:
+                                    logger.warning(
+                                        f"context {ctx_name} missing docker network "
+                                        f"'{network_slot_name(i)}' - run provisioning/network/net-pool.sh"
+                                    )
+                        except Exception as e:
+                            logger.warning(f"context {ctx_name} network pool check failed: {e}")
+                    elif rd_network != "bridge":
+                        # bridge is the docker default and always present, skip the probe so an operator
+                        # using bridge as an emergency rollback doesn't see spurious warnings
                         try:
                             found = client.networks.list(names=[rd_network])
                             if not found:
@@ -269,6 +287,18 @@ class DockerHostManager:
                                 )
                         except Exception as e:
                             logger.warning(f"context {ctx_name} network check failed for '{rd_network}': {e}")
+                    if storage_limit:
+                        # storage_opt is a silent brick on non-xfs data-roots: the
+                        # daemon refuses every create. surface it at load instead
+                        try:
+                            backing = dict(client.info().get("DriverStatus") or []).get("Backing Filesystem", "")
+                            if backing and backing != "xfs":
+                                logger.warning(
+                                    f"context {ctx_name} storage_limit={storage_limit} but backing "
+                                    f"filesystem is {backing} (needs xfs+pquota) - creates WILL fail"
+                                )
+                        except Exception as e:
+                            logger.debug(f"context {ctx_name} backing-fs check failed: {e}")
                     return None
                 except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
                     return e
@@ -336,12 +366,71 @@ class DockerHostManager:
         hostname: str | None = None,
         extra_hosts: dict[str, str] | None = None,
         network: str | None = None,
+        volumes: dict[str, dict[str, str]] | None = None,
     ) -> ContainerResult:
         from .models import get_setting
 
         pids_limit = get_setting("pids_limit")
         cap_drop = [c.strip() for c in str(get_setting("cap_drop")).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(get_setting("cap_add")).split(",") if c.strip()]
+
+        # settings-gated hardening kwargs, validated here so a bad value fails
+        # loudly before any docker call. "" / 0 omits the kwarg entirely, which
+        # is load-bearing on the ext4 dev box (storage_opt is xfs-only)
+        extra_kwargs: dict = {}
+
+        storage_limit = str(get_setting("storage_limit") or "").strip()
+        if storage_limit:
+            parse_size(storage_limit)
+            extra_kwargs["storage_opt"] = {"size": storage_limit}
+
+        log_max_size = str(get_setting("log_max_size") or "").strip()
+        if log_max_size:
+            # max-file must be a string: daemon log-opts are map[string]string
+            extra_kwargs["log_config"] = {
+                "type": "json-file",
+                "config": {"max-size": log_max_size, "max-file": str(int(get_setting("log_max_file") or 3))},
+            }
+
+        mem_reservation_raw = str(get_setting("memory_reservation") or "").strip()
+        if mem_reservation_raw not in ("", "0"):
+            mem_reservation = parse_size(mem_reservation_raw)
+            if memory is not None and mem_reservation > memory:
+                raise ValueError(f"memory_reservation {mem_reservation} exceeds memory limit {memory}")
+            extra_kwargs["mem_reservation"] = mem_reservation
+
+        if memory is not None:
+            # swap headroom above the RAM limit. a desktop's memory drifts up
+            # over a long session (browser tabs, RE tools); with zero swap a
+            # transient spike past mem_limit OOM-kills a live app (firefox).
+            # default gives a swap cushion equal to the RAM limit so spikes
+            # spill to swap instead of dying. "0" = strict no-swap isolation,
+            # "-1" = unlimited, "<size>" = explicit swap amount
+            swap_raw = str(get_setting("swap_limit") or "").strip()
+            if swap_raw == "-1":
+                extra_kwargs["memswap_limit"] = -1
+            elif swap_raw == "0":
+                extra_kwargs["memswap_limit"] = memory
+            else:
+                swap_bytes = parse_size(swap_raw) if swap_raw else memory
+                extra_kwargs["memswap_limit"] = memory + swap_bytes
+
+        oom_score_adj = max(0, min(1000, int(get_setting("oom_score_adj") or 0)))
+        if oom_score_adj:
+            extra_kwargs["oom_score_adj"] = oom_score_adj
+
+        nofile_soft = int(get_setting("nofile_soft") or 0)
+        nofile_hard = int(get_setting("nofile_hard") or 0)
+        if nofile_soft > 0:
+            if nofile_hard < nofile_soft:
+                raise ValueError(f"nofile_hard {nofile_hard} < nofile_soft {nofile_soft}")
+            extra_kwargs["ulimits"] = [docker.types.Ulimit(name="nofile", soft=nofile_soft, hard=nofile_hard)]
+
+        cgroup_parent = str(get_setting("cgroup_parent") or "").strip()
+        if cgroup_parent:
+            if not cgroup_parent.endswith(".slice"):
+                raise ValueError(f"cgroup_parent must end in .slice on systemd-cgroup hosts, got {cgroup_parent!r}")
+            extra_kwargs["cgroup_parent"] = cgroup_parent
 
         import secrets
 
@@ -370,6 +459,8 @@ class DockerHostManager:
                         pids_limit=pids_limit,
                         extra_hosts=extra_hosts or {},
                         network=network,
+                        volumes=volumes or None,
+                        **extra_kwargs,
                     )
                     break
                 except docker.errors.APIError as e:
@@ -453,42 +544,66 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
+    @staticmethod
+    def _parse_created_ts(created_raw: str) -> float:
+        if not created_raw:
+            return 0.0
+        try:
+            from datetime import datetime
+
+            iso = created_raw.replace("Z", "+00:00")
+            # strip nanoseconds past microsecond precision (docker emits 9-digit fractional)
+            if "." in iso:
+                head, tail = iso.split(".", 1)
+                tz_idx = max(tail.find("+"), tail.find("-"))
+                if tz_idx == -1:
+                    frac, tz_suffix = tail, ""
+                else:
+                    frac, tz_suffix = tail[:tz_idx], tail[tz_idx:]
+                iso = f"{head}.{frac[:6]}{tz_suffix}"
+            return datetime.fromisoformat(iso).timestamp()
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def _list_by_prefix(self, client, name_prefix: str) -> list[dict[str, str | float]]:
+        containers = client.containers.list(all=True, filters={"name": name_prefix})
+        results: list[dict[str, str | float]] = []
+        for c in containers:
+            created_raw = c.attrs.get("Created", "") if c.attrs else ""
+            results.append(
+                {
+                    "name": c.name or "",
+                    "created_ts": self._parse_created_ts(created_raw),
+                    "status": c.status or "",
+                }
+            )
+        return results
+
     def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]]:
-        # used by the reconcile sweep; returns [{"name": str, "created_ts": float}] for matching containers (any state).
-        # swallows errors and returns [] so a flapping host can't break the sweep loop
+        # lenient listing: swallows errors and returns [] so a flapping host
+        # can't break a sweep loop. NEVER wire slot/capacity release to this -
+        # an error looks identical to "no containers" (use the strict variant)
         def _do() -> list[dict[str, str | float]]:
             try:
                 client = self._get_client(context_name)
-                containers = client.containers.list(all=True, filters={"name": name_prefix})
-                results: list[dict[str, str | float]] = []
-                for c in containers:
-                    created_raw = c.attrs.get("Created", "") if c.attrs else ""
-                    created_ts = 0.0
-                    if created_raw:
-                        try:
-                            from datetime import datetime
-
-                            iso = created_raw.replace("Z", "+00:00")
-                            # strip nanoseconds past microsecond precision (docker emits 9-digit fractional)
-                            if "." in iso:
-                                head, tail = iso.split(".", 1)
-                                tz_idx = max(tail.find("+"), tail.find("-"))
-                                if tz_idx == -1:
-                                    frac, tz_suffix = tail, ""
-                                else:
-                                    frac, tz_suffix = tail[:tz_idx], tail[tz_idx:]
-                                iso = f"{head}.{frac[:6]}{tz_suffix}"
-                            created_ts = datetime.fromisoformat(iso).timestamp()
-                        except (ValueError, AttributeError):
-                            created_ts = 0.0
-                    results.append({"name": c.name or "", "created_ts": created_ts})
-                return results
-            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
-                self._clear_client(context_name)
-                return []
+                return self._list_by_prefix(client, name_prefix)
             except Exception:
                 self._clear_client(context_name)
                 return []
+
+        return self._call(context_name, _do)
+
+    def list_session_containers_strict(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]] | None:
+        # strict listing: None on any error, so callers can distinguish "host
+        # answered: nothing there" from "host unreachable". the reconcile sweep
+        # and the network-slot reaper must only act on a non-None result
+        def _do() -> list[dict[str, str | float]] | None:
+            try:
+                client = self._get_client(context_name)
+                return self._list_by_prefix(client, name_prefix)
+            except Exception:
+                self._clear_client(context_name)
+                return None
 
         return self._call(context_name, _do)
 
@@ -562,12 +677,117 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
+    def pause_container(self, context_name: str, container_name: str) -> None:
+        def _do():
+            client = self._get_client(context_name)
+            try:
+                container = client.containers.get(container_name)
+                container.pause()
+            except docker.errors.NotFound:
+                logger.debug(f"container {container_name} not found for pause")
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                raise
+            except Exception:
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}")
+
+        return self._call(context_name, _do)
+
+    def unpause_container(self, context_name: str, container_name: str) -> None:
+        def _do():
+            client = self._get_client(context_name)
+            try:
+                container = client.containers.get(container_name)
+                container.unpause()
+            except docker.errors.NotFound:
+                logger.debug(f"container {container_name} not found for unpause")
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                raise
+            except Exception:
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}")
+
+        return self._call(context_name, _do)
+
+    def get_host_memory(self, context_name: str) -> int | None:
+        # MemTotal in bytes from docker info; None on any failure. used by the
+        # orchestrator to auto-derive per-host session caps
+        if context_name not in self._context_configs:
+            return None
+
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                return int(client.info().get("MemTotal") or 0) or None
+            except Exception:
+                self._clear_client(context_name)
+                return None
+
+        return self._call(context_name, _do)
+
+    def container_stats(self, context_name: str, container_id: str) -> dict | None:
+        # single stats snapshot for the tier-1 telemetry sampler. best-effort:
+        # never raises into the scheduler job (None means "no sample this tick")
+        if context_name not in self._context_configs:
+            return None
+
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                # one_shot reaches APIClient.stats via **kwargs passthrough (API >= 1.41)
+                return client.containers.get(container_id).stats(stream=False, one_shot=True)
+            except docker.errors.NotFound:
+                return None
+            except Exception:
+                self._clear_client(context_name)
+                return None
+
+        return self._call(context_name, _do)
+
+    def read_host_telemetry(self, context_name: str) -> dict | None:
+        # tier-2 telemetry: read the host-side PSI snapshot written by
+        # provisioning/compute's rd-telemetry timer, via a throwaway helper
+        # container. deliberately NOT run_container - the no-volumes invariant
+        # test on run_container stays strict; do not merge this into it.
+        # the helper is platform-side, so it stays in the default cgroup
+        if context_name not in self._context_configs:
+            return None
+
+        from .models import get_setting
+
+        reader_image = str(get_setting("telemetry_reader_image") or "busybox:latest")
+
+        def _do():
+            try:
+                client = self._get_client(context_name)
+                output = client.containers.run(
+                    reader_image,
+                    command=["cat", "/telemetry/current.json"],
+                    volumes={"/var/lib/rd-telemetry": {"bind": "/telemetry", "mode": "ro"}},
+                    network_mode="none",
+                    remove=True,
+                    mem_limit="32m",
+                    pids_limit=16,
+                )
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                return json.loads(output)
+            except Exception:
+                self._clear_client(context_name)
+                return None
+
+        return self._call(context_name, _do)
+
     def is_container_running(self, context_name: str, container_id: str) -> bool:
         def _do():
             try:
                 client = self._get_client(context_name)
                 container = client.containers.get(container_id)
-                return container.status == "running"
+                # paused counts as alive: a paused session is an evidence hold
+                # (io tripwire / admin), not a dead container to reap
+                return container.status in ("running", "paused")
             except docker.errors.NotFound:
                 return False
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):

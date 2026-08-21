@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
-from CTFd.utils.user import get_current_user, is_admin, is_verified
+from CTFd.utils.user import get_current_user, is_admin, is_verified, get_ip
 from .container_manager import ContainerManager, ContainerInfoDict, TimerDict, TimerStatusDict
 from .orchestrator import Orchestrator
 from .event_logger import event_logger, EventDict
@@ -25,7 +25,7 @@ from .models import (
     END_REASON_ADMIN_KILLED,
     _esc,
 )
-from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
+from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint, parse_size
 from .exceptions import HostsUnavailableException
 from .utils import ratelimit_per_user
 
@@ -98,7 +98,7 @@ def _direct_vnc_url(host: str, novnc_port: int, password: str) -> str:
     return f"http://{host}:{novnc_port}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
 
 
-_INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "no healthy contexts")
+_INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "no healthy contexts", "at capacity")
 
 
 def _infra_status(error: str | None) -> int:
@@ -238,6 +238,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             creation_status=creation_status,
             ssh_info=ssh_info,
             max_extensions=get_setting("max_extensions"),
+            consent_notice=get_setting("consent_notice_enabled"),
+            ssh_enabled=get_setting("ssh_enabled"),
+            web_terminal_enabled=get_setting("web_terminal_enabled"),
         )
 
     @remote_desktop_bp.route("/remote-desktop/api/status", methods=["GET"])
@@ -302,7 +305,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         container_url = f"{parsed.scheme}://{container_host}{port_part}/"
 
         try:
-            result = container_manager.create_container(user.id, container_url, extra_hosts)
+            # get_ip walks TRUSTED_PROXIES right-to-left: matches the IPs CTFd
+            # itself records, unlike a hand parse of X-Forwarded-For hop 1
+            result = container_manager.create_container(user.id, container_url, extra_hosts, client_ip=get_ip())
         except HostsUnavailableException as err:
             return jsonify({"error": str(err)}), 503
 
@@ -545,6 +550,76 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if result.get("success"):
             return jsonify({"success": True})
         return jsonify({"error": result.get("error", "Failed to extend session")}), 400
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/pause", methods=["POST"])
+    @admins_only
+    def admin_pause_session():
+        admin_user = get_current_user()
+        user_id = request.form.get("user_id", type=int)
+        if user_id is None:
+            return jsonify({"error": "user_id must be an integer"}), 400
+        target_user = Users.query.filter_by(id=user_id).first()
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
+        target_username = username_or_fallback(target_user, user_id)
+
+        result = container_manager.pause_session(user_id)
+        if not result.get("success"):
+            return jsonify({"error": result.get("error", "Failed to pause session")}), 400
+
+        _log_admin_target_action(
+            admin_user,
+            f"admin {admin_user.name} paused session for {target_username}",
+            "pause",
+            user_id,
+            target_username,
+            target_user,
+            level="warning",
+        )
+        event_logger.log_event(
+            "session_paused",
+            f"session paused by admin {admin_user.name}",
+            user_id=user_id,
+            username=target_username,
+            level="error",
+            metadata={"source": "admin"},
+        )
+        return jsonify({"success": True})
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/unpause", methods=["POST"])
+    @admins_only
+    def admin_unpause_session():
+        admin_user = get_current_user()
+        user_id = request.form.get("user_id", type=int)
+        if user_id is None:
+            return jsonify({"error": "user_id must be an integer"}), 400
+        target_user = Users.query.filter_by(id=user_id).first()
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
+        target_username = username_or_fallback(target_user, user_id)
+
+        result = container_manager.unpause_session(user_id)
+        if not result.get("success"):
+            return jsonify({"error": result.get("error", "Failed to unpause session")}), 400
+
+        _log_admin_target_action(
+            admin_user,
+            f"admin {admin_user.name} unpaused session for {target_username}",
+            "unpause",
+            user_id,
+            target_username,
+            target_user,
+            level="info",
+        )
+        event_logger.log_event(
+            "session_unpaused",
+            f"session unpaused by admin {admin_user.name}",
+            user_id=user_id,
+            username=target_username,
+            level="info",
+            metadata={"source": "admin"},
+        )
+        return jsonify({"success": True})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/kill-all", methods=["POST"])
     @admins_only
@@ -1069,7 +1144,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def admin_command_stats_summary():
         from .models import CommandLogModel, get_setting
 
-        enabled = get_setting("command_logging_enabled")
+        enabled = get_setting("telemetry_enabled")
         base = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden.is_(False))
         total = base.count()
 
@@ -1119,6 +1194,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                     "pub_hostname": _esc(ctx.pub_hostname),
                     "weight": ctx.weight,
                     "enabled": ctx.enabled,
+                    # raw column: null = auto-derived cap, 0 = drain, N = explicit
+                    "max_containers": ctx.max_containers,
+                    "active_sessions": int(ctx.active_sessions or 0),
                     "connected": ctx.context_name in connected,
                     "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,
                 }
@@ -1184,6 +1262,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         pub_hostname = request.json.get("pub_hostname")
         weight = request.json.get("weight", 1)
         enabled = request.json.get("enabled", True)
+        max_containers = request.json.get("max_containers")
 
         if not context_name:
             return jsonify({"error": "context_name is required"}), 400
@@ -1201,12 +1280,23 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except ValueError:
             return jsonify({"error": "weight must be an integer"}), 400
 
+        if max_containers in (None, ""):
+            max_containers = None
+        else:
+            try:
+                max_containers = int(max_containers)
+                if max_containers < 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                return jsonify({"error": "max_containers must be a non-negative integer or null"}), 400
+
         new_context = DesktopDockerContextModel(
             context_name=context_name,
             hostname=hostname,
             pub_hostname=pub_hostname,
             weight=weight,
             enabled=enabled,
+            max_containers=max_containers,
         )
         db.session.add(new_context)
         db.session.commit()
@@ -1243,6 +1333,19 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 context.weight = weight
             except ValueError:
                 return jsonify({"error": "weight must be an integer"}), 400
+
+        if "max_containers" in request.json:
+            raw = request.json["max_containers"]
+            if raw in (None, ""):
+                context.max_containers = None
+            else:
+                try:
+                    value = int(raw)
+                    if value < 0:
+                        raise ValueError
+                    context.max_containers = value
+                except (ValueError, TypeError):
+                    return jsonify({"error": "max_containers must be a non-negative integer or null"}), 400
 
         if "enabled" in request.json:
             context.enabled = bool(request.json["enabled"])
@@ -1301,6 +1404,38 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         settings = get_all_settings()
         return jsonify({"settings": settings})
 
+    def _validate_setting(key: str, value) -> str | None:
+        """returns an error message or None. only settings whose bad values can
+        brick every subsequent create get validators"""
+        try:
+            if key == "storage_limit":
+                v = str(value or "").strip()
+                # 1 GiB floor guards a "20m" typo bricking every session
+                if v and parse_size(v) < 1024**3:
+                    return "storage_limit must be empty or at least 1g"
+            elif key == "log_max_size":
+                v = str(value or "").strip()
+                if v:
+                    parse_size(v)
+            elif key == "log_max_file":
+                if int(value) < 1:
+                    return "log_max_file must be at least 1"
+            elif key == "cgroup_parent":
+                v = str(value or "").strip()
+                if v and not v.endswith(".slice"):
+                    return "cgroup_parent must end in .slice (or be empty to disable)"
+            elif key in ("memory_reservation",):
+                v = str(value or "").strip()
+                if v and v != "0":
+                    parse_size(v)
+            elif key == "swap_limit":
+                v = str(value or "").strip()
+                if v and v not in ("0", "-1"):
+                    parse_size(v)
+        except (ValueError, TypeError):
+            return f"invalid value for {key}: {value!r}"
+        return None
+
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["PUT"])
     @admins_only
     def admin_update_settings():
@@ -1309,9 +1444,15 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not isinstance(request.json, dict):
             return jsonify({"error": "invalid request"}), 400
 
-        for key, value in request.json.items():
-            if key not in SETTING_DEFAULTS:
-                continue
+        # validate every submitted key BEFORE applying any: set_setting commits
+        # per key, so a mid-loop 400 would partially apply the batch
+        updates = {k: v for k, v in request.json.items() if k in SETTING_DEFAULTS}
+        for key, value in updates.items():
+            error = _validate_setting(key, value)
+            if error:
+                return jsonify({"error": error}), 400
+
+        for key, value in updates.items():
             set_setting(key, value)
         return jsonify({"success": True})
 

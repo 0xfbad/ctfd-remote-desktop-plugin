@@ -102,15 +102,20 @@ def _seed_local_context(app: Flask) -> None:
 
 
 def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestrator: Orchestrator) -> None:
+    # leader-only: concurrent reconciles from every gunicorn worker would race
+    # row deletes and corrupt the shared active_sessions counters
     import time as _time
+    from collections import Counter
 
     from CTFd.models import db, Users
     from .models import (
         DesktopContainerInfoModel,
+        DesktopDockerContextModel,
         END_REASON_RECONCILIATION,
         history_from_row,
         username_or_fallback,
     )
+    from .exceptions import HostsUnavailableException
 
     rows = DesktopContainerInfoModel.query.all()
     removed = 0
@@ -119,8 +124,16 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
     for row in rows:
         try:
             running = host_manager.is_container_running(row.docker_context, row.container_id)
-        except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
-            # transient connectivity issue, keep the row and retry on next reconcile cycle
+        except (
+            docker.errors.DockerException,
+            paramiko.ssh_exception.SSHException,
+            EOFError,
+            OSError,
+            # a context that failed its startup connection check raises this for
+            # every call; deleting those rows would orphan live sessions on a
+            # merely-slow host (then force-remove them 300s later). transient.
+            HostsUnavailableException,
+        ):
             kept += 1
             continue
         except Exception:
@@ -129,7 +142,6 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
             continue
 
         if running:
-            orchestrator.reserve_slot(row.docker_context)
             kept += 1
         else:
             ended_at = _time.time()
@@ -141,6 +153,23 @@ def _reconcile_containers(app: Flask, host_manager: DockerHostManager, orchestra
             removed += 1
 
     if removed:
+        db.session.commit()
+
+    # absolute-sync the shared session counters to the remaining committed rows
+    remaining = Counter(
+        r.docker_context
+        for r in DesktopContainerInfoModel.query.with_entities(DesktopContainerInfoModel.docker_context).all()
+    )
+    synced = 0
+    for ctx in DesktopDockerContextModel.query.all():
+        target = remaining.get(ctx.context_name, 0)
+        if (ctx.active_sessions or 0) != target:
+            logger.warning(
+                f"reconcile: syncing active_sessions for {ctx.context_name}: {ctx.active_sessions} -> {target}"
+            )
+            ctx.active_sessions = target
+            synced += 1
+    if synced:
         db.session.commit()
 
     if removed or kept:
@@ -157,7 +186,6 @@ def load(app: Flask) -> None:
         _seed_defaults(app)
         _seed_local_context(app)
         orchestrator.load_from_db()
-        _reconcile_containers(app, host_manager, orchestrator)
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
 
@@ -192,6 +220,11 @@ def load(app: Flask) -> None:
     if not _claim_scheduler_leader():
         logger.info("remote desktop plugin loaded (scheduler skipped, another worker holds the leader lock)")
         return
+
+    # leader-only: reconcile races row deletes and the shared active_sessions
+    # counter sync if every worker runs it
+    with app.app_context():
+        _reconcile_containers(app, host_manager, orchestrator)
 
     from .models import get_setting
     from apscheduler.schedulers.gevent import GeventScheduler
@@ -241,6 +274,30 @@ def load(app: Flask) -> None:
         misfire_grace_time=30,
         coalesce=True,
         id="command_log_collection",
+    )
+
+    # mirrors out-of-band docker pause/unpause (host io tripwire) into
+    # paused_at + the admin event feed. interval read at registration like
+    # cleanup_interval - restart to change
+    scheduler.add_job(
+        func=_with_app_ctx(container_manager.pause_watch),
+        trigger="interval",
+        seconds=get_setting("pause_watch_interval"),
+        misfire_grace_time=30,
+        coalesce=True,
+        id="pause_watch",
+    )
+
+    from .telemetry import ResourceTelemetry
+
+    telemetry = ResourceTelemetry(host_manager, event_logger, app)
+    scheduler.add_job(
+        func=_with_app_ctx(telemetry.run_once),
+        trigger="interval",
+        seconds=get_setting("telemetry_interval"),
+        misfire_grace_time=30,
+        coalesce=True,
+        id="resource_telemetry",
     )
 
     # leader-only: drain queued events into persistent storage so the audit trail

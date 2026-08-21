@@ -110,6 +110,17 @@ def _sanitize_username(raw: str, user_id: int | None = None) -> str:
     return name
 
 
+def _connection_ports(ssh_enabled: bool, web_terminal_enabled: bool) -> list[str]:
+    # VNC/noVNC are mandatory (the readiness gate polls 6080 and the columns
+    # are NOT NULL); ssh and the web terminal are per-deployment toggles
+    ports = ["5900/tcp", "6080/tcp"]
+    if ssh_enabled:
+        ports.append("22/tcp")
+    if web_terminal_enabled:
+        ports.append("7682/tcp")
+    return ports
+
+
 class ContainerManager:
     def __init__(self, host_manager: DockerHostManager, orchestrator: Orchestrator, app: Flask | None = None) -> None:
         self.host_manager = host_manager
@@ -203,6 +214,8 @@ class ContainerManager:
 
         context_name: str | None = None
         container_name: str | None = None
+        network_name: str | None = None
+        slot_claimed = False
 
         try:
             with self.lock:
@@ -226,6 +239,17 @@ class ContainerManager:
                         "status": "starting_container",
                         "message": f"Starting container on {display_hostname}...",
                     }
+
+                # claim inside the try so a failure still releases the create semaphore
+                isolation = bool(self._get_setting("network_isolation"))
+                if isolation:
+                    from .network_pool import claim_network_slot
+
+                    network_name = claim_network_slot(context_name, container_name, user_id)
+                    slot_claimed = True
+                else:
+                    network_name = str(self._get_setting("rd_network_name") or "rd-isolated")
+
                 vnc_password = secrets.token_urlsafe(6)[:8]
 
                 docker_image = str(self._get_setting("docker_image"))
@@ -234,7 +258,13 @@ class ContainerManager:
                 memory_limit = parse_size(self._get_setting("memory_limit"))  # type: ignore[arg-type]
                 cpu_limit = self._get_setting("cpu_limit")
                 nano_cpus = int(float(cpu_limit) * 1e9)  # type: ignore[arg-type]
-                rd_network = str(self._get_setting("rd_network_name") or "rd-isolated")
+
+                # read once so ports and env can never disagree for one container
+                ssh_enabled = bool(self._get_setting("ssh_enabled"))
+                web_terminal_enabled = bool(self._get_setting("web_terminal_enabled"))
+                telemetry_enabled = bool(self._get_setting("telemetry_enabled"))
+                tlog_socket = str(self._get_setting("tlog_socket_path") or "").strip()
+                tlog_enabled = telemetry_enabled and bool(tlog_socket)
 
                 initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
                 extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
@@ -248,10 +278,16 @@ class ContainerManager:
                     "CTFD_USERNAME": container_username,
                     "MAX_LIFETIME": str(max_lifetime),
                     "CTFD_URL": container_url,
+                    # "0" disables in the image; absent = on
+                    "ENABLE_SSH": "1" if ssh_enabled else "0",
+                    "ENABLE_TTYD": "1" if web_terminal_enabled else "0",
                 }
 
-                if self._get_setting("command_logging_enabled"):
+                if telemetry_enabled:
                     container_env["SHELL_LOGGING"] = "1"
+
+                if tlog_enabled:
+                    container_env["TLOG_ENABLED"] = "1"
 
                 from flask import current_app
 
@@ -271,12 +307,13 @@ class ContainerManager:
                     name=container_name,
                     hostname=display_hostname,
                     env=container_env,
-                    ports=["22/tcp", "5900/tcp", "6080/tcp", "7682/tcp"],
+                    ports=_connection_ports(ssh_enabled, web_terminal_enabled),
                     shm_size=shm_size,
                     memory=memory_limit,
                     nano_cpus=nano_cpus,
                     extra_hosts=extra_hosts,
-                    network=rd_network,
+                    network=network_name,
+                    volumes=({tlog_socket: {"bind": "/dev/log", "mode": "rw"}} if tlog_enabled else None),
                 )
             finally:
                 self.host_manager.release_semaphore(context_name)
@@ -338,6 +375,7 @@ class ContainerManager:
                 extensions_used=0,
                 max_extensions=max_extensions,
                 cookie_sid=cookie_sid,
+                network_name=network_name if slot_claimed else None,
             )
             try:
                 db.session.add(row)
@@ -352,6 +390,26 @@ class ContainerManager:
                     "message": "Desktop ready!",
                     "hostname": display_hostname,
                 }
+
+            if tlog_enabled:
+                # collector absent -> docker mounts a directory at /dev/log and
+                # transcripts silently drop; surface one warning per session
+                try:
+                    code, _out = self.host_manager.exec_in_container(
+                        context_name, container_name, ["test", "-S", "/dev/log"]
+                    )
+                    if code != 0:
+                        event_logger.log_event(
+                            "tlog_socket_missing",
+                            f"tlog enabled but /dev/log is not a socket in {container_name} - "
+                            f"is rd-tlog-collector installed on {context_name}?",
+                            user_id=user_id,
+                            username=username,
+                            level="warning",
+                            metadata={"context": context_name, "container_name": container_name},
+                        )
+                except Exception as e:
+                    logger.debug(f"tlog socket check failed for {container_name}: {e}")
 
             event_logger.log_event(
                 "session_created",
@@ -370,12 +428,23 @@ class ContainerManager:
             )
 
         except Exception as e:
+            stopped_ok = False
             if container_name and context_name:
                 try:
                     self.host_manager.stop_container(context_name, container_name)
+                    stopped_ok = True
                     logger.info(f"cleaned up container {container_name} after creation failure")
                 except Exception as stop_error:
                     logger.error(f"failed to stop container during cleanup: {stop_error}")
+
+            # release only after a confirmed stop; otherwise the reaper frees it
+            if slot_claimed and stopped_ok and context_name and container_name:
+                try:
+                    from .network_pool import release_network_slot
+
+                    release_network_slot(context_name, container_name)
+                except Exception as release_error:
+                    logger.error(f"failed to release network slot during cleanup: {release_error}")
 
             if context_name:
                 try:
@@ -417,6 +486,7 @@ class ContainerManager:
         user_id: int,
         container_url: str,
         extra_hosts: dict[str, str] | None = None,
+        client_ip: str | None = None,
     ) -> ResultDict:
         from flask import current_app
 
@@ -438,10 +508,12 @@ class ContainerManager:
 
             self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
 
-        if not self.orchestrator.has_healthy_context():
+        try:
+            self.orchestrator.admission_check()
+        except HostsUnavailableException:
             with self.lock:
                 self.creation_status.pop(user_id, None)
-            raise HostsUnavailableException("no healthy docker contexts available")
+            raise
 
         host_status = self.orchestrator.get_status()
         event_logger.log_event(
@@ -451,6 +523,9 @@ class ContainerManager:
             username=username,
             level="info",
             metadata={
+                # session_requested doubles as the consent-ack record
+                "consent_notice": bool(self._get_setting("consent_notice_enabled")),
+                "client_ip": client_ip,
                 "hosts": {  # type: ignore[dict-item]
                     str(h["context_name"]): {
                         "containers": h["active_containers"],
@@ -511,8 +586,15 @@ class ContainerManager:
             if row is None:
                 return {"success": False, "error": "No active container found"}
 
+            # evidence hold: stop + auto_remove would delete the writable layer;
+            # only an explicit admin kill gets through
+            if row.paused_at and reason != END_REASON_ADMIN_KILLED:
+                return {"success": False, "error": "Session suspended - contact your instructor"}
+
             context_name = row.docker_context
             container_name = row.container_name
+            network_name = row.network_name
+            was_paused = bool(row.paused_at)
 
             try:
                 self._collect_logs_for_container(row)
@@ -543,7 +625,14 @@ class ContainerManager:
             db.session.commit()
 
         try:
-            self.host_manager.stop_container(context_name, container_name)
+            if was_paused:
+                # stop on a frozen container blocks the full timeout; remove directly
+                self.host_manager.force_remove_container(context_name, container_name)
+            else:
+                self.host_manager.stop_container(context_name, container_name)
+            from .network_pool import release_network_slot
+
+            release_network_slot(context_name, container_name)
         except HostsUnavailableException:
             # host is gone; row is already removed, best-effort cleanup
             logger.info(f"stop_container skipped for {container_name}: context unavailable")
@@ -553,7 +642,7 @@ class ContainerManager:
             duration = ended_at - history.started_at
             cmd_count = (
                 CommandLogModel.query.filter_by(user_id=user_id).count()
-                if self._get_setting("command_logging_enabled")
+                if self._get_setting("telemetry_enabled")
                 else None
             )
             event_logger.log_event(
@@ -565,6 +654,7 @@ class ContainerManager:
                 metadata={
                     "context": context_name,
                     "container_name": container_name,
+                    "network_name": network_name,
                     "reason": reason,
                     "duration": round(duration),
                     "extensions_used": history.extensions_used,
@@ -579,7 +669,7 @@ class ContainerManager:
         if not row:
             return None
 
-        if self._is_expired(row):
+        if self._is_expired(row) and not row.paused_at:
             self.destroy_container(user_id, reason=END_REASON_EXPIRED)
             return None
 
@@ -626,10 +716,9 @@ class ContainerManager:
         if running:
             return True
 
-        # serialize with destroy_container so a concurrent admin-kill or
-        # user-destroy can't double-insert history for the same teardown.
-        # rollback ends the snapshot from the caller's earlier select so the
-        # re-query inside the lock sees the latest committed state
+        # serialize with destroy_container so a concurrent teardown can't
+        # double-insert history. no slot release here: running=False cannot
+        # distinguish removed from created-but-attached; the reaper handles it
         with self._get_destroy_lock(user_id):
             db.session.rollback()
             row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
@@ -638,6 +727,7 @@ class ContainerManager:
 
             ended_at = time.time()
             user = Users.query.filter_by(id=user_id).first()
+            context_name = row.docker_context
             db.session.add(
                 history_from_row(
                     row,
@@ -646,9 +736,10 @@ class ContainerManager:
                     END_REASON_RECONCILIATION,
                 )
             )
-            self.orchestrator.release_slot(row.docker_context)
             db.session.delete(row)
             db.session.commit()
+            # release after commit: release_slot self-commits
+            self.orchestrator.release_slot(context_name)
             return False
 
     # builds the frontend TimerDict shape; keep in sync with
@@ -673,7 +764,7 @@ class ContainerManager:
         if not rows:
             return []
 
-        expired = [row for row in rows if self._is_expired(row)]
+        expired = [row for row in rows if self._is_expired(row) and not row.paused_at]
         for row in expired:
             try:
                 self.destroy_container(row.user_id, reason=END_REASON_EXPIRED)
@@ -699,6 +790,8 @@ class ContainerManager:
                 "container_name": _esc(row.container_name),
                 "container_id": row.container_id,
                 "docker_context": _esc(row.docker_context),
+                "network_name": _esc(row.network_name or ""),
+                "paused": bool(row.paused_at),
                 "created_at": row.created_at,
                 "vnc_port": row.vnc_port,
                 "novnc_port": row.novnc_port,
@@ -805,7 +898,7 @@ class ContainerManager:
 
             expired_user_ids = []
             for row in rows:
-                if row.timer_start_time is None:
+                if row.timer_start_time is None or row.paused_at:
                     continue
                 elapsed = time.time() - row.timer_start_time
                 if row.timer_duration - elapsed <= 0:
@@ -818,6 +911,11 @@ class ContainerManager:
                 except Exception as e:
                     logger.error(f"failed to destroy expired session for user {user_id}: {e}")
 
+            try:
+                self.orchestrator.audit_counts()
+            except Exception as e:
+                logger.error(f"capacity count audit failed: {e}")
+
             self._reconcile_orphans()
 
     # destroy_container commits the row delete before calling stop_container, so a paramiko/docker
@@ -828,6 +926,9 @@ class ContainerManager:
     RECONCILE_SAFETY_AGE_SECONDS = 300
 
     def _reconcile_orphans(self) -> None:
+        from .network_pool import release_network_slot, reap_stale_slots, reap_deleted_context_slots
+        from .models import DesktopDockerContextModel
+
         db_names = {
             r.container_name
             for r in DesktopContainerInfoModel.query.with_entities(DesktopContainerInfoModel.container_name).all()
@@ -835,10 +936,10 @@ class ContainerManager:
         now = time.time()
 
         for ctx_name in self.host_manager.get_connected_contexts():
-            try:
-                containers = self.host_manager.list_containers_by_prefix(ctx_name, self.RECONCILE_NAME_PREFIX)
-            except Exception as e:
-                logger.warning(f"reconcile: list failed on {ctx_name}: {e}")
+            # None = host didn't answer; skip removal AND slot reaping this sweep
+            containers = self.host_manager.list_session_containers_strict(ctx_name, self.RECONCILE_NAME_PREFIX)
+            if containers is None:
+                logger.warning(f"reconcile: list failed on {ctx_name}, skipping sweep")
                 continue
 
             for entry in containers:
@@ -850,6 +951,16 @@ class ContainerManager:
                 # committed yet. created_ts == 0 means parse failed; treat as too-young
                 age = now - created_ts if created_ts > 0 else 0
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
+                    continue
+
+                if str(entry.get("status", "")) == "paused":
+                    # evidence hold: surface, never remove
+                    event_logger.log_event(
+                        "orphan_paused",
+                        f"paused orphan {name} on {ctx_name} held for inspection (not removed)",
+                        level="warning",
+                        metadata={"context": ctx_name, "container_name": name, "age_seconds": int(age)},
+                    )
                     continue
 
                 logger.warning(f"reconcile: removing orphan {name} on {ctx_name} (age {int(age)}s)")
@@ -867,8 +978,97 @@ class ContainerManager:
                             "age_seconds": int(age),
                         },
                     )
+                    release_network_slot(ctx_name, name)
                 except Exception as e:
                     logger.error(f"reconcile: failed to remove {name} on {ctx_name}: {e}")
+
+            try:
+                live_names = {str(e.get("name", "")) for e in containers}
+                reap_stale_slots(ctx_name, live_names, db_names, now, self.RECONCILE_SAFETY_AGE_SECONDS)
+            except Exception as e:
+                logger.error(f"reconcile: slot reap failed on {ctx_name}: {e}")
+
+        try:
+            known = {
+                c.context_name
+                for c in DesktopDockerContextModel.query.with_entities(DesktopDockerContextModel.context_name).all()
+            }
+            reap_deleted_context_slots(known, now, self.RECONCILE_SAFETY_AGE_SECONDS)
+        except Exception as e:
+            logger.error(f"reconcile: deleted-context slot reap failed: {e}")
+
+    def pause_watch(self) -> None:
+        # mirrors out-of-band pause/unpause (host io tripwire) into paused_at
+        with self.app.app_context():  # type: ignore[union-attr]
+            rows_by_name = {r.container_name: r for r in DesktopContainerInfoModel.query.all()}
+
+            for ctx_name in self.host_manager.get_connected_contexts():
+                containers = self.host_manager.list_session_containers_strict(ctx_name, self.RECONCILE_NAME_PREFIX)
+                if containers is None:
+                    continue
+                for entry in containers:
+                    row = rows_by_name.get(str(entry.get("name", "")))
+                    if row is None or row.docker_context != ctx_name:
+                        continue
+                    status = str(entry.get("status", ""))
+                    _user, username = _display_name(row.user_id)
+
+                    if status == "paused" and row.paused_at is None:
+                        row.paused_at = time.time()
+                        db.session.commit()
+                        event_logger.log_event(
+                            "session_paused",
+                            f"session paused on {ctx_name} (host tripwire or manual pause)",
+                            user_id=row.user_id,
+                            username=username,
+                            level="error",
+                            metadata={"context": ctx_name, "container_name": row.container_name, "source": "detected"},
+                        )
+                    elif status == "running" and row.paused_at is not None:
+                        self._credit_pause_and_clear(row)
+                        event_logger.log_event(
+                            "session_unpaused",
+                            f"session unpaused on {ctx_name} (out-of-band)",
+                            user_id=row.user_id,
+                            username=username,
+                            level="info",
+                            metadata={"context": ctx_name, "container_name": row.container_name, "source": "detected"},
+                        )
+
+    @staticmethod
+    def _credit_pause_and_clear(row: DesktopContainerInfoModel) -> None:
+        # credit frozen time so the session isn't expire-destroyed on unpause
+        if row.timer_started and row.timer_start_time and row.paused_at:
+            row.timer_start_time += time.time() - row.paused_at
+        row.paused_at = None
+        db.session.commit()
+
+    def pause_session(self, user_id: int) -> ResultDict:
+        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+        if not row:
+            return {"success": False, "error": "No active session for user"}
+        if row.paused_at:
+            return {"success": False, "error": "Session already paused"}
+        try:
+            self.host_manager.pause_container(row.docker_context, row.container_name)
+        except Exception as e:
+            return {"success": False, "error": f"pause failed: {e}"}
+        row.paused_at = time.time()
+        db.session.commit()
+        return {"success": True}
+
+    def unpause_session(self, user_id: int) -> ResultDict:
+        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+        if not row:
+            return {"success": False, "error": "No active session for user"}
+        if not row.paused_at:
+            return {"success": False, "error": "Session is not paused"}
+        try:
+            self.host_manager.unpause_container(row.docker_context, row.container_name)
+        except Exception as e:
+            return {"success": False, "error": f"unpause failed: {e}"}
+        self._credit_pause_and_clear(row)
+        return {"success": True}
 
     def destroy_all_containers_admin(self, admin_user: Users) -> int:
         rows = DesktopContainerInfoModel.query.all()
@@ -895,13 +1095,20 @@ class ContainerManager:
         return killed
 
     def cleanup_all_containers(self) -> None:
+        from .network_pool import release_network_slot
+
         logger.info("cleaning up all containers on shutdown")
 
         rows = DesktopContainerInfoModel.query.all()
 
         for row in rows:
+            if row.paused_at:
+                # evidence hold survives restarts; the row reconciles back on boot
+                logger.info(f"leaving paused container {row.container_name} in place (evidence hold)")
+                continue
             try:
                 self.host_manager.stop_container(row.docker_context, row.container_name)
+                release_network_slot(row.docker_context, row.container_name)
                 logger.info(f"cleaned up {row.container_name}")
             except Exception as e:
                 logger.error(f"failed to cleanup container for user {row.user_id}: {e}")
@@ -921,7 +1128,7 @@ class ContainerManager:
             return offset
 
     def _collect_logs_for_container(self, row: DesktopContainerInfoModel) -> None:
-        if not self._get_setting("command_logging_enabled"):
+        if not self._get_setting("telemetry_enabled"):
             return
 
         offset = self._get_log_offset(row.container_id)
@@ -970,7 +1177,7 @@ class ContainerManager:
 
     def collect_all_command_logs(self) -> None:
         with self.app.app_context():  # type: ignore[union-attr]
-            if not self._get_setting("command_logging_enabled"):
+            if not self._get_setting("telemetry_enabled"):
                 return
 
             rows = DesktopContainerInfoModel.query.all()

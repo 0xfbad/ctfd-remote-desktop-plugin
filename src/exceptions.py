@@ -11,3 +11,19 @@ class RemoteDesktopException(Exception):
 # distinct from generic RemoteDesktopException 500
 class HostsUnavailableException(RemoteDesktopException):
     pass
+
+
+CAPACITY_MESSAGE = "All servers are at capacity right now. Please try again in a few minutes."
+
+
+# raised when every healthy context is at its max_containers cap. subclass of
+# HostsUnavailableException so existing route handling maps it to 503
+class HostsAtCapacityException(HostsUnavailableException):
+    pass
+
+
+# raised when the per-session network pool has no free slot on the selected
+# host. the message is user-facing: the background greenlet surfaces str(e)
+# directly into creation_status
+class NetworkPoolExhaustedException(RemoteDesktopException):
+    pass
