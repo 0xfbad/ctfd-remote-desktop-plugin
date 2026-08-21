@@ -19,15 +19,51 @@
     </div>
     <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
         <div class="custom-control custom-switch">
-            <input type="checkbox" class="custom-control-input" id="rd-setting-command_logging_enabled">
-            <label class="custom-control-label" for="rd-setting-command_logging_enabled">
-                <strong>Command Logging</strong>
-                <br><small class="text-muted">Log shell commands run inside desktop sessions for research analytics. Requires a container image with telemetry hooks installed.</small>
+            <input type="checkbox" class="custom-control-input" id="rd-setting-telemetry_enabled">
+            <label class="custom-control-label" for="rd-setting-telemetry_enabled">
+                <strong>Telemetry</strong>
+                <br><small class="text-muted">Master switch for all session data collection: shell command logs, per-session resource usage (CPU/memory/pids/disk), host cgroup pressure and OOM events, and full terminal session recording. Powers usage analytics, the activity feed, and the AI tutor's context. Host telemetry and recording each self-activate only where their runner-side dependency is provisioned (provisioning/compute, and a configured tlog collector socket); everything else runs anywhere.</small>
+            </label>
+        </div>
+    </div>
+    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
+        <div class="custom-control custom-switch">
+            <input type="checkbox" class="custom-control-input" id="rd-setting-consent_notice_enabled">
+            <label class="custom-control-label" for="rd-setting-consent_notice_enabled">
+                <strong>Consent Notice</strong>
+                <br><small class="text-muted">Show the logging/monitoring consent notice on the session start screen. Students acknowledge it by starting a session.</small>
+            </label>
+        </div>
+    </div>
+    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
+        <label class="mb-1"><strong>Connection Types</strong></label>
+        <small class="text-muted d-block mb-2">Which shells a session exposes, on top of the always-on VNC desktop. Applies to new sessions only; active sessions keep what they were created with. When off, the service is not started in the container and its port is never published.</small>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="custom-control custom-switch">
+                    <input type="checkbox" class="custom-control-input" id="rd-setting-ssh_enabled">
+                    <label class="custom-control-label" for="rd-setting-ssh_enabled">SSH access</label>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="custom-control custom-switch">
+                    <input type="checkbox" class="custom-control-input" id="rd-setting-web_terminal_enabled">
+                    <label class="custom-control-label" for="rd-setting-web_terminal_enabled">Web terminal (ttyd)</label>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
+        <div class="custom-control custom-switch">
+            <input type="checkbox" class="custom-control-input" id="rd-setting-network_isolation">
+            <label class="custom-control-label" for="rd-setting-network_isolation">
+                <strong>Per-Session Network Isolation</strong>
+                <br><small class="text-muted">Give each session its own private docker network (rd-net-NN pool, created by provisioning/network/net-pool.sh on every host). When on, creation fails closed if the pool is missing or exhausted - no shared-network fallback. Leave off for single-host dev.</small>
             </label>
         </div>
     </div>
     <div class="row">
-        <div class="col-md-4">
+        <div class="col-md-6">
             <h5>Container</h5>
             <div class="form-group">
                 <label>Docker Image <span class="cfg-help" data-tip="The Docker image used to create each desktop session. Change this if you have a custom image with specific tools or software pre-installed.">?</span></label>
@@ -38,6 +74,10 @@
                 <input type="text" class="form-control" id="rd-setting-memory_limit">
             </div>
             <div class="form-group">
+                <label>CPU Limit <span class="cfg-help" data-tip="Maximum CPU cores each desktop can use (e.g. 1.0 = one core, 0.5 = half a core). Lower values let you run more desktops per server, higher values give users a snappier experience.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-cpu_limit">
+            </div>
+            <div class="form-group">
                 <label>SHM Size <span class="cfg-help" data-tip="Shared memory available to the desktop (e.g. 256m). Browsers and GUI apps use this for rendering. If users see crashes or blank screens, try increasing it.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-shm_size">
             </div>
@@ -45,27 +85,8 @@
                 <label>Resolution <span class="cfg-help" data-tip="Screen resolution of the remote desktop (e.g. 1280x720). Higher values give more screen space but use more bandwidth and memory.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-resolution">
             </div>
-            <div class="form-group">
-                <label>CPU Limit <span class="cfg-help" data-tip="Maximum CPU cores each desktop can use (e.g. 1.0 = one core, 0.5 = half a core). Lower values let you run more desktops per server, higher values give users a snappier experience.">?</span></label>
-                <input type="text" class="form-control" id="rd-setting-cpu_limit">
-            </div>
-            <div class="form-group">
-                <label>Username Source <span class="cfg-help" data-tip="Where to pull the Linux username inside the desktop. Normalized to lowercase letters and numbers, falls back to user{id} if the result is empty.">?</span></label>
-                <select class="form-control" id="rd-setting-username_source">
-                    <option value="name">CTFd Display Name</option>
-                    <option value="email">Email (before @)</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label>Cap Drop <span class="cfg-help" data-tip="Linux capabilities to drop from containers, comma-separated. Use ALL to drop everything then selectively add back with Cap Add. Changes only affect new sessions.">?</span></label>
-                <input type="text" class="form-control" id="rd-setting-cap_drop">
-            </div>
-            <div class="form-group">
-                <label>Cap Add <span class="cfg-help" data-tip="Linux capabilities to add to containers, comma-separated. These are granted on top of whatever remains after Cap Drop. Must include caps matching any file capabilities on binaries in the image (e.g. nmap needs NET_RAW, NET_ADMIN, NET_BIND_SERVICE) or those binaries won't be executable. Changes only affect new sessions.">?</span></label>
-                <input type="text" class="form-control" id="rd-setting-cap_add">
-            </div>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-6">
             <h5>Session Timers</h5>
             <div class="form-group">
                 <label>Initial Duration <span class="cfg-help" data-tip="How long a desktop session lasts before it expires. Users will see a countdown timer. Set higher for longer competitions, lower to save server resources.">?</span></label>
@@ -88,21 +109,6 @@
             <div class="form-group">
                 <label>Max Extensions <span class="cfg-help" data-tip="How many times a user can extend their session. Set to 0 for no extensions (hard time limit). Higher values let users keep their desktop alive longer.">?</span></label>
                 <input type="number" class="form-control no-spin" id="rd-setting-max_extensions" min="0">
-            </div>
-        </div>
-        <div class="col-md-4">
-            <h5>Timeouts</h5>
-            <div class="form-group">
-                <label>VNC Ready Attempts <span class="cfg-help" data-tip="How many times the server checks if a new desktop is ready before giving up. Increase if desktops fail to start on slower hardware.">?</span></label>
-                <input type="number" class="form-control no-spin" id="rd-setting-vnc_ready_attempts" min="1">
-            </div>
-            <div class="form-group">
-                <label>HTTP Timeout (seconds) <span class="cfg-help" data-tip="How long to wait for a response from Docker when creating or managing desktops. Increase if you see timeout errors on slow networks.">?</span></label>
-                <input type="number" class="form-control no-spin" id="rd-setting-http_request_timeout" min="1">
-            </div>
-            <div class="form-group">
-                <label>Cleanup Interval (seconds) <span class="cfg-help" data-tip="How often the server checks for expired sessions to clean up. Lower values free resources faster, higher values reduce server load.">?</span></label>
-                <input type="number" class="form-control no-spin" id="rd-setting-cleanup_interval" min="1">
             </div>
         </div>
     </div>
@@ -129,6 +135,7 @@
                 <th><b>Context Name</b></th>
                 <th><b>Public Hostname</b></th>
                 <th><b>Weight</b></th>
+                <th><b>Max Sessions</b></th>
                 <th><b>Enabled</b></th>
                 <th><b>Status</b></th>
                 <th><b>Sessions</b></th>
@@ -214,6 +221,11 @@
                     <input type="number" class="form-control" id="rd-edit-ctx-weight" min="1">
                     <small class="form-text text-muted">Higher weight means more sessions are scheduled to this context</small>
                 </div>
+                <div class="form-group">
+                    <label>Max Sessions</label>
+                    <input type="number" class="form-control" id="rd-edit-ctx-max-containers" min="0" placeholder="auto">
+                    <small class="form-text text-muted">Max concurrent sessions on this host. Blank = auto (capacity RAM fraction &times; host RAM / memory limit). 0 = drain: no new sessions.</small>
+                </div>
                 <div class="form-check">
                     <input type="checkbox" class="form-check-input" id="rd-edit-ctx-enabled">
                     <label class="form-check-label" for="rd-edit-ctx-enabled">Enabled</label>
@@ -294,10 +306,11 @@
 <script>
 (function() {
     var rdSettingKeys = [
-        'remote_desktop_enabled', 'require_verified', 'command_logging_enabled',
-        'docker_image', 'memory_limit', 'shm_size', 'resolution', 'cpu_limit', 'username_source', 'cap_drop', 'cap_add',
-        'max_extensions',
-        'vnc_ready_attempts', 'http_request_timeout', 'cleanup_interval'
+        'remote_desktop_enabled', 'require_verified', 'telemetry_enabled',
+        'consent_notice_enabled', 'ssh_enabled', 'web_terminal_enabled',
+        'network_isolation',
+        'docker_image', 'memory_limit', 'cpu_limit', 'shm_size', 'resolution',
+        'max_extensions'
     ];
 
     var durationFields = [
@@ -432,7 +445,7 @@
     function renderContexts(contexts) {
         var tbody = document.getElementById('rd-contexts-table');
         if (!contexts || contexts.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" class="text-center">No contexts configured</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" class="text-center">No contexts configured</td></tr>';
             return;
         }
 
@@ -451,16 +464,30 @@
             else if (connected) { statusClass = 'text-warning font-weight-bold'; statusText = 'NO IMAGE'; }
             else { statusClass = 'text-danger font-weight-bold'; statusText = 'DOWN'; }
 
+            var capDisplay;
+            if (ctx.max_containers === null || ctx.max_containers === undefined) {
+                capDisplay = 'auto (' + (hostInfo.max_containers != null ? hostInfo.max_containers : '?') + ')';
+            } else if (ctx.max_containers === 0) {
+                capDisplay = 'drain';
+            } else {
+                capDisplay = ctx.max_containers;
+            }
+            var sessionsCell = sessions + ' / ' + (hostInfo.max_containers != null ? hostInfo.max_containers : '-');
+            if (hostInfo.at_capacity) {
+                sessionsCell = '<span class="text-danger font-weight-bold" title="At capacity - new sessions refused">' + sessionsCell + '</span>';
+            }
+
             return '<tr>' +
                 '<td><strong>' + escapeHtml(ctx.context_name) + '</strong></td>' +
                 '<td>' + escapeHtml(ctx.pub_hostname) + '</td>' +
                 '<td>' + ctx.weight + '</td>' +
+                '<td>' + capDisplay + '</td>' +
                 '<td>' + (ctx.enabled ? 'Yes' : 'No') + '</td>' +
                 '<td><span class="' + statusClass + '">' + statusText + '</span></td>' +
-                '<td>' + sessions + '</td>' +
+                '<td>' + sessionsCell + '</td>' +
                 '<td class="rd-ctx-actions">' +
                     '<button class="btn btn-sm" data-action="test" data-id="' + ctx.id + '" data-name="' + escapeHtml(ctx.context_name) + '" title="Test"><i class="fas fa-heartbeat" style="color:#28a745;"></i></button>' +
-                    '<button class="btn btn-sm" data-action="edit" data-id="' + ctx.id + '" data-name="' + escapeHtml(ctx.context_name) + '" data-hostname="' + escapeHtml(ctx.hostname || '') + '" data-pub="' + escapeHtml(ctx.pub_hostname) + '" data-weight="' + ctx.weight + '" data-enabled="' + ctx.enabled + '" title="Edit"><i class="fas fa-edit" style="color:#6c757d;"></i></button>' +
+                    '<button class="btn btn-sm" data-action="edit" data-id="' + ctx.id + '" data-name="' + escapeHtml(ctx.context_name) + '" data-hostname="' + escapeHtml(ctx.hostname || '') + '" data-pub="' + escapeHtml(ctx.pub_hostname) + '" data-weight="' + ctx.weight + '" data-maxcontainers="' + (ctx.max_containers === null || ctx.max_containers === undefined ? '' : ctx.max_containers) + '" data-enabled="' + ctx.enabled + '" title="Edit"><i class="fas fa-edit" style="color:#6c757d;"></i></button>' +
                     '<button class="btn btn-sm" data-action="delete" data-id="' + ctx.id + '" data-name="' + escapeHtml(ctx.context_name) + '" title="Delete"><i class="fas fa-trash" style="color:#dc3545;"></i></button>' +
                 '</td></tr>';
         }).join('');
@@ -510,6 +537,7 @@
         document.getElementById('rd-edit-ctx-hostname').value = btn.dataset.hostname;
         document.getElementById('rd-edit-ctx-pub-hostname').value = btn.dataset.pub;
         document.getElementById('rd-edit-ctx-weight').value = btn.dataset.weight;
+        document.getElementById('rd-edit-ctx-max-containers').value = btn.dataset.maxcontainers;
         document.getElementById('rd-edit-ctx-enabled').checked = btn.dataset.enabled === 'true';
         var hostnameField = document.getElementById('rd-edit-ctx-hostname').closest('.form-group');
         hostnameField.style.display = btn.dataset.hostname ? '' : 'none';
@@ -622,10 +650,13 @@
 
     document.getElementById('rd-edit-ctx-submit').addEventListener('click', function() {
         var id = document.getElementById('rd-edit-ctx-id').value;
+        // no || here - 0 is a valid value (drain)
+        var rawMax = document.getElementById('rd-edit-ctx-max-containers').value;
         var payload = {
             hostname: document.getElementById('rd-edit-ctx-hostname').value || null,
             pub_hostname: document.getElementById('rd-edit-ctx-pub-hostname').value,
             weight: parseInt(document.getElementById('rd-edit-ctx-weight').value) || 1,
+            max_containers: rawMax === '' ? null : parseInt(rawMax, 10),
             enabled: document.getElementById('rd-edit-ctx-enabled').checked
         };
         if (!payload.pub_hostname) { CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }

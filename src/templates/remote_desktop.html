@@ -209,7 +209,16 @@
         height: 100%;
         color: white;
         text-align: center;
+        overflow-y: auto;
+        padding: 24px 16px;
     }
+
+    /* auto margins absorb free space: centered when it fits, top-aligned and
+       scrollable when it overflows (short laptop viewports + consent banner) */
+    .no-session-screen::before,
+    .no-session-screen::after { content: ""; }
+    .no-session-screen::before { margin-top: auto; }
+    .no-session-screen::after { margin-bottom: auto; }
 
     .start-session-btn {
         padding: 12px 28px;
@@ -231,6 +240,32 @@
         background: #6c757d;
         cursor: not-allowed;
     }
+
+    .consent-notice {
+        max-width: 720px;
+        margin-top: 20px;
+        padding: 14px 18px;
+        background: rgba(224, 96, 112, 0.08);
+        border: 1px solid rgba(224, 96, 112, 0.4);
+        border-radius: 6px;
+        text-align: left;
+        color: #adb5bd;
+        font-size: 14px;
+        line-height: 1.6;
+    }
+
+    .consent-notice .consent-title {
+        text-align: center;
+        color: #e06070;
+        font-size: 15px;
+        margin-bottom: 10px;
+    }
+
+    .consent-notice strong { color: #ced4da; }
+    .consent-notice .consent-title strong { color: #e06070; }
+    .consent-notice a { color: #4da6ff; text-decoration: none; }
+    .consent-notice a:hover { text-decoration: underline; }
+    .consent-notice .fa-external-link-alt { font-size: 11px; }
 
     .loading-spinner {
         width: 14px;
@@ -462,9 +497,20 @@
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-info-circle" style="color: #6c757d; margin-right: 6px;"></i>This is an ephemeral environment, nothing is saved between sessions.</p>
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-shield-alt" style="color: #6c757d; margin-right: 6px;"></i>Avoid logging into anything sensitive.</p>
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-redo" style="color: #6c757d; margin-right: 6px;"></i>If something breaks, just stop and start a new session.</p>
-                <p style="margin: 0 0 8px 0;"><i class="fas fa-desktop" style="color: #6c757d; margin-right: 6px;"></i>Desktop, Terminal, and SSH modes available from the bottom bar once your session starts.</p>
+                {% set modes = ['Desktop'] %}{% if web_terminal_enabled %}{% set modes = modes + ['Terminal'] %}{% endif %}{% if ssh_enabled %}{% set modes = modes + ['SSH'] %}{% endif %}
+                <p style="margin: 0 0 8px 0;"><i class="fas fa-desktop" style="color: #6c757d; margin-right: 6px;"></i>{{ modes | join(', ') }} mode{{ 's' if modes|length > 1 }} available from the bottom bar once your session starts.</p>
                 <p style="margin: 0; color: #e06070;"><i class="fas fa-clock" style="color: #e06070; margin-right: 6px;"></i>Sessions expire after a set time to save resources and keep your environment fresh.</p>
             </div>
+            {% if consent_notice %}
+            <div class="consent-notice" role="note" id="consent-notice">
+                <div class="consent-title">
+                    <i class="fas fa-chart-line" style="margin-right: 6px;"></i><strong>Telemetry</strong>
+                </div>
+                <p style="margin: 0 0 8px 0;">The commands you run and their output, along with general session activity, are <strong>recorded and tied to your account and IP address</strong>. This is used for usage statistics and shared with a helper agent that needs the context of your working environment to assist you.</p>
+                <p style="margin: 0 0 8px 0;">Attacking the challenges is expected and allowed, but the <strong>platform itself is off limits</strong>. Don't try to escape this environment or escalate to the host, don't reach into another user's session, and don't attack the site's login, database, or admin unless a challenge tells you to. Anything outside this platform is also out of scope, including other people's machines, external CTFs, the wider internet, and any system you aren't authorized to touch.</p>
+                <p style="margin: 0;"><strong>By starting a session, you acknowledge and consent to this.</strong></p>
+            </div>
+            {% endif %}
             <button class="start-session-btn" onclick="startSession()" id="start-btn" style="background: #28a745;">
                 <i class="fas fa-play"></i> Start Remote Desktop
             </button>

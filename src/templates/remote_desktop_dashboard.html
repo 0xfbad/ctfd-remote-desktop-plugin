@@ -522,7 +522,7 @@
 			<div class="col-md-12">
 				<div class="card">
 					<div class="card-header">
-						<h3 class="card-title">Command Feed <span class="cfg-help" data-tip="Recent shell commands from all sessions. Spot-check what participants are running or investigate suspicious activity.">?</span></h3>
+						<h3 class="card-title">Command Feed <span class="badge badge-secondary" style="font-size: 11px; vertical-align: middle;">advisory &mdash; not evidence</span> <span class="cfg-help" data-tip="In-container shell hooks; a student with root can blank or forge these. Use for spot-checks only - the durable record is the tlog transcript on the runner.">?</span></h3>
 					</div>
 					<div class="card-body">
 						<div class="table-responsive log-wrap">
@@ -691,6 +691,21 @@
 		'host_unhealthy': 'Host Down',
 		'host_healthy': 'Host Up',
 		'orphan_reaped': 'Orphan Reaped',
+		'orphan_paused': 'Paused Orphan',
+		'session_paused': 'Paused',
+		'session_unpaused': 'Unpaused',
+		'capacity_refused': 'At Capacity',
+		'capacity_count_drift': 'Count Drift',
+		'network_pool_exhausted': 'Net Pool Full',
+		'network_slot_reclaimed': 'Net Slot Reclaimed',
+		'resource_mem_high': 'Memory High',
+		'resource_pids_high': 'PIDs High',
+		'resource_write_flood': 'Write Flood',
+		'session_oom_kill': 'OOM Kill',
+		'pids_limit_hit': 'PIDs Limit Hit',
+		'host_pressure': 'Host Pressure',
+		'rd_slice_unconfigured': 'Slice Unconfigured',
+		'tlog_socket_missing': 'Recorder Missing',
 	};
 
 	const EXIT_CODE_LABELS = {
@@ -781,6 +796,21 @@
 		'host_unhealthy': 'badge-evt-host-down',
 		'host_healthy': 'badge-evt-host-up',
 		'orphan_reaped': 'badge-evt-orphan',
+		'orphan_paused': 'badge-evt-orphan',
+		'session_paused': 'badge-evt-error',
+		'session_unpaused': 'badge-evt-created',
+		'capacity_refused': 'badge-evt-host-down',
+		'capacity_count_drift': 'badge-evt-orphan',
+		'network_pool_exhausted': 'badge-evt-host-down',
+		'network_slot_reclaimed': 'badge-evt-orphan',
+		'resource_mem_high': 'badge-evt-expired',
+		'resource_pids_high': 'badge-evt-expired',
+		'resource_write_flood': 'badge-evt-error',
+		'session_oom_kill': 'badge-evt-error',
+		'pids_limit_hit': 'badge-evt-expired',
+		'host_pressure': 'badge-evt-expired',
+		'rd_slice_unconfigured': 'badge-evt-host-down',
+		'tlog_socket_missing': 'badge-evt-expired',
 	};
 
 	function formatDuration(secs) {
@@ -847,6 +877,26 @@
 				const parts = [m.context, m.container_name].filter(Boolean).join(' / ');
 				const age = formatDuration(m.age_seconds);
 				return age ? `${parts} (age ${age}, leftover with no db row)` : parts;
+			}
+			case 'orphan_paused': {
+				const parts = [m.context, m.container_name].filter(Boolean).join(' / ');
+				return `${parts} - held for inspection, not removed`;
+			}
+			case 'capacity_refused': {
+				if (!m.hosts) return event.message || '';
+				const parts = [];
+				for (const [name, h] of Object.entries(m.hosts)) {
+					parts.push(`${name}: ${h.count}/${h.cap}`);
+				}
+				const refusals = m.refusals > 1 ? ` (${m.refusals} refusals)` : '';
+				return parts.join(' | ') + refusals;
+			}
+			case 'capacity_count_drift':
+				return `${m.context_name}: counter ${m.counter} vs ${m.db_count} rows (${m.kind})`;
+			case 'network_slot_reclaimed': {
+				const parts = [m.context, m.network_name, m.container_name].filter(Boolean).join(' / ');
+				const age = formatDuration(m.age_seconds);
+				return age ? `${parts} (claimed ${age} ago)` : parts;
 			}
 			default:
 				return event.message || '';
@@ -1038,12 +1088,22 @@
 
 			const timerActive = container.timer && container.timer.active;
 			const timeRemaining = container.timer ? container.timer.time_remaining : 0;
-			const statusClass = !timerActive ? 'status-warning' :
+			const statusClass = container.paused ? 'status-expired' :
+							   !timerActive ? 'status-warning' :
 							   timeRemaining <= 0 ? 'status-expired' :
 							   timeRemaining < 300 ? 'status-warning' : 'status-active';
-			const status = !timerActive ? 'STARTING' :
+			const status = container.paused ? 'PAUSED' :
+						  !timerActive ? 'STARTING' :
 						  timeRemaining <= 0 ? 'EXPIRED' :
 						  timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
+
+			const pauseBtn = container.paused
+				? `<button class="btn btn-sm" onclick="unpauseContainer(${container.user_id})" title="Unpause (releases the evidence hold, credits the frozen time)">
+						<i class="fas fa-play icon-extend"></i>
+					</button>`
+				: `<button class="btn btn-sm" onclick="pauseContainer(${container.user_id})" title="Pause (freeze the container, hold the writable layer as evidence)">
+						<i class="fas fa-pause icon-monitor"></i>
+					</button>`;
 
 			const row = `
 				<tr>
@@ -1057,6 +1117,7 @@
 						<button class="btn btn-sm" onclick="peekVNC(${container.user_id})" title="Monitor">
 							<i class="fas fa-eye icon-monitor"></i>
 						</button>
+						${pauseBtn}
 						<button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
 							<i class="fas fa-times icon-kill"></i>
 						</button>
@@ -1115,6 +1176,46 @@
 		.then(data => {
 			if (data.success) refreshAll();
 			else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Kill failed', button: 'OK' });
+		});
+	}
+
+	function pauseContainer(userId) {
+		const container = activeContainers[userId];
+		const username = container ? container.username : `User ${userId}`;
+		if (!confirm(`Pause ${username}'s session? The container freezes and is held as evidence; the student cannot destroy it.`)) return;
+
+		const formData = new FormData();
+		formData.append('nonce', window.init.csrfNonce);
+		formData.append('user_id', userId);
+
+		fetch('/remote-desktop/dashboard/api/pause', {
+			method: 'POST',
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin',
+			body: formData
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.success) refreshAll();
+			else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Pause failed', button: 'OK' });
+		});
+	}
+
+	function unpauseContainer(userId) {
+		const formData = new FormData();
+		formData.append('nonce', window.init.csrfNonce);
+		formData.append('user_id', userId);
+
+		fetch('/remote-desktop/dashboard/api/unpause', {
+			method: 'POST',
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin',
+			body: formData
+		})
+		.then(response => response.json())
+		.then(data => {
+			if (data.success) refreshAll();
+			else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Unpause failed', button: 'OK' });
 		});
 	}
 
