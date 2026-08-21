@@ -23,7 +23,7 @@
       default = pkgs.mkShell {
         packages = with pkgs; [
           uv
-          (python3.withPackages (ps: [ps.ruff ps.mypy ps.pytest ps.vulture ps.markupsafe]))
+          (python3.withPackages (ps: [ps.ruff ps.mypy ps.pytest ps.vulture ps.markupsafe ps.jinja2]))
         ];
         shellHook = ''
           echo "ruff check .          lint"
