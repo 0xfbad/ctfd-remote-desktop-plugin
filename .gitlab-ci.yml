@@ -1,8 +1,38 @@
 check-python:
-  image: python:3.13-slim
+  image: python:3.13-slim@sha256:7ce4b6dfe35e55397b7cda544f8a13f191b7ae28dc5aad71fe664dbc9bc2623f
   before_script:
-    - pip install ruff mypy pytest
+    - apt-get update && apt-get install -y --no-install-recommends git shellcheck util-linux
+    - pip install --disable-pip-version-check ruff==0.15.5 mypy==1.19.1 pytest==9.0.2 jinja2==3.1.6 markupsafe==3.0.3 pyyaml==6.0.2
   script:
+    - |
+      tracked_tests="$(git ls-files -- 'tests/test_*.py')"
+      test -n "$tracked_tests" || {
+        echo 'error: no Git-tracked tests/test_*.py files; add the test suite to the commit' >&2
+        exit 1
+      }
     - ruff format --check .
     - ruff check .
     - mypy .
+    - pytest -p no:cacheprovider tests -q
+    - shellcheck setup.sh
+    - bash -n setup.sh
+
+check-nix:
+  image: nixos/nix:2.35.2@sha256:7a007c766426c1877758ddc5cb87a965ac131fc78c582ce0083d922d51ae945c
+  script:
+    - nix --extra-experimental-features 'nix-command flakes' flake check --print-build-logs
+
+check-mariadb-fresh-schema:
+  image: python:3.13-slim@sha256:7ce4b6dfe35e55397b7cda544f8a13f191b7ae28dc5aad71fe664dbc9bc2623f
+  services:
+    - name: mariadb:10.11@sha256:ce66c7be32a03aabe7241d0a10993a2db827ef652a35d25727d92a832ac8ef73
+      alias: mariadb
+  variables:
+    MARIADB_DATABASE: ctfd_plugin_schema_test
+    MARIADB_ROOT_PASSWORD: schema-test-only
+    REMOTE_DESKTOP_TEST_MARIADB_URL: mysql+pymysql://root:schema-test-only@mariadb:3306/ctfd_plugin_schema_test
+    REMOTE_DESKTOP_TEST_ALLOW_DESTRUCTIVE: "ctfd_plugin_schema_test"
+  before_script:
+    - pip install --disable-pip-version-check pytest==9.0.2 Flask==3.1.2 Flask-SQLAlchemy==3.1.1 SQLAlchemy==2.0.43 PyMySQL==1.1.2
+  script:
+    - pytest -p no:cacheprovider --confcutdir=tests/integration tests/integration/test_mariadb_fresh_schema.py -q
