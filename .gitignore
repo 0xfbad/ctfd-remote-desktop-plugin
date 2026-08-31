@@ -51,8 +51,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# tests kept local only
-tests/
+# The pytest suite is part of the shipped CI/security contract.
+!tests/
+!tests/*.py
 
 # Translations
 *.mo
