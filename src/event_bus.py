@@ -11,15 +11,23 @@ from collections.abc import Callable
 logger = logging.getLogger(__name__)
 
 CHANNEL = "ctfd_remote_desktop:events"
+_BUS_DELIVERY_MARKER = "_rd_bus_delivery"
 
-# unique per-process token, used by subscribers to skip messages they themselves published
-WORKER_ID = f"{os.getpid()}-{secrets.token_hex(4)}"
+# Gunicorn preload is rejected before plugin initialization. Normal Gunicorn
+# startup imports the application independently in each worker, so this module-
+# level identity is process-unique without fork-repair state.
+WORKER_ID = f"{os.getpid()}-{secrets.token_hex(16)}"
 
 _app = None
 _pub_client = None
 _pub_lock = threading.Lock()
 _subscriber_started = False
 _subscriber_lock = threading.Lock()
+
+
+def get_worker_id() -> str:
+    """Return the identity created when this worker imported the plugin."""
+    return WORKER_ID
 
 
 def init(app, on_message: Callable[[dict], None] | None = None) -> None:
@@ -79,7 +87,8 @@ def publish(event: dict) -> bool:
     if client is None:
         return False
     payload = dict(event)
-    payload["_origin"] = WORKER_ID
+    payload.pop(_BUS_DELIVERY_MARKER, None)
+    payload["_origin"] = get_worker_id()
     try:
         client.publish(CHANNEL, json.dumps(payload, default=str))
         return True
@@ -106,6 +115,18 @@ def start_subscriber(on_message: Callable[[dict], None]) -> None:
             logger.exception("event bus: failed to spawn subscriber greenlet")
 
 
+def _deliver_bus_event(on_message: Callable[[dict], None], event: dict) -> bool:
+    """deliver one remote event as non-persistent live fan-out"""
+    if event.get("_origin") == get_worker_id():
+        return False
+    event.pop("_origin", None)
+    # The callback currently has a one-argument public contract, so
+    # EventLogger consumes this private marker as persist=False.
+    event[_BUS_DELIVERY_MARKER] = True
+    on_message(event)
+    return True
+
+
 def _subscriber_loop(on_message: Callable[[dict], None]) -> None:
     backoff = 1.0
     while True:
@@ -130,11 +151,8 @@ def _subscriber_loop(on_message: Callable[[dict], None]) -> None:
                     except Exception:
                         logger.warning("event bus: malformed message, dropping")
                         continue
-                    if event.get("_origin") == WORKER_ID:
-                        continue
-                    event.pop("_origin", None)
                     try:
-                        on_message(event)
+                        _deliver_bus_event(on_message, event)
                     except Exception:
                         logger.exception("event bus: subscriber callback failed")
         except Exception:

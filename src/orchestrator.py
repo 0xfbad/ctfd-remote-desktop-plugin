@@ -4,7 +4,7 @@ import time
 import logging
 from threading import Lock
 
-from .docker_host_manager import DockerHostManager, ImageInfo, parse_size
+from .docker_host_manager import DockerHostManager, ImageInfo, SESSION_LABEL_MANAGED, parse_size
 from .exceptions import HostsUnavailableException, HostsAtCapacityException, CAPACITY_MESSAGE
 from .event_logger import event_logger
 
@@ -13,14 +13,9 @@ logger = logging.getLogger(__name__)
 HostStatus = dict[str, str | int | bool | None]
 
 # used when a host's RAM can't be read (host down at derivation time); flagged
-# stale and re-derived on recovery so the small runner isn't over-admitted
+# stale and re-derived on recovery so a small host is not over-admitted
 DERIVED_CAP_FALLBACK = 5
 CAPACITY_EVENT_MIN_INTERVAL = 300
-# reserve happens up to ~2 min before the session row commits (create semaphore
-# queue + VNC wait), so a single-audit overcount is routinely legitimate; only a
-# persistent streak is a leak worth healing
-AUDIT_OVERCOUNT_WARN_STREAK = 2
-AUDIT_OVERCOUNT_HEAL_STREAK = 3
 
 
 def derive_max_containers(mem_total: int | None, mem_limit: int, fraction: float) -> int:
@@ -47,8 +42,8 @@ def rank_candidates(healthy: list[str], snapshot: dict[str, tuple[int, int, int]
 def plan_count_audit(
     counters: dict[str, int],
     rows: dict[str, int],
-    grace: int,
-    streaks: dict[str, int],
+    *,
+    suppress_down_heal: bool = False,
 ) -> tuple[dict[str, int], list[tuple[str, int, int, str]], dict[str, int]]:
     """pure audit planner. returns (counter_updates, events[(name, counter, rows, kind)], new_streaks)"""
     updates: dict[str, int] = {}
@@ -60,16 +55,12 @@ def plan_count_audit(
             # undercount = over-admission risk; rows are committed live sessions, heal up now
             updates[name] = dbn
             events.append((name, counter, dbn, "healed_up"))
-        elif counter > dbn + grace:
-            s = streaks.get(name, 0) + 1
-            if s >= AUDIT_OVERCOUNT_HEAL_STREAK:
-                # persistent leaked reservations (create crashed without release); heal down
+        elif counter > dbn:
+            if not suppress_down_heal:
+                # Every durable reservation and observed Docker object is in dbn,
+                # so a remaining overcount is a leak and can be healed exactly.
                 updates[name] = dbn
                 events.append((name, counter, dbn, "healed_down"))
-            else:
-                new_streaks[name] = s
-                if s >= AUDIT_OVERCOUNT_WARN_STREAK:
-                    events.append((name, counter, dbn, "overcount"))
     return updates, events, new_streaks
 
 
@@ -83,7 +74,6 @@ class Orchestrator:
         self._cap_stale: set[str] = set()
         self._capacity_refusals: int = 0
         self._last_capacity_event_ts: float = 0.0
-        self._audit_streaks: dict[str, int] = {}
         self.lock = Lock()
 
     def _derive_auto_cap(self, context_name: str, connected: bool) -> tuple[int, bool]:
@@ -94,7 +84,7 @@ class Orchestrator:
         cap = derive_max_containers(
             mem_total,
             parse_size(str(get_setting("memory_limit"))),
-            float(get_setting("capacity_ram_fraction") or 0.7),  # type: ignore[arg-type]
+            float(get_setting("capacity_ram_fraction") or 0.7),
         )
         return cap, not mem_total
 
@@ -183,13 +173,14 @@ class Orchestrator:
     # -- DB seams (unit tests override these three) --------------------------
 
     def _capacity_snapshot(self, names: list[str]) -> dict[str, tuple[int, int, int]]:
+        from CTFd.models import db
         from .models import DesktopDockerContextModel
 
         rows = DesktopDockerContextModel.query.filter(
             DesktopDockerContextModel.context_name.in_(names),
             DesktopDockerContextModel.enabled.is_(True),
         ).all()
-        return {
+        snapshot = {
             r.context_name: (
                 int(r.active_sessions or 0),
                 self._effective_cap(r.context_name, r.max_containers),
@@ -197,6 +188,8 @@ class Orchestrator:
             )
             for r in rows
         }
+        db.session.rollback()
+        return snapshot
 
     def _try_reserve(self, name: str, cap: int) -> bool:
         # atomic conditional increment; the WHERE clause IS the admission check,
@@ -261,7 +254,7 @@ class Orchestrator:
                 "capacity_refused",
                 "session refused: all healthy hosts at capacity",
                 level="warning",
-                metadata=meta,  # type: ignore[arg-type]
+                metadata=meta,
             )
         raise HostsAtCapacityException(CAPACITY_MESSAGE)
 
@@ -288,7 +281,8 @@ class Orchestrator:
         if not healthy:
             raise HostsUnavailableException("no healthy docker contexts available")
         snapshot = self._capacity_snapshot(healthy)
-        if rank_candidates(healthy, snapshot):
+        candidates = rank_candidates(healthy, snapshot)
+        if candidates:
             return
         self._refuse_at_capacity(snapshot)
 
@@ -297,26 +291,105 @@ class Orchestrator:
         # the committed session rows
         from collections import Counter
         from CTFd.models import db
-        from .models import DesktopDockerContextModel, DesktopContainerInfoModel, get_setting
+        from .models import (
+            OP_SELECTING,
+            DesktopContainerInfoModel,
+            DesktopDockerContextModel,
+            DesktopSessionOperationModel,
+        )
 
         counters = {c.context_name: int(c.active_sessions or 0) for c in DesktopDockerContextModel.query.all()}
-        rows = Counter(
-            r.docker_context
-            for r in DesktopContainerInfoModel.query.with_entities(DesktopContainerInfoModel.docker_context).all()
-        )
-        grace = max(2, int(get_setting("max_concurrent_creates") or 2))
-
-        updates, events, new_streaks = plan_count_audit(counters, dict(rows), grace, self._audit_streaks)
-        self._audit_streaks = new_streaks
-
-        for name, target in updates.items():
-            DesktopDockerContextModel.query.filter(DesktopDockerContextModel.context_name == name).update(
-                {DesktopDockerContextModel.active_sessions: target}, synchronize_session=False
+        db_entries = DesktopContainerInfoModel.query.with_entities(
+            DesktopContainerInfoModel.docker_context,
+            DesktopContainerInfoModel.container_name,
+            DesktopContainerInfoModel.session_uuid,
+        ).all()
+        db_counts = Counter(str(row.docker_context) for row in db_entries)
+        known_names: dict[str, set[str]] = {}
+        active_sessions: dict[str, set[str]] = {}
+        for row in db_entries:
+            context_name = str(row.docker_context)
+            known_names.setdefault(context_name, set()).add(str(row.container_name))
+            session_uuid = str(getattr(row, "session_uuid", "") or "")
+            if session_uuid:
+                active_sessions.setdefault(context_name, set()).add(session_uuid)
+        operation_entries = DesktopSessionOperationModel.query.with_entities(
+            DesktopSessionOperationModel.docker_context,
+            DesktopSessionOperationModel.container_name,
+            DesktopSessionOperationModel.session_uuid,
+            DesktopSessionOperationModel.capacity_reserved,
+            DesktopSessionOperationModel.state,
+        ).all()
+        selection_in_progress = any(str(row.state or "") == OP_SELECTING for row in operation_entries)
+        ambiguous_reservation = False
+        for row in operation_entries:
+            if not row.capacity_reserved:
+                continue
+            if not row.docker_context:
+                ambiguous_reservation = True
+                continue
+            context_name = str(row.docker_context)
+            container_name = str(row.container_name or "")
+            session_uuid = str(getattr(row, "session_uuid", "") or "")
+            already_counted = bool(
+                (session_uuid and session_uuid in active_sessions.get(context_name, set()))
+                or (container_name and container_name in known_names.get(context_name, set()))
             )
-        if updates:
+            if container_name:
+                known_names.setdefault(context_name, set()).add(container_name)
+            if not already_counted:
+                # Count every durable reservation, even in the corrupt/partial
+                # case where no container name was persisted. Set-based name
+                # counting would otherwise silently heal capacity downward.
+                db_counts[context_name] += 1
+        db.session.rollback()
+        # Count live Docker objects as well so an ambiguous stop/create cannot
+        # be healed down into an over-admission. None means the host did not
+        # answer; suppress down-healing until a later successful strict list.
+        observed: dict[str, int] = {}
+        for name, counter in counters.items():
+            listing = self.host_manager.list_session_containers_strict(name, "rd-session-")
+            if listing is None:
+                observed[name] = max(db_counts.get(name, 0), counter)
+            else:
+                live_names: set[str] = set()
+                for entry in listing:
+                    listed_name = entry.get("name")
+                    labels = entry.get("labels")
+                    if listed_name and isinstance(labels, dict) and labels.get(SESSION_LABEL_MANAGED) == "true":
+                        live_names.add(str(listed_name))
+                untracked_live = live_names - known_names.get(name, set())
+                observed[name] = db_counts.get(name, 0) + len(untracked_live)
+        # select_and_reserve commits its counter update immediately before the
+        # operation row is marked capacity_reserved. While any operation is in
+        # that narrow selecting state, suppress only downward healing; the next
+        # audit sees either its durable reservation or stale-operation cleanup.
+        updates, events, _unused_streaks = plan_count_audit(
+            counters,
+            observed,
+            suppress_down_heal=selection_in_progress or ambiguous_reservation,
+        )
+
+        applied_names: set[str] = set()
+        for name, target in updates.items():
+            # The strict Docker scan above is intentionally outside a database
+            # transaction. Compare-and-set the counter snapshot so a request
+            # that reserves or releases capacity during that scan cannot be
+            # overwritten by stale audit data.
+            changed = DesktopDockerContextModel.query.filter(
+                DesktopDockerContextModel.context_name == name,
+                DesktopDockerContextModel.active_sessions == counters[name],
+            ).update({DesktopDockerContextModel.active_sessions: target}, synchronize_session=False)
+            if changed == 1:
+                applied_names.add(name)
+        if applied_names:
             db.session.commit()
+        elif updates:
+            db.session.rollback()
 
         for name, counter, dbn, kind in events:
+            if name not in applied_names:
+                continue
             event_logger.log_event(
                 "capacity_count_drift",
                 f"session counter drift on {name}: counter={counter} rows={dbn} ({kind})",
@@ -368,6 +441,8 @@ class Orchestrator:
         return status
 
     def health_check(self) -> None:
+        from .models import get_setting
+
         with self.lock:
             names = list(self.health.keys())
 
@@ -376,11 +451,15 @@ class Orchestrator:
             with self.lock:
                 was_healthy = self.health.get(name)
 
+            recovered = False
             if reachable and not was_healthy:
+                docker_image = str(get_setting("docker_image"))
+                recovered = self.host_manager.check_image(name, docker_image)
+            if recovered:
                 self.mark_healthy(name)
                 logger.info(f"health_check: context {name} recovered")
                 # a cap derived while the host was down used the fallback and
-                # can over-admit the small runner; re-derive from real RAM now
+                # can over-admit a small host; re-derive from real RAM now
                 if name in self._cap_stale:
                     cap, stale = self._derive_auto_cap(name, connected=True)
                     if not stale:

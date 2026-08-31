@@ -2,8 +2,20 @@ from __future__ import annotations
 
 from CTFd.models import db, Users
 from markupsafe import escape as _markup_escape
+from sqlalchemy.exc import IntegrityError
 
-SettingValue = bool | int | float | str | None
+from .settings import (
+    INTERNAL_SETTING_KEYS,
+    PUBLIC_SETTING_KEYS,
+    SETTING_DEFAULTS,
+    SETTING_SPECS,
+    SettingValue,
+    SettingsValidationError,
+    decode_stored_setting,
+    serialize_setting,
+    validate_effective_settings,
+    validate_setting_value,
+)
 
 # end_reason values persisted to the desktop_session_history.end_reason column.
 # these strings live in the DB, the names exist only to prevent typo drift at call sites
@@ -12,18 +24,50 @@ END_REASON_USER_DESTROYED = "user_destroyed"
 END_REASON_ADMIN_KILLED = "admin_killed"
 END_REASON_EXPIRED = "expired"
 
+# Durable lifecycle states.  The active session row remains authoritative until
+# Docker teardown is confirmed; non-active states are deliberately retained so
+# recovery never has to reconstruct a session from an incomplete operation row.
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_STOPPING = "stopping"
+LIFECYCLE_CLEANUP_PENDING = "cleanup_pending"
+LIFECYCLE_HELD = "held"
+LIFECYCLE_UNPAUSING = "unpausing"
+
+OP_IDLE = "idle"
+OP_QUEUED = "queued"
+OP_SELECTING = "selecting"
+OP_RESERVED = "reserved"
+OP_CREATING = "creating"
+OP_WAITING_READY = "waiting_ready"
+OP_ACTIVE = "active"
+OP_CANCEL_REQUESTED = "cancel_requested"
+OP_STOPPING = "stopping"
+OP_CLEANUP_PENDING = "cleanup_pending"
+OP_HELD = "held"
+OP_UNPAUSING = "unpausing"
+OP_FAILED = "failed"
+
+CREATE_OPERATION_STATES = frozenset(
+    {
+        OP_QUEUED,
+        OP_SELECTING,
+        OP_RESERVED,
+        OP_CREATING,
+        OP_WAITING_READY,
+        OP_CANCEL_REQUESTED,
+    }
+)
+
 # noVNC viewer query string shared by the absolute and relative vnc.html URL builders
 VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true"
 
-# per-session network pool naming, shared by the allocator, the host-side
-# provisioning script (net-pool.sh) and the nftables rdb* bridge match.
-# changing either prefix means re-provisioning every runner - decide once
-NETWORK_POOL_PREFIX = "rd-net-"
-NETWORK_BRIDGE_PREFIX = "rdb"
 
+def proxy_vnc_url(user_id: int, password: str) -> str:
+    # Password stays in the fragment: browsers do not send it in HTTP requests
+    # or Referer headers. noVNC and ttyd are only exposed through authenticated
+    # same-origin reverse-proxy routes.
+    return f"/remote-desktop/vnc/{user_id}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
 
-def network_slot_name(i: int) -> str:
-    return f"{NETWORK_POOL_PREFIX}{i:02d}"
 
 # strftime format for human-facing timestamps (event log datetime, image build date).
 # %-d / %-I are glibc-specific no-pad directives, fine on the linux deploy target
@@ -59,7 +103,9 @@ class DesktopDockerContextModel(db.Model):
 class DesktopContainerInfoModel(db.Model):
     __tablename__ = "desktop_container_info"
     container_id = db.Column(db.String(512), primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # Intentionally not a Users FK: deleting an account must not erase the
+    # authoritative row for a live, held, or cleanup-pending Docker object.
+    user_id = db.Column(db.Integer, nullable=False)
     container_name = db.Column(db.String(512), nullable=False)
     vnc_port = db.Column(db.Integer, nullable=False)
     novnc_port = db.Column(db.Integer, nullable=False)
@@ -77,14 +123,54 @@ class DesktopContainerInfoModel(db.Model):
     extensions_used = db.Column(db.Integer, default=0)
     max_extensions = db.Column(db.Integer, default=3)
     # raw sid of the CTFd session minted for autologin into the container.
-    # nullable=True so legacy rows from before this column existed survive
-    # without a data migration. on destroy, a NULL skips the cache revocation
+    # A cookie may not be minted in every session creation path. On destroy,
+    # NULL means there is no server-side session cache entry to revoke.
     cookie_sid = db.Column(db.String(128), nullable=True)
-    # per-session network from the rd-net pool; NULL in shared-network mode
-    network_name = db.Column(db.String(64), nullable=True)
     # set when the container is paused (io tripwire or admin hold); expiry and
     # shutdown cleanup skip paused rows so the writable layer survives as evidence
     paused_at = db.Column(db.Float(precision=53), nullable=True)
+    # Generated before any Docker side effect. Unlike container_id this exists
+    # throughout create, cancellation, active use, teardown, and history.
+    session_uuid = db.Column(db.String(36), nullable=False)
+    lifecycle_state = db.Column(
+        db.String(32), nullable=False, default=LIFECYCLE_ACTIVE, server_default=LIFECYCLE_ACTIVE
+    )
+    lifecycle_reason = db.Column(db.String(128), nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint("user_id", name="uq_desktop_container_info_user_id"),
+        db.UniqueConstraint("session_uuid", name="uq_desktop_container_info_session_uuid"),
+    )
+
+
+class DesktopSessionOperationModel(db.Model):
+    """Stable per-user lifecycle mutex and crash-recovery record.
+
+    There is intentionally no Users foreign key and no cascading delete. A
+    deleted CTFd user can still own a live or cleanup-pending Docker object, and
+    recovery must remain able to lock and finish that generation.
+    """
+
+    __tablename__ = "desktop_session_operations"
+    user_id = db.Column(db.Integer, primary_key=True)
+    operation_uuid = db.Column(db.String(36), nullable=False)
+    worker_lease_uuid = db.Column(db.String(36), nullable=True)
+    session_uuid = db.Column(db.String(36), nullable=True)
+    state = db.Column(db.String(32), nullable=False, default=OP_IDLE, server_default=OP_IDLE, index=True)
+    cancel_requested = db.Column(db.Boolean, nullable=False, default=False, server_default="0")
+    docker_context = db.Column(db.String(512), nullable=True)
+    container_name = db.Column(db.String(512), nullable=True)
+    capacity_reserved = db.Column(db.Boolean, nullable=False, default=False, server_default="0")
+    requested_reason = db.Column(db.String(128), nullable=True)
+    created_at = db.Column(db.Float(precision=53), nullable=False)
+    updated_at = db.Column(db.Float(precision=53), nullable=False, index=True)
+    heartbeat_at = db.Column(db.Float(precision=53), nullable=True)
+    error = db.Column(db.Text, nullable=True)
+
+    __table_args__ = (
+        db.UniqueConstraint("operation_uuid", name="uq_desktop_session_operations_operation_uuid"),
+        db.UniqueConstraint("session_uuid", name="uq_desktop_session_operations_session_uuid"),
+    )
 
 
 class DesktopSessionHistoryModel(db.Model):
@@ -98,24 +184,10 @@ class DesktopSessionHistoryModel(db.Model):
     duration = db.Column(db.Float(precision=53), nullable=False)
     end_reason = db.Column(db.String(128), nullable=False)
     extensions_used = db.Column(db.Integer, default=0)
-    # links the history row to its tlog transcript on the runner
-    # (/var/lib/rd-tlog/sessions/<container_name>.tlog.jsonl)
     container_name = db.Column(db.String(512), nullable=True)
+    session_uuid = db.Column(db.String(36), nullable=False)
 
-
-class DesktopNetworkSlotModel(db.Model):
-    __tablename__ = "desktop_network_slots"
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    docker_context = db.Column(db.String(512), nullable=False)
-    slot_index = db.Column(db.Integer, nullable=False)
-    network_name = db.Column(db.String(64), nullable=False)
-    # claimant, known before the container exists so the claim can precede create
-    container_name = db.Column(db.String(512), nullable=False)
-    user_id = db.Column(db.Integer, nullable=True)
-    claimed_at = db.Column(db.Float(precision=53), nullable=False)
-    # a free slot is the absence of a row; this constraint is the cross-worker
-    # concurrency control (losers of the insert race get IntegrityError and retry)
-    __table_args__ = (db.UniqueConstraint("docker_context", "slot_index", name="uq_rd_net_slot"),)
+    __table_args__ = (db.UniqueConstraint("session_uuid", name="uq_desktop_session_history_session_uuid"),)
 
 
 def history_from_row(
@@ -136,20 +208,8 @@ def history_from_row(
         end_reason=reason,
         extensions_used=row.extensions_used,
         container_name=row.container_name,
+        session_uuid=row.session_uuid,
     )
-
-
-class CommandLogModel(db.Model):
-    __tablename__ = "desktop_command_logs"
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    container_id = db.Column(db.String(512), nullable=False)
-    timestamp = db.Column(db.Float(precision=53), nullable=False)
-    command = db.Column(db.Text, nullable=False)
-    exit_code = db.Column(db.Integer, nullable=True)
-    duration = db.Column(db.Integer, nullable=True)
-    cwd = db.Column(db.Text, nullable=True)
-    tty = db.Column(db.String(64), nullable=True)
 
 
 class DesktopReportModel(db.Model):
@@ -170,6 +230,7 @@ class DesktopSettingsModel(db.Model):
 class DesktopEventLogModel(db.Model):
     __tablename__ = "desktop_event_log"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    event_id = db.Column(db.String(128), nullable=False)
     # no FK on user_id, deleting a user should not cascade-wipe their audit trail
     timestamp = db.Column(db.Float(precision=53), nullable=False, index=True)
     event_type = db.Column(db.String(128), nullable=False, index=True)
@@ -179,107 +240,108 @@ class DesktopEventLogModel(db.Model):
     message = db.Column(db.Text, nullable=False)
     metadata_json = db.Column(db.Text, nullable=True)
 
-
-SETTING_DEFAULTS: dict[str, SettingValue] = {
-    "remote_desktop_enabled": False,
-    "docker_image": "ctfd-remote-desktop:latest",
-    "memory_limit": "4g",
-    "shm_size": "512m",
-    "resolution": "1920x1080",
-    "cpu_limit": 2,
-    "initial_duration": 3600,
-    "extension_duration": 1800,
-    "max_extensions": 3,
-    "vnc_ready_attempts": 180,
-    "http_request_timeout": 3,
-    "cleanup_interval": 300,
-    "pids_limit": 4096,
-    "max_concurrent_creates": 2,
-    "username_source": "name",
-    "require_verified": True,
-    "command_log_interval": 30,
-    "cap_drop": "ALL",
-    "cap_add": "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE",
-    "retention_days": 60,
-    "rd_network_name": "rd-isolated",
-    # connection toggles: applies to new sessions only; when off the service is
-    # not started in the container and its port is never published
-    "ssh_enabled": True,
-    "web_terminal_enabled": True,
-    # consent notice on the session start screen
-    "consent_notice_enabled": True,
-    # feature 1: storage budget. "" omits the kwarg (required on ext4 dev boxes -
-    # the daemon refuses storage_opt unless the data-root is xfs+pquota). prod: "20g"
-    "storage_limit": "",
-    "log_max_size": "50m",  # "" omits the json-file log cap (escape hatch)
-    "log_max_file": 3,
-    "pause_watch_interval": 60,  # seconds between paused-container sweeps
-    # feature 2: per-session network segmentation. False = shared rd_network_name
-    # (dev/rollback); True = pooled single-tenant networks, fail closed
-    "network_isolation": False,
-    "network_pool_size": 24,
-    # feature 3: fair-share governance. empty/0 omits the corresponding kwarg
-    "memory_reservation": "1g",
-    # swap cushion above memory_limit so long-lived desktops spill instead of
-    # OOM-killing a live app. "" = cushion equal to memory_limit, "0" = no
-    # swap, "-1" = unlimited, "<size>" = explicit swap amount
-    "swap_limit": "",
-    "oom_score_adj": 500,
-    "nofile_soft": 1024,
-    "nofile_hard": 1048576,
-    "cgroup_parent": "rd.slice",
-    # single master switch for all data collection: shell command logs,
-    # per-session resource telemetry (docker stats), host cgroup/PSI/OOM
-    # snapshots, and session recording. these feed usage analytics, the
-    # activity feed, and the AI tutor's context. each mechanism self-skips
-    # when its runner-side dependency is absent (host telemetry needs
-    # provisioning/compute; recording needs tlog_socket_path set + collector)
-    "telemetry_enabled": True,
-    "telemetry_interval": 60,
-    "telemetry_mem_warn_pct": 90,
-    "telemetry_pids_warn_pct": 80,
-    "telemetry_write_mbps_warn": 200,
-    "telemetry_realert_seconds": 600,
-    "telemetry_reader_image": "busybox:latest",
-    # feature 4: admission control (auto-derived caps = fraction * host RAM / memory_limit)
-    "capacity_ram_fraction": 0.7,
-    # recording activates when telemetry is on AND this points at the
-    # rd-tlog-collector socket. empty = recording off (dev default)
-    "tlog_socket_path": "",
-}
+    __table_args__ = (db.UniqueConstraint("event_id", name="uq_desktop_event_log_event_id"),)
 
 
-def _coerce(raw: str, default: SettingValue) -> SettingValue:
-    if default is None:
-        return raw
-
-    target = type(default)
-    if target is bool:
-        return raw.lower() in ("true", "1", "yes") if isinstance(raw, str) else bool(raw)
-    if target is int:
-        return int(float(raw))
-    if target is float:
-        return float(raw)
-    return raw
-
-
-def get_setting(key: str, default: SettingValue = None) -> SettingValue:
-    if default is None:
-        default = SETTING_DEFAULTS.get(key)
+def get_setting(key: str, default: SettingValue | None = None) -> SettingValue:
+    if key not in SETTING_SPECS:
+        raise SettingsValidationError(f"unknown setting {key!r}")
     row = DesktopSettingsModel.query.filter_by(key=key).first()
-    if row and row.value is not None:
-        return _coerce(row.value, default)
-    return default
+    if row is not None:
+        return decode_stored_setting(key, row.value)
+    fallback = SETTING_SPECS[key].default if default is None else default
+    return validate_setting_value(key, fallback)
+
+
+def _lock_revision_row():
+    return DesktopSettingsModel.query.filter_by(key="_settings_revision").with_for_update().first()
+
+
+def _ensure_revision_row() -> None:
+    if DesktopSettingsModel.query.filter_by(key="_settings_revision").first() is not None:
+        return
+    db.session.add(DesktopSettingsModel(key="_settings_revision", value="1"))
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # Another worker won the one-time seed race.
+        db.session.rollback()
+
+
+def _decode_rows(rows) -> tuple[dict[str, SettingValue], dict[str, DesktopSettingsModel]]:
+    effective = dict(SETTING_DEFAULTS)
+    by_key: dict[str, DesktopSettingsModel] = {}
+    for row in rows:
+        key = str(row.key)
+        if key in by_key:
+            raise SettingsValidationError(f"duplicate persisted setting {key!r}")
+        if key not in SETTING_SPECS:
+            raise SettingsValidationError(f"unknown persisted setting {key!r}")
+        by_key[key] = row
+        decoded = decode_stored_setting(key, row.value)
+        if key in PUBLIC_SETTING_KEYS:
+            effective[key] = decoded
+    return validate_effective_settings(effective), by_key
+
+
+def _locked_profile() -> tuple[
+    dict[str, SettingValue],
+    dict[str, DesktopSettingsModel],
+    DesktopSettingsModel,
+]:
+    revision = _lock_revision_row()
+    if revision is None:
+        raise SettingsValidationError("settings revision row is missing")
+    rows = DesktopSettingsModel.query.order_by(DesktopSettingsModel.key).all()
+    effective, by_key = _decode_rows(rows)
+    return effective, by_key, revision
+
+
+def initialize_settings() -> None:
+    """Seed, strictly validate, and canonically rewrite settings at startup."""
+    _ensure_revision_row()
+    try:
+        effective, by_key, revision = _locked_profile()
+        for key, value in effective.items():
+            canonical = serialize_setting(key, value)
+            row = by_key.get(key)
+            if row is None:
+                db.session.add(DesktopSettingsModel(key=key, value=canonical))
+            else:
+                row.value = canonical
+        # Canonicalize registered internal values without exposing them.
+        for key in INTERNAL_SETTING_KEYS:
+            row = by_key.get(key)
+            if row is not None:
+                row.value = serialize_setting(key, decode_stored_setting(key, row.value))
+        revision.value = serialize_setting(
+            "_settings_revision", decode_stored_setting("_settings_revision", revision.value)
+        )
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
 
 
 def set_setting(key: str, value: SettingValue) -> None:
-    row = DesktopSettingsModel.query.filter_by(key=key).first()
-    if row:
-        row.value = str(value)
-    else:
-        row = DesktopSettingsModel(key=key, value=str(value))
-        db.session.add(row)
-    db.session.commit()
+    """Persist an explicitly classified internal setting."""
+    if key != "image_cache":
+        raise SettingsValidationError(f"setting {key!r} is not writable through the internal settings path")
+    parsed = validate_setting_value(key, value)
+    _ensure_revision_row()
+    try:
+        _effective, by_key, revision = _locked_profile()
+        row = by_key.get(key)
+        if row is None:
+            db.session.add(DesktopSettingsModel(key=key, value=serialize_setting(key, parsed)))
+        else:
+            row.value = serialize_setting(key, parsed)
+        revision_number = int(str(decode_stored_setting("_settings_revision", revision.value)))
+        revision.value = str(1 if revision_number >= 2147483647 else revision_number + 1)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
 
 
 def user_flags(user: object | None) -> dict[str, bool]:
@@ -297,9 +359,35 @@ def user_flags(user: object | None) -> dict[str, bool]:
 
 
 def get_all_settings() -> dict[str, SettingValue]:
-    settings: dict[str, SettingValue] = dict(SETTING_DEFAULTS)
     rows = DesktopSettingsModel.query.all()
-    for row in rows:
-        default = SETTING_DEFAULTS.get(row.key)
-        settings[row.key] = _coerce(row.value, default)
-    return settings
+    effective, _by_key = _decode_rows(rows)
+    return effective
+
+
+def set_settings(updates: dict[str, SettingValue]) -> None:
+    """Validate and persist one public batch under the singleton revision lock."""
+    if not updates:
+        raise SettingsValidationError("settings update cannot be empty")
+    parsed: dict[str, SettingValue] = {}
+    for key, value in updates.items():
+        if key not in PUBLIC_SETTING_KEYS:
+            raise SettingsValidationError(f"unknown or internal setting {key!r}")
+        parsed[key] = validate_setting_value(key, value)
+
+    _ensure_revision_row()
+    try:
+        effective, by_key, revision = _locked_profile()
+        effective.update(parsed)
+        validate_effective_settings(effective)
+        for key, value in parsed.items():
+            row = by_key.get(key)
+            if row is None:
+                db.session.add(DesktopSettingsModel(key=key, value=serialize_setting(key, value)))
+            else:
+                row.value = serialize_setting(key, value)
+        revision_number = int(str(decode_stored_setting("_settings_revision", revision.value)))
+        revision.value = str(1 if revision_number >= 2147483647 else revision_number + 1)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise

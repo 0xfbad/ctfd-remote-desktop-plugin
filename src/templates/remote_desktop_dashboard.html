@@ -282,6 +282,35 @@
 		</div>
 	</div>
 
+	<div class="row" id="paused-orphans-section" style="display:none;">
+		<div class="col-md-12">
+			<div class="card border-warning">
+				<div class="card-header">
+					<h3 class="card-title">Paused Orphans <span class="cfg-help" data-tip="Paused plugin containers with no active or in-flight database reference. They remain frozen until an admin explicitly deletes the exact container.">?</span></h3>
+					<button class="btn btn-outline-secondary btn-sm" onclick="refreshPausedOrphans()">
+						<i class="fas fa-sync-alt"></i> Refresh
+					</button>
+				</div>
+				<div class="card-body">
+					<div class="table-responsive log-wrap">
+						<table class="table table-striped table-sm border">
+							<thead>
+								<tr>
+									<th><b>Owner</b></th>
+									<th><b>Container</b></th>
+									<th><b>Context</b></th>
+									<th><b>Held For</b></th>
+									<th><b>Action</b></th>
+								</tr>
+							</thead>
+							<tbody id="paused-orphans-table"></tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
 	<div class="row">
 		<div class="col-md-12">
 			<div class="card">
@@ -483,166 +512,6 @@
 		</div>
 	</div>
 
-	<div id="cmd-log-section" style="display:none;">
-		<hr>
-		<div class="row mb-3">
-			<div class="col-md-12">
-				<h2>Command Logs</h2>
-			</div>
-		</div>
-
-		<div class="row">
-			<div class="col-md-4">
-				<div class="card stat-card bg-light">
-					<div class="card-body">
-						<h4 id="stat-total-commands" class="mb-0">0</h4>
-						<small class="text-muted">Total Commands</small>
-					</div>
-				</div>
-			</div>
-			<div class="col-md-4">
-				<div class="card stat-card bg-light">
-					<div class="card-body">
-						<h4 id="stat-unique-tools" class="mb-0">0</h4>
-						<small class="text-muted">Unique Tools</small>
-					</div>
-				</div>
-			</div>
-			<div class="col-md-4">
-				<div class="card stat-card bg-light">
-					<div class="card-body">
-						<h4 id="stat-unique-commands" class="mb-0">0</h4>
-						<small class="text-muted">Unique Commands</small>
-					</div>
-				</div>
-			</div>
-		</div>
-
-		<div class="row">
-			<div class="col-md-12">
-				<div class="card">
-					<div class="card-header">
-						<h3 class="card-title">Command Feed <span class="badge badge-secondary" style="font-size: 11px; vertical-align: middle;">advisory &mdash; not evidence</span> <span class="cfg-help" data-tip="In-container shell hooks; a student with root can blank or forge these. Use for spot-checks only - the durable record is the tlog transcript on the runner.">?</span></h3>
-					</div>
-					<div class="card-body">
-						<div class="table-responsive log-wrap">
-							<table class="table table-striped table-sm border">
-								<thead>
-									<tr>
-										<th><b>Time</b></th>
-										<th><b>User</b></th>
-										<th><b>Command</b></th>
-										<th><b>Exit</b></th>
-									</tr>
-								</thead>
-								<tbody id="cmd-feed">
-									<tr id="cmd-feed-empty">
-										<td colspan="4" class="text-center text-muted">No commands yet</td>
-									</tr>
-								</tbody>
-							</table>
-						</div>
-					</div>
-				</div>
-			</div>
-		</div>
-
-		<div class="row">
-			<div class="col-md-12">
-				<div class="card">
-					<div class="card-header">
-						<h3 class="card-title">Per-User Commands <span class="cfg-help" data-tip="Command counts and activity by user. Click the total to see their full history.">?</span></h3>
-						<select id="period-cmd-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdPerUser()">
-							<option value="week">Past Week</option>
-							<option value="month">Past Month</option>
-							<option value="all">All Time</option>
-						</select>
-					</div>
-					<div class="card-body">
-						<div class="table-responsive log-wrap">
-							<table class="table table-striped table-sm border">
-								<thead>
-									<tr>
-										<th><b>User</b></th>
-										<th><b>Total</b></th>
-										<th><b>Avg/Session</b></th>
-										<th><b>Unique Tools</b></th>
-									</tr>
-								</thead>
-								<tbody id="cmd-users-table"></tbody>
-							</table>
-						</div>
-					</div>
-				</div>
-			</div>
-		</div>
-
-		<div class="row">
-			<div class="col-md-6">
-				<div class="card">
-					<div class="card-header">
-						<h3 class="card-title">Top Tools <span class="cfg-help" data-tip="Most-used command line tools across all sessions. See what software participants actually reach for and whether your image has the right tooling.">?</span></h3>
-						<select id="period-cmd-tools" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdTools()">
-							<option value="week">Past Week</option>
-							<option value="month">Past Month</option>
-							<option value="all">All Time</option>
-						</select>
-					</div>
-					<div class="card-body">
-						<div class="chart-container" id="chart-top-tools"></div>
-					</div>
-				</div>
-			</div>
-			<div class="col-md-6">
-				<div class="card">
-					<div class="card-header">
-						<h3 class="card-title">Command Activity <span class="cfg-help" data-tip="Command volume by hour and day of week. Spot peak shell-usage windows or correlate clusters with competition events.">?</span></h3>
-						<select id="period-cmd-heatmap" class="form-control form-control-sm" style="width: auto;" onchange="refreshCmdHeatmap()">
-							<option value="week">Past Week</option>
-							<option value="month">Past Month</option>
-							<option value="all">All Time</option>
-						</select>
-					</div>
-					<div class="card-body">
-						<div class="chart-container" id="chart-cmd-heatmap"></div>
-					</div>
-				</div>
-			</div>
-		</div>
-	</div>
-
-	<div class="modal fade" id="cmdHistoryModal" tabindex="-1">
-		<div class="modal-dialog modal-xl">
-			<div class="modal-content">
-				<div class="modal-header">
-					<h5 class="modal-title">Command History: <span id="cmd-history-username"></span></h5>
-					<button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
-				</div>
-				<div class="modal-body p-0">
-					<div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
-						<table class="table table-striped table-sm mb-0">
-							<thead style="position: sticky; top: 0; background: white;">
-								<tr>
-									<th>Time</th>
-									<th>Command</th>
-									<th>Exit</th>
-									<th>Duration</th>
-									<th>CWD</th>
-								</tr>
-							</thead>
-							<tbody id="cmd-history-table"></tbody>
-						</table>
-					</div>
-				</div>
-				<div class="modal-footer">
-					<span class="text-muted mr-auto" id="cmd-history-info"></span>
-					<button type="button" class="btn btn-outline-secondary" id="cmd-history-prev" onclick="cmdHistoryPage(-1)">Prev</button>
-					<button type="button" class="btn btn-outline-secondary" id="cmd-history-next" onclick="cmdHistoryPage(1)">Next</button>
-					<button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
-				</div>
-			</div>
-		</div>
-	</div>
 </div>
 
 {% endblock %}
@@ -652,14 +521,15 @@
 	integrity="sha384-F07Cpw5v8spSU0H113F33m2NQQ/o6GqPTnTjf45ssG4Q6q58ZwhxBiQtIaqvnSpR"
 	crossorigin="anonymous"></script>
 <script>
-	// values returned by the dashboard API (username, command, target, context names,
-	// content, host, tool, container_name, docker_context) are pre-escaped server-side
-	// via markupsafe, so they go straight into innerHTML without escapeHtml here
+	// Most dashboard API display values are pre-escaped server-side. Paused-orphan
+	// identity values intentionally remain raw so exact values can be posted back;
+	// escape those values at their innerHTML insertion points below.
 
 	let autoRefreshInterval = null;
 	let eventSource = null;
 	let maxEvents = 500;
 	let activeContainers = {};
+	let pausedOrphans = [];
 
 	function escapeHtml(text) {
 		const div = document.createElement('div');
@@ -696,66 +566,6 @@
 		'session_unpaused': 'Unpaused',
 		'capacity_refused': 'At Capacity',
 		'capacity_count_drift': 'Count Drift',
-		'network_pool_exhausted': 'Net Pool Full',
-		'network_slot_reclaimed': 'Net Slot Reclaimed',
-		'resource_mem_high': 'Memory High',
-		'resource_pids_high': 'PIDs High',
-		'resource_write_flood': 'Write Flood',
-		'session_oom_kill': 'OOM Kill',
-		'pids_limit_hit': 'PIDs Limit Hit',
-		'host_pressure': 'Host Pressure',
-		'rd_slice_unconfigured': 'Slice Unconfigured',
-		'tlog_socket_missing': 'Recorder Missing',
-	};
-
-	const EXIT_CODE_LABELS = {
-		0: 'success',
-		1: 'error',
-		2: 'builtin misuse',
-		64: 'usage error',
-		65: 'data error',
-		66: 'input not found',
-		67: 'user not found',
-		68: 'host not found',
-		69: 'unavailable',
-		70: 'internal error',
-		71: 'os error',
-		73: 'can\'t create output',
-		74: 'i/o error',
-		75: 'temp failure',
-		77: 'permission denied',
-		78: 'config error',
-		100: 'apt error',
-		102: 'apt broken packages',
-		126: 'not executable',
-		127: 'command not found',
-		128: 'invalid exit arg',
-		129: 'hangup',
-		130: 'ctrl-c',
-		131: 'quit (core dump)',
-		132: 'illegal instruction',
-		133: 'breakpoint trap',
-		134: 'aborted',
-		135: 'bus error',
-		136: 'floating point error',
-		137: 'killed (OOM?)',
-		138: 'user signal 1',
-		139: 'segfault',
-		140: 'user signal 2',
-		141: 'broken pipe',
-		142: 'alarm timeout',
-		143: 'terminated',
-		144: 'stack fault',
-		145: 'child exited',
-		146: 'continued',
-		147: 'stopped',
-		148: 'ctrl-z',
-		149: 'bg read from tty',
-		150: 'bg write to tty',
-		152: 'cpu time exceeded',
-		153: 'file size exceeded',
-		159: 'bad syscall',
-		255: 'exit out of range',
 	};
 
 	function userBadges(obj) {
@@ -778,13 +588,6 @@
 		return `<a href="/admin/users/${parseInt(uid)}">${name}</a>${userBadges(flags)}`;
 	}
 
-	function exitCodeTitle(code) {
-		if (code === null || code === undefined) return '';
-		if (EXIT_CODE_LABELS[code]) return EXIT_CODE_LABELS[code];
-		if (code > 128 && code < 165) return `signal ${code - 128}`;
-		return '';
-	}
-
 	const EVENT_BADGE_CLASS = {
 		'session_requested': 'badge-evt-requested',
 		'session_created': 'badge-evt-created',
@@ -801,16 +604,6 @@
 		'session_unpaused': 'badge-evt-created',
 		'capacity_refused': 'badge-evt-host-down',
 		'capacity_count_drift': 'badge-evt-orphan',
-		'network_pool_exhausted': 'badge-evt-host-down',
-		'network_slot_reclaimed': 'badge-evt-orphan',
-		'resource_mem_high': 'badge-evt-expired',
-		'resource_pids_high': 'badge-evt-expired',
-		'resource_write_flood': 'badge-evt-error',
-		'session_oom_kill': 'badge-evt-error',
-		'pids_limit_hit': 'badge-evt-expired',
-		'host_pressure': 'badge-evt-expired',
-		'rd_slice_unconfigured': 'badge-evt-host-down',
-		'tlog_socket_missing': 'badge-evt-expired',
 	};
 
 	function formatDuration(secs) {
@@ -840,7 +633,6 @@
 				if (m.reason) extra.push(m.reason);
 				if (m.duration) extra.push(formatDuration(m.duration));
 				if (m.extensions_used) extra.push(`${m.extensions_used} ext`);
-				if (m.commands !== null && m.commands !== undefined) extra.push(`${m.commands} cmds`);
 				return extra.length ? `${parts} (${extra.join(', ')})` : parts;
 			}
 			case 'session_expired':
@@ -862,7 +654,7 @@
 				if (m.action === 'kill') return `killed ${target}'s session`;
 				if (m.action === 'extend') return `extended ${target}'s session`;
 				if (m.action === 'peek') return `monitoring ${target}'s session`;
-				if (m.action === 'clear_history') return `cleared ${m.sessions || 0} sessions, ${m.commands || 0} command logs`;
+				if (m.action === 'clear_history') return `cleared ${m.sessions || 0} sessions`;
 				return '';
 			}
 			case 'host_unhealthy':
@@ -893,11 +685,6 @@
 			}
 			case 'capacity_count_drift':
 				return `${m.context_name}: counter ${m.counter} vs ${m.db_count} rows (${m.kind})`;
-			case 'network_slot_reclaimed': {
-				const parts = [m.context, m.network_name, m.container_name].filter(Boolean).join(' / ');
-				const age = formatDuration(m.age_seconds);
-				return age ? `${parts} (claimed ${age} ago)` : parts;
-			}
 			default:
 				return event.message || '';
 		}
@@ -976,8 +763,77 @@
 
 	function refreshAll() {
 		refreshContainers();
+		refreshPausedOrphans();
 		refreshSummaryStats();
 		refreshReports();
+	}
+
+	function refreshPausedOrphans() {
+		fetch('/remote-desktop/dashboard/api/paused-orphans', {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		})
+		.then(response => response.json())
+		.then(data => updatePausedOrphansTable(data.orphans || []))
+		.catch(error => console.error('Error fetching paused orphans:', error));
+	}
+
+	function updatePausedOrphansTable(orphans) {
+		pausedOrphans = orphans;
+		const section = document.getElementById('paused-orphans-section');
+		const tbody = document.getElementById('paused-orphans-table');
+		if (!orphans.length) {
+			section.style.display = 'none';
+			tbody.innerHTML = '';
+			return;
+		}
+		section.style.display = '';
+		tbody.innerHTML = orphans.map((orphan, index) => `
+			<tr>
+				<td class="log-user">${userLink(orphan, orphan.user_id)}</td>
+				<td class="cell-clip-sm"><code>${escapeHtml(String(orphan.container_name))}</code></td>
+				<td>${escapeHtml(String(orphan.context))}</td>
+				<td>${formatDuration(orphan.age_seconds)}</td>
+				<td>
+					<button class="btn btn-danger btn-sm" onclick="removePausedOrphan(${index})" title="Delete this exact held orphan">
+						<i class="fas fa-trash"></i> Delete
+					</button>
+				</td>
+			</tr>
+		`).join('');
+	}
+
+	function removePausedOrphan(index) {
+		const orphan = pausedOrphans[index];
+		if (!orphan) return;
+		if (!confirm(`Delete paused orphan ${orphan.container_name} on ${orphan.context}? This permanently removes the held container and cannot be undone.`)) return;
+		fetch('/remote-desktop/dashboard/api/paused-orphans/remove', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'X-Requested-With': 'XMLHttpRequest',
+				'CSRF-Token': window.init.csrfNonce
+			},
+			credentials: 'same-origin',
+			body: JSON.stringify({
+				confirm: 'DELETE',
+				context: orphan.context,
+				container_id: orphan.container_id,
+				container_name: orphan.container_name
+			})
+		})
+		.then(response => response.json().then(data => ({ok: response.ok, data})))
+		.then(result => {
+			if (result.ok && result.data.success) {
+				refreshAll();
+				if (result.data.warning) {
+					CTFd.ui.ezq.ezAlert({ title: 'Removed with warning', body: result.data.warning, button: 'OK' });
+				}
+			} else {
+				CTFd.ui.ezq.ezAlert({ title: 'Removal refused', body: result.data.error || 'Paused orphan removal failed', button: 'OK' });
+			}
+		})
+		.catch(error => console.error('Error removing paused orphan:', error));
 	}
 
 	let reportsById = {};
@@ -1272,7 +1128,8 @@
 		.then(response => response.json())
 		.then(data => {
 			if (data.success) {
-				CTFd.ui.ezq.ezAlert({ title: 'Success', body: `Killed ${data.killed} session(s)`, button: 'OK' });
+				const detail = `${data.completed} completed, ${data.cancelling} cancelling, ${data.stopping} stopping`;
+				CTFd.ui.ezq.ezAlert({ title: 'Fleet teardown requested', body: detail, button: 'OK' });
 				refreshAll();
 			} else {
 				CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Purge failed', button: 'OK' });
@@ -1286,12 +1143,10 @@
 	let durationDistChart = null;
 	let endReasonsChart = null;
 	let perHostChart = null;
-	let topToolsChart = null;
-	let cmdHeatmapChart = null;
 	let heatmapChart = null;
 
 	function initCharts() {
-		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools'].forEach(id => {
+		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host'].forEach(id => {
 			const el = document.getElementById(id);
 			if (!el) return;
 			const chart = echarts.init(el);
@@ -1299,7 +1154,6 @@
 			else if (id === 'chart-duration-dist') durationDistChart = chart;
 			else if (id === 'chart-end-reasons') endReasonsChart = chart;
 			else if (id === 'chart-per-host') perHostChart = chart;
-			else if (id === 'chart-top-tools') topToolsChart = chart;
 		});
 	}
 
@@ -1523,7 +1377,6 @@
 	}
 
 	function refreshStats() {
-		refreshCommandLogStats();
 		refreshSummaryStats();
 		refreshTopUsers();
 		refreshDurationDist();
@@ -1532,240 +1385,6 @@
 		refreshHeatmap();
 	}
 
-	function refreshCommandFeed() {
-		fetch('/remote-desktop/dashboard/api/command-logs?limit=50', {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			const feed = document.getElementById('cmd-feed');
-			const empty = document.getElementById('cmd-feed-empty');
-			const logs = data.logs || [];
-
-			if (!logs.length) return;
-			if (empty) empty.remove();
-
-			feed.innerHTML = logs.map(log => {
-				const exitBadge = log.exit_code === 0 ? 'badge-success' :
-								  log.exit_code !== null ? 'badge-danger' : 'badge-secondary';
-				const exitText = log.exit_code !== null ? log.exit_code : '-';
-				const exitTip = exitCodeTitle(log.exit_code);
-				return `<tr>
-					<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
-					<td class="log-user">${userLink(log, log.user_id)}</td>
-					<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
-					<td><span class="badge ${exitBadge}" ${exitTip ? `title="${exitTip}"` : ''}>${exitText}</span></td>
-				</tr>`;
-			}).join('');
-		});
-	}
-
-	let cmdHistoryUserId = null;
-	let cmdHistoryOffset = 0;
-	const cmdHistoryLimit = 100;
-
-	function refreshCmdSummary() {
-		fetch('/remote-desktop/dashboard/api/command-logs/stats/summary', {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			const section = document.getElementById('cmd-log-section');
-			if (!data.enabled && data.total_commands === 0) {
-				section.style.display = 'none';
-				return;
-			}
-			const wasHidden = section.style.display === 'none';
-			section.style.display = '';
-			document.getElementById('stat-total-commands').textContent = data.total_commands.toLocaleString();
-			document.getElementById('stat-unique-tools').textContent = data.unique_tools.toLocaleString();
-			document.getElementById('stat-unique-commands').textContent = data.unique_commands.toLocaleString();
-
-			if (wasHidden) {
-				setTimeout(function() {
-					if (topToolsChart) topToolsChart.resize();
-					if (cmdHeatmapChart) cmdHeatmapChart.resize();
-				}, 50);
-			}
-		});
-	}
-
-	function refreshCmdPerUser() {
-		const period = getPeriod('period-cmd-users');
-		fetch(`/remote-desktop/dashboard/api/command-logs/stats/per-user?period=${period}`, {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			const tbody = document.getElementById('cmd-users-table');
-			const users = data.users || [];
-			if (!users.length) {
-				tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No command data</td></tr>';
-				return;
-			}
-			tbody.innerHTML = users.map(u => `
-				<tr>
-					<td class="log-user">${userLink(u)}</td>
-					<td><a href="#" class="cmd-history-link" data-userid="${parseInt(u.user_id)}" data-username="${u.username}">${u.total_commands.toLocaleString()}</a></td>
-					<td>${u.avg_per_session}</td>
-					<td>${u.unique_tools}</td>
-				</tr>
-			`).join('');
-		});
-	}
-
-	function refreshCmdTools() {
-		const period = getPeriod('period-cmd-tools');
-		fetch(`/remote-desktop/dashboard/api/command-logs/stats/tools?period=${period}`, {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			if (!topToolsChart) return;
-			const tools = (data.tools || []).slice(0, 20).reverse();
-			topToolsChart.setOption({
-				tooltip: {
-					trigger: 'axis',
-					axisPointer: { type: 'shadow' },
-					formatter: function(params) {
-						const p = params[0];
-						const t = tools.find(t => t.tool === p.name) || {};
-						return p.name + '<br/>' +
-							p.value + ' uses' + (t.errors ? '<br/>' + t.errors + ' errors' : '');
-					}
-				},
-				toolbox: { feature: { saveAsImage: {} } },
-				grid: { left: 120, right: 20, top: 30, bottom: 40 },
-				xAxis: { type: 'value', name: 'Uses', nameLocation: 'middle', nameGap: 25 },
-				yAxis: { type: 'category', data: tools.map(t => t.tool) },
-				series: [{
-					type: 'bar',
-					data: tools.map(t => t.count),
-					itemStyle: { color: '#e83e8c' }
-				}]
-			});
-		});
-	}
-
-	function refreshCmdHeatmap() {
-		const period = getPeriod('period-cmd-heatmap');
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-		fetch(`/remote-desktop/dashboard/api/command-logs/stats/heatmap?period=${period}&tz=${encodeURIComponent(tz)}`, {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			const el = document.getElementById('chart-cmd-heatmap');
-			if (!el) return;
-			if (cmdHeatmapChart) cmdHeatmapChart.dispose();
-			cmdHeatmapChart = echarts.init(el);
-			const chart = cmdHeatmapChart;
-
-			if (!data.data || data.data.length === 0) {
-				chart.setOption({
-					title: { text: 'No data yet', left: 'center', top: 'center', textStyle: { color: '#999', fontSize: 14 } }
-				});
-				return;
-			}
-
-			const hours = Array.from({length: 24}, (_, h) => (h % 12 || 12) + (h < 12 ? ' AM' : ' PM'));
-			const dayLabels = data.days;
-			const maxVal = Math.max(...data.data.map(d => d[2]));
-			chart.setOption({
-				tooltip: {
-					position: 'top',
-					formatter: function(p) {
-						return '<b>' + dayLabels[p.data[0]] + ' ' + hours[p.data[1]] + '</b><br/>' +
-							p.data[2].toLocaleString() + ' commands';
-					}
-				},
-				grid: { left: 50, right: 30, top: 10, bottom: 40 },
-				xAxis: { type: 'category', data: dayLabels, splitArea: { show: true } },
-				yAxis: { type: 'category', data: hours, splitArea: { show: true }, inverse: true },
-				visualMap: {
-					min: 0,
-					max: maxVal || 1,
-					dimension: 2,
-					calculable: true,
-					orient: 'horizontal',
-					left: 'center',
-					bottom: 0,
-					itemWidth: 10,
-					itemHeight: 80,
-					inRange: { color: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'] }
-				},
-				series: [{
-					type: 'heatmap',
-					data: data.data,
-					label: { show: false },
-					emphasis: { itemStyle: { shadowBlur: 5, shadowColor: 'rgba(0, 0, 0, 0.3)' } }
-				}]
-			});
-		});
-	}
-
-	function refreshCommandLogStats() {
-		refreshCmdSummary();
-		refreshCommandFeed();
-		refreshCmdPerUser();
-		refreshCmdTools();
-		refreshCmdHeatmap();
-	}
-
-	function showCmdHistory(userId, username) {
-		cmdHistoryUserId = userId;
-		cmdHistoryOffset = 0;
-		const flags = _userFlags[userId] || {};
-		document.getElementById('cmd-history-username').innerHTML =
-			'<a href="/admin/users/' + parseInt(userId) + '">' + username + '</a>' + userBadges(flags);
-		loadCmdHistory();
-		$('#cmdHistoryModal').modal('show');
-	}
-
-	function loadCmdHistory() {
-		fetch(`/remote-desktop/dashboard/api/command-logs?user_id=${cmdHistoryUserId}&limit=${cmdHistoryLimit}&offset=${cmdHistoryOffset}`, {
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin'
-		})
-		.then(r => r.json())
-		.then(data => {
-			const tbody = document.getElementById('cmd-history-table');
-			const logs = data.logs || [];
-			const total = data.total || 0;
-
-			if (!logs.length) {
-				tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No commands</td></tr>';
-			} else {
-				tbody.innerHTML = logs.map(log => {
-					const exitClass = log.exit_code === 0 ? 'text-success' : (log.exit_code !== null ? 'text-danger' : '');
-					const exitTip = exitCodeTitle(log.exit_code);
-					const exitDisplay = log.exit_code !== null ? log.exit_code : '-';
-					return `<tr>
-						<td class="text-nowrap">${escapeHtml(formatTimestamp(log.timestamp))}</td>
-						<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
-						<td class="${exitClass}" ${exitTip ? `title="${exitTip}"` : ''}>${exitDisplay}${exitTip ? ` <small class="text-muted">(${exitTip})</small>` : ''}</td>
-						<td>${log.duration !== null ? log.duration + 's' : '-'}</td>
-						<td class="cell-clip-sm" title="${log.cwd || ''}"><small class="text-muted">${log.cwd || ''}</small></td>
-					</tr>`;
-				}).join('');
-			}
-
-			document.getElementById('cmd-history-info').textContent =
-				`Showing ${cmdHistoryOffset + 1}-${Math.min(cmdHistoryOffset + logs.length, total)} of ${total}`;
-			document.getElementById('cmd-history-prev').disabled = cmdHistoryOffset === 0;
-			document.getElementById('cmd-history-next').disabled = cmdHistoryOffset + cmdHistoryLimit >= total;
-		});
-	}
-
-	function cmdHistoryPage(dir) {
-		cmdHistoryOffset = Math.max(0, cmdHistoryOffset + dir * cmdHistoryLimit);
-		loadCmdHistory();
-	}
 
 	function startAutoRefresh() {
 		if (autoRefreshInterval) clearInterval(autoRefreshInterval);
@@ -1773,7 +1392,7 @@
 	}
 
 	window.addEventListener('resize', function() {
-		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, topToolsChart, cmdHeatmapChart, heatmapChart].forEach(c => {
+		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, heatmapChart].forEach(c => {
 			if (c) c.resize();
 		});
 	});
@@ -1793,13 +1412,6 @@
 			initCharts();
 			refreshStats();
 			startAutoRefresh();
-		});
-
-		document.getElementById('cmd-users-table').addEventListener('click', function(e) {
-			const link = e.target.closest('.cmd-history-link');
-			if (!link) return;
-			e.preventDefault();
-			showCmdHistory(parseInt(link.dataset.userid), link.dataset.username);
 		});
 
 		document.getElementById('reports-tbody').addEventListener('click', function(e) {

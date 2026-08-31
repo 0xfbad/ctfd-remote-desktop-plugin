@@ -18,24 +18,6 @@
         </div>
     </div>
     <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
-        <div class="custom-control custom-switch">
-            <input type="checkbox" class="custom-control-input" id="rd-setting-telemetry_enabled">
-            <label class="custom-control-label" for="rd-setting-telemetry_enabled">
-                <strong>Telemetry</strong>
-                <br><small class="text-muted">Master switch for all session data collection: shell command logs, per-session resource usage (CPU/memory/pids/disk), host cgroup pressure and OOM events, and full terminal session recording. Powers usage analytics, the activity feed, and the AI tutor's context. Host telemetry and recording each self-activate only where their runner-side dependency is provisioned (provisioning/compute, and a configured tlog collector socket); everything else runs anywhere.</small>
-            </label>
-        </div>
-    </div>
-    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
-        <div class="custom-control custom-switch">
-            <input type="checkbox" class="custom-control-input" id="rd-setting-consent_notice_enabled">
-            <label class="custom-control-label" for="rd-setting-consent_notice_enabled">
-                <strong>Consent Notice</strong>
-                <br><small class="text-muted">Show the logging/monitoring consent notice on the session start screen. Students acknowledge it by starting a session.</small>
-            </label>
-        </div>
-    </div>
-    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
         <label class="mb-1"><strong>Connection Types</strong></label>
         <small class="text-muted d-block mb-2">Which shells a session exposes, on top of the always-on VNC desktop. Applies to new sessions only; active sessions keep what they were created with. When off, the service is not started in the container and its port is never published.</small>
         <div class="row">
@@ -53,15 +35,6 @@
             </div>
         </div>
     </div>
-    <div class="form-group mb-4 pb-3" style="border-bottom: 1px solid #dee2e6;">
-        <div class="custom-control custom-switch">
-            <input type="checkbox" class="custom-control-input" id="rd-setting-network_isolation">
-            <label class="custom-control-label" for="rd-setting-network_isolation">
-                <strong>Per-Session Network Isolation</strong>
-                <br><small class="text-muted">Give each session its own private docker network (rd-net-NN pool, created by provisioning/network/net-pool.sh on every host). When on, creation fails closed if the pool is missing or exhausted - no shared-network fallback. Leave off for single-host dev.</small>
-            </label>
-        </div>
-    </div>
     <div class="row">
         <div class="col-md-6">
             <h5>Container</h5>
@@ -70,12 +43,16 @@
                 <input type="text" class="form-control" id="rd-setting-docker_image">
             </div>
             <div class="form-group">
+                <label>Docker Network <span class="cfg-help" data-tip="The single Docker network joined by every new session. The default bridge network requires no additional setup.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-rd_network_name" placeholder="bridge">
+            </div>
+            <div class="form-group">
                 <label>Memory Limit <span class="cfg-help" data-tip="Maximum RAM each desktop can use (e.g. 512m, 1g). Increase if users run memory-heavy applications, decrease to fit more desktops on one server.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-memory_limit">
             </div>
             <div class="form-group">
                 <label>CPU Limit <span class="cfg-help" data-tip="Maximum CPU cores each desktop can use (e.g. 1.0 = one core, 0.5 = half a core). Lower values let you run more desktops per server, higher values give users a snappier experience.">?</span></label>
-                <input type="text" class="form-control" id="rd-setting-cpu_limit">
+                <input type="number" class="form-control no-spin" id="rd-setting-cpu_limit" min="0.1" max="64" step="0.1" required>
             </div>
             <div class="form-group">
                 <label>SHM Size <span class="cfg-help" data-tip="Shared memory available to the desktop (e.g. 256m). Browsers and GUI apps use this for rendering. If users see crashes or blank screens, try increasing it.">?</span></label>
@@ -84,6 +61,29 @@
             <div class="form-group">
                 <label>Resolution <span class="cfg-help" data-tip="Screen resolution of the remote desktop (e.g. 1280x720). Higher values give more screen space but use more bandwidth and memory.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-resolution">
+            </div>
+            <div class="form-group">
+                <label>Memory Reservation <span class="cfg-help" data-tip="Soft memory reservation used by Docker when the host is contended.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-memory_reservation" placeholder="1g">
+            </div>
+            <div class="form-group">
+                <label>Swap Cushion <span class="cfg-help" data-tip="Swap above the RAM limit: 0 disables, -1 is unlimited, or use a size such as 1g.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-swap_limit" placeholder="1g">
+            </div>
+            <div class="form-group">
+                <label>Docker Log Max Size / Files <span class="cfg-help" data-tip="Rotates each session container's Docker json-file logs.">?</span></label>
+                <div class="input-group">
+                    <input type="text" class="form-control" id="rd-setting-log_max_size" placeholder="50m">
+                    <input type="number" class="form-control no-spin" id="rd-setting-log_max_file" min="1" max="100" required>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Writable-Layer Limit <span class="cfg-help" data-tip="Optional Docker storage_opt size such as 20g. Leave empty unless every target Docker daemon supports writable-layer quotas.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-storage_limit" placeholder="empty">
+            </div>
+            <div class="form-group">
+                <label>Parent Cgroup <span class="cfg-help" data-tip="Optional Docker cgroup_parent value. Leave empty to use the daemon default; systemd cgroups require a .slice name.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-cgroup_parent" placeholder="empty">
             </div>
         </div>
         <div class="col-md-6">
@@ -108,7 +108,17 @@
             </div>
             <div class="form-group">
                 <label>Max Extensions <span class="cfg-help" data-tip="How many times a user can extend their session. Set to 0 for no extensions (hard time limit). Higher values let users keep their desktop alive longer.">?</span></label>
-                <input type="number" class="form-control no-spin" id="rd-setting-max_extensions" min="0">
+                <input type="number" class="form-control no-spin" id="rd-setting-max_extensions" min="0" max="100" required>
+            </div>
+            <h5 class="mt-4">Scheduler Intervals</h5>
+            <small class="text-muted d-block mb-2">Changes below are stored immediately but require an application restart before scheduler jobs use the new interval.</small>
+            <div class="form-group">
+                <label>Cleanup Interval (seconds) <small class="text-warning">Restart required</small></label>
+                <input type="number" class="form-control no-spin" id="rd-setting-cleanup_interval" min="5" max="86400" required>
+            </div>
+            <div class="form-group">
+                <label>Pause Watch Interval (seconds) <small class="text-warning">Restart required</small></label>
+                <input type="number" class="form-control no-spin" id="rd-setting-pause_watch_interval" min="5" max="86400" required>
             </div>
         </div>
     </div>
@@ -306,12 +316,21 @@
 <script>
 (function() {
     var rdSettingKeys = [
-        'remote_desktop_enabled', 'require_verified', 'telemetry_enabled',
-        'consent_notice_enabled', 'ssh_enabled', 'web_terminal_enabled',
-        'network_isolation',
-        'docker_image', 'memory_limit', 'cpu_limit', 'shm_size', 'resolution',
-        'max_extensions'
+        'remote_desktop_enabled', 'require_verified',
+        'ssh_enabled', 'web_terminal_enabled',
+        'docker_image', 'rd_network_name', 'memory_limit', 'cpu_limit', 'shm_size', 'resolution',
+        'memory_reservation', 'swap_limit', 'log_max_size', 'log_max_file',
+        'storage_limit', 'cgroup_parent',
+        'max_extensions', 'cleanup_interval',
+        'pause_watch_interval'
     ];
+
+    var rdIntegerSettingKeys = [
+        'log_max_file', 'max_extensions',
+        'cleanup_interval', 'pause_watch_interval'
+    ];
+
+    var rdFloatSettingKeys = ['cpu_limit'];
 
     var durationFields = [
         { key: 'initial_duration', h: 'rd-duration-initial-h', m: 'rd-duration-initial-m' },
@@ -319,12 +338,12 @@
     ];
 
     function secsToHM(secs) {
-        secs = parseInt(secs) || 0;
+        secs = Number.parseInt(secs, 10) || 0;
         return { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60) };
     }
 
     function hmToSecs(h, m) {
-        return (parseInt(h) || 0) * 3600 + (parseInt(m) || 0) * 60;
+        return (Number.parseInt(h, 10) || 0) * 3600 + (Number.parseInt(m, 10) || 0) * 60;
     }
 
     function loadRdSettings() {
@@ -362,7 +381,15 @@
         rdSettingKeys.forEach(function(key) {
             var el = document.getElementById('rd-setting-' + key);
             if (el) {
-                payload[key] = el.type === 'checkbox' ? el.checked : el.value;
+                if (el.type === 'checkbox') {
+                    payload[key] = el.checked;
+                } else if (rdIntegerSettingKeys.indexOf(key) !== -1) {
+                    payload[key] = Number.parseInt(el.value, 10);
+                } else if (rdFloatSettingKeys.indexOf(key) !== -1) {
+                    payload[key] = Number.parseFloat(el.value);
+                } else {
+                    payload[key] = el.value;
+                }
             }
         });
         durationFields.forEach(function(df) {
@@ -385,7 +412,11 @@
         .then(function(r) { return r.json(); })
         .then(function(data) {
             if (data.success) {
-                CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Settings saved', button: 'OK' });
+                var body = 'Settings saved';
+                if (data.restart_required && data.restart_required.length) {
+                    body += '. Restart the application to apply scheduler interval changes: ' + data.restart_required.join(', ');
+                }
+                CTFd.ui.ezq.ezAlert({ title: 'Success', body: body, button: 'OK' });
             } else {
                 CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Save failed', button: 'OK' });
             }
@@ -693,7 +724,7 @@
         })
         .then(function(r) { return r.json(); })
         .then(function(data) {
-            if (data.success) CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Cleared ' + data.sessions + ' sessions, ' + data.commands + ' command logs', button: 'OK' });
+            if (data.success) CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Cleared ' + data.sessions + ' sessions', button: 'OK' });
             else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Failed', button: 'OK' });
         });
     });

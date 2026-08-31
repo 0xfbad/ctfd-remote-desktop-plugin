@@ -4,9 +4,9 @@ import time
 import datetime
 import logging
 import json
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import NotRequired, TypedDict
+from typing import TypedDict
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
@@ -15,17 +15,16 @@ from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.utils.user import get_current_user, is_admin, is_verified, get_ip
 from .container_manager import ContainerManager, ContainerInfoDict, TimerDict, TimerStatusDict
 from .orchestrator import Orchestrator
-from .event_logger import event_logger, EventDict
+from .event_logger import event_logger, get_persisted_events, EventDict
 from .models import (
     user_flags,
     username_or_fallback,
     SETTING_DEFAULTS,
-    VNC_VIEWER_QUERY,
     END_REASON_RECONCILIATION,
     END_REASON_ADMIN_KILLED,
     _esc,
 )
-from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint, parse_size
+from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
 from .exceptions import HostsUnavailableException
 from .utils import ratelimit_per_user
 
@@ -34,14 +33,6 @@ logger = logging.getLogger(__name__)
 
 UserInfoDict = dict[str, str | bool]
 SessionDict = dict[str, float | str | TimerDict | None]
-
-
-class StatsAccum(TypedDict):
-    total: int
-    sessions: set[str]
-    commands: set[str]
-    username: str
-    user_info: NotRequired[UserInfoDict]
 
 
 class TopUserAccum(TypedDict):
@@ -93,11 +84,6 @@ def _log_admin_target_action(
     )
 
 
-def _direct_vnc_url(host: str, novnc_port: int, password: str) -> str:
-    # password in fragment so it never appears in server logs or referer headers
-    return f"http://{host}:{novnc_port}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
-
-
 _INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "no healthy contexts", "at capacity")
 
 
@@ -138,6 +124,12 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         static_url_path="/remote-desktop/static",
     )
 
+    def _reload_contexts_everywhere() -> None:
+        from . import event_bus
+
+        orchestrator.load_from_db()
+        event_bus.publish({"_control": "reload_contexts"})
+
     # builds the frontend TimerDict shape; keep in sync with
     # container_manager._timer_from_row which builds the same shape
     def _timer_dict(timer_status: TimerStatusDict) -> TimerDict | None:
@@ -163,16 +155,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         elif period == "month":
             query = query.filter(column >= time.time() - 30 * 86400)
         return query
-
-    def _extract_tool(cmd: str) -> str:
-        """pull the primary tool name from a command string, skipping sudo"""
-        parts = cmd.strip().split()
-        if not parts:
-            return ""
-        tool = parts[0]
-        if tool == "sudo" and len(parts) > 1:
-            tool = parts[1]
-        return tool
 
     @remote_desktop_bp.route("/remote-desktop")
     @authed_only
@@ -207,19 +189,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 "created_at": container_info["created_at"],
             }
 
-            # no reverse proxy means nginx proxy paths won't work, use direct URLs
-            behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
-            if not behind_proxy:
-                host = request.host.split(":")[0]
-                # novnc_port and vnc_password are NOT NULL columns, always present here
-                novnc_port = container_info["novnc_port"]
-                assert novnc_port is not None
-                vnc_url = _direct_vnc_url(host, int(novnc_port), str(container_info["vnc_password"]))
-                if container_info.get("ttyd_port"):
-                    terminal_url = f"http://{host}:{container_info['ttyd_port']}/"
-            else:
-                if container_info.get("ttyd_port"):
-                    terminal_url = f"/remote-desktop/terminal/{user.id}/"
+            if container_info.get("ttyd_port"):
+                terminal_url = f"/remote-desktop/terminal/{user.id}/"
 
             # ssh is a direct connection to the container host, not proxied through CTFd
             if container_info.get("ssh_port"):
@@ -238,7 +209,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             creation_status=creation_status,
             ssh_info=ssh_info,
             max_extensions=get_setting("max_extensions"),
-            consent_notice=get_setting("consent_notice_enabled"),
             ssh_enabled=get_setting("ssh_enabled"),
             web_terminal_enabled=get_setting("web_terminal_enabled"),
         )
@@ -259,14 +229,20 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @authed_only
     @ratelimit_per_user(method="POST", limit=5, interval=300)
     def create_session():
-        from .models import get_setting
+        from .models import SettingsValidationError, get_all_settings
 
-        if not get_setting("remote_desktop_enabled", True):
+        try:
+            effective_settings = get_all_settings()
+        except SettingsValidationError as exc:
+            logger.error("session admission refused because stored settings are invalid: %s", exc)
+            return jsonify({"error": "Remote Desktop settings are invalid; contact an administrator"}), 503
+
+        if not effective_settings["remote_desktop_enabled"]:
             return jsonify({"error": "Remote Desktop is currently disabled"}), 403
 
         user = get_current_user()
 
-        if get_setting("require_verified") and not is_admin() and not is_verified():
+        if effective_settings["require_verified"] and not is_admin() and not is_verified():
             return jsonify({"error": "Email verification required"}), 403
 
         logger.info(f"create session request from user {user.name} (ID: {user.id})")
@@ -451,14 +427,45 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_get_containers():
         containers = container_manager.get_all_containers()
-        behind_proxy = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
-        if not behind_proxy:
-            host = request.host.split(":")[0]
-            for c in containers:
-                novnc_port = c.get("novnc_port")
-                if isinstance(novnc_port, int):
-                    c["vnc_url"] = _direct_vnc_url(host, novnc_port, str(c.get("vnc_password", "")))
         return jsonify({"containers": containers})
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans", methods=["GET"])
+    @admins_only
+    def admin_get_paused_orphans():
+        # Keep exact Docker identity values raw in JSON. The dashboard escapes
+        # them only while rendering so a later removal request is byte-for-byte
+        # identical even when a context contains characters such as ``&``.
+        return jsonify({"orphans": container_manager.list_paused_orphans()})
+
+    @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans/remove", methods=["POST"])
+    @admins_only
+    def admin_remove_paused_orphan():
+        rejection = _require_confirm()
+        if rejection is not None:
+            return rejection
+        payload = request.get_json(silent=True) or {}
+        context_name = payload.get("context")
+        container_id = payload.get("container_id")
+        container_name = payload.get("container_name")
+        if not all(
+            isinstance(value, str) and 0 < len(value) <= 512 for value in (context_name, container_id, container_name)
+        ):
+            return jsonify({"error": "context, container_id, and container_name must be non-empty strings"}), 400
+        assert isinstance(context_name, str)
+        assert isinstance(container_id, str)
+        assert isinstance(container_name, str)
+
+        result = container_manager.remove_paused_orphan_admin(
+            get_current_user(),
+            context_name,
+            container_id,
+            container_name,
+        )
+        if result.get("success"):
+            return jsonify(result)
+        error = str(result.get("error", "Failed to remove paused orphan"))
+        status = 503 if "unavailable" in error.lower() else 409
+        return jsonify({"error": error}), status
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/hosts", methods=["GET"])
     @admins_only
@@ -625,8 +632,19 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_kill_all():
         admin_user = get_current_user()
-        killed = container_manager.destroy_all_containers_admin(admin_user)
-        return jsonify({"success": True, "killed": killed})
+        summary = container_manager.destroy_all_containers_admin(admin_user)
+        payload: dict[str, object] = {
+            "success": summary["failed"] == 0,
+            "killed": summary["completed"],
+            **summary,
+        }
+        if summary["failed"]:
+            payload["error"] = (
+                f"Fleet teardown partially failed: {summary['completed']} completed, "
+                f"{summary['cancelling']} cancelling, {summary['stopping']} stopping, "
+                f"{summary['failed']} failed"
+            )
+        return jsonify(payload)
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/clear_history", methods=["POST"])
     @admins_only
@@ -635,24 +653,22 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if rejection is not None:
             return rejection
 
-        from .models import DesktopSessionHistoryModel, CommandLogModel
+        from .models import DesktopSessionHistoryModel
 
         session_count = DesktopSessionHistoryModel.query.count()
-        cmd_count = CommandLogModel.query.count()
         DesktopSessionHistoryModel.query.delete()
-        CommandLogModel.query.delete()
         db.session.commit()
 
         admin_user = get_current_user()
         event_logger.log_event(
             "admin_action",
-            f"cleared {session_count} sessions, {cmd_count} command logs",
+            f"cleared {session_count} sessions",
             user_id=admin_user.id if admin_user else None,
             username=admin_user.name if admin_user else None,
             level="warning",
-            metadata={"action": "clear_history", "sessions": session_count, "commands": cmd_count},
+            metadata={"action": "clear_history", "sessions": session_count},
         )
-        return jsonify({"success": True, "sessions": session_count, "commands": cmd_count})
+        return jsonify({"success": True, "sessions": session_count})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/reports", methods=["GET"])
     @admins_only
@@ -850,7 +866,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     def _proxy_auth(
         user_id_header: str, port_attr: str, host_header: str, port_header: str
     ) -> Response | tuple[str, int]:
-        from .models import DesktopContainerInfoModel
+        from .models import DesktopContainerInfoModel, LIFECYCLE_ACTIVE
 
         raw_user_id = request.headers.get(user_id_header)
         if not raw_user_id:
@@ -868,7 +884,10 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         # liveness reap happens via /api/status calling get_container_info
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         port = getattr(row, port_attr, None) if row else None
-        if not row or port is None:
+        lifecycle_state = getattr(row, "lifecycle_state", LIFECYCLE_ACTIVE) if row else None
+        if row and not isinstance(lifecycle_state, str):
+            lifecycle_state = LIFECYCLE_ACTIVE
+        if not row or lifecycle_state != LIFECYCLE_ACTIVE or port is None:
             return "", 404
 
         check_hostname = container_manager.host_manager.get_check_hostname(row.docker_context)
@@ -1006,46 +1025,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             }
         )
 
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs", methods=["GET"])
-    @admins_only
-    def admin_get_command_logs():
-        from .models import CommandLogModel
-
-        user_id = request.args.get("user_id", type=int)
-        limit = min(request.args.get("limit", 200, type=int), 1000)
-        offset = request.args.get("offset", 0, type=int)
-
-        query = CommandLogModel.query
-        if user_id:
-            query = query.filter_by(user_id=user_id)
-
-        total = query.count()
-        logs = query.order_by(CommandLogModel.timestamp.desc()).offset(offset).limit(limit).all()
-
-        user_ids = {log.user_id for log in logs}
-        users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
-        user_map = {uid: _user_info(users_by_id.get(uid), uid) for uid in user_ids}
-
-        return jsonify(
-            {
-                "logs": [
-                    {
-                        "id": log.id,
-                        "user_id": log.user_id,
-                        **user_map.get(log.user_id, {"username": f"User {log.user_id}"}),
-                        "timestamp": log.timestamp,
-                        "command": _esc(log.command),
-                        "exit_code": log.exit_code,
-                        "duration": log.duration,
-                        "cwd": _esc(log.cwd),
-                        "tty": log.tty,
-                    }
-                    for log in logs
-                ],
-                "total": total,
-            }
-        )
-
     def _session_query(period: str | None = None, limit: int = 10000) -> db.Query:
         from .models import DesktopSessionHistoryModel
 
@@ -1053,129 +1032,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             Users.hidden.is_(False)
         )
         return _apply_period_filter(query, DesktopSessionHistoryModel.started_at, period).limit(limit)
-
-    def _cmd_log_query(period: str | None = None, limit: int = 10000) -> db.Query:
-        from .models import CommandLogModel
-
-        query = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden.is_(False))
-        return _apply_period_filter(query, CommandLogModel.timestamp, period).limit(limit)
-
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/per-user", methods=["GET"])
-    @admins_only
-    def admin_command_stats_per_user():
-        period = request.args.get("period", "all")
-        rows = _cmd_log_query(period).all()
-
-        user_stats: defaultdict[int, StatsAccum] = defaultdict(
-            lambda: {"total": 0, "sessions": set(), "commands": set(), "username": ""}
-        )
-
-        user_ids = {row.user_id for row in rows}
-        users_by_id = {u.id: u for u in Users.query.filter(Users.id.in_(user_ids)).all()}
-        user_map = {uid: _user_info(users_by_id.get(uid), uid) for uid in user_ids}
-
-        for row in rows:
-            entry = user_stats[row.user_id]
-            entry["total"] += 1
-            entry["user_info"] = user_map[row.user_id]
-            entry["sessions"].add(row.container_id)
-
-            entry["commands"].add(_extract_tool(row.command))
-
-        users = []
-        for uid, s in sorted(user_stats.items(), key=lambda x: x[1]["total"], reverse=True):
-            users.append(
-                {
-                    "user_id": uid,
-                    **s["user_info"],
-                    "total_commands": s["total"],
-                    "avg_per_session": round(s["total"] / len(s["sessions"]), 1) if s["sessions"] else 0,
-                    "unique_tools": len(s["commands"]),
-                }
-            )
-
-        return jsonify({"users": users})
-
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/tools", methods=["GET"])
-    @admins_only
-    def admin_command_stats_tools():
-        period = request.args.get("period", "all")
-        rows = _cmd_log_query(period).all()
-
-        tool_counts: defaultdict[str, int] = defaultdict(int)
-        tool_errors: defaultdict[str, int] = defaultdict(int)
-        for row in rows:
-            tool = _extract_tool(row.command)
-            if not tool:
-                continue
-            tool_counts[tool] += 1
-            if row.exit_code and row.exit_code != 0:
-                tool_errors[tool] += 1
-
-        top_tools = sorted(tool_counts.items(), key=lambda kv: kv[1], reverse=True)[:30]
-        tools = [{"tool": _esc(t), "count": c, "errors": tool_errors.get(t, 0)} for t, c in top_tools]
-
-        return jsonify({"tools": tools})
-
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/heatmap", methods=["GET"])
-    @admins_only
-    def admin_command_stats_heatmap():
-        period = request.args.get("period", "all")
-        rows = _cmd_log_query(period).all()
-        tz = _request_tz()
-
-        counts = [[0] * 7 for _ in range(24)]
-
-        for r in rows:
-            dt = datetime.datetime.fromtimestamp(r.timestamp, tz=tz)
-            day_idx = dt.weekday()
-            counts[dt.hour][day_idx] += 1
-
-        data = []
-        for hour in range(24):
-            for day in range(7):
-                if counts[hour][day] > 0:
-                    data.append([day, hour, counts[hour][day]])
-
-        return jsonify({"data": data, "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]})
-
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/command-logs/stats/summary", methods=["GET"])
-    @admins_only
-    def admin_command_stats_summary():
-        from .models import CommandLogModel, get_setting
-
-        enabled = get_setting("telemetry_enabled")
-        base = CommandLogModel.query.join(Users, CommandLogModel.user_id == Users.id).filter(Users.hidden.is_(False))
-        total = base.count()
-
-        unique_commands = 0
-        unique_tools = 0
-        if total:
-            unique_commands = (
-                db.session.query(CommandLogModel.command)
-                .join(Users, CommandLogModel.user_id == Users.id)
-                .filter(Users.hidden.is_(False))
-                .distinct()
-                .count()
-            )
-
-            rows = (
-                db.session.query(CommandLogModel.command)
-                .join(Users, CommandLogModel.user_id == Users.id)
-                .filter(Users.hidden.is_(False))
-                .distinct()
-                .all()
-            )
-            unique_tools = len({_extract_tool(cmd) for (cmd,) in rows} - {""})
-
-        return jsonify(
-            {
-                "enabled": enabled,
-                "total_commands": total,
-                "unique_tools": unique_tools,
-                "unique_commands": unique_commands,
-            }
-        )
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts", methods=["GET"])
     @admins_only
@@ -1284,7 +1140,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             max_containers = None
         else:
             try:
-                max_containers = int(max_containers)
+                max_containers = int(str(max_containers))
                 if max_containers < 0:
                     raise ValueError
             except (ValueError, TypeError):
@@ -1301,7 +1157,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         db.session.add(new_context)
         db.session.commit()
 
-        orchestrator.load_from_db()
+        _reload_contexts_everywhere()
 
         return jsonify({"success": True, "id": new_context.id})
 
@@ -1351,7 +1207,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             context.enabled = bool(request.json["enabled"])
 
         db.session.commit()
-        orchestrator.load_from_db()
+        _reload_contexts_everywhere()
 
         return jsonify({"success": True})
 
@@ -1366,7 +1222,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         db.session.delete(context)
         db.session.commit()
-        orchestrator.load_from_db()
+        _reload_contexts_everywhere()
 
         return jsonify({"success": True})
 
@@ -1393,68 +1249,52 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/reload", methods=["POST"])
     @admins_only
     def admin_reload_contexts():
-        orchestrator.load_from_db()
+        _reload_contexts_everywhere()
         return jsonify({"success": True})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["GET"])
     @admins_only
     def admin_get_settings():
-        from .models import get_all_settings
+        from .models import SettingsValidationError, get_all_settings
+        from .settings import RESTART_REQUIRED_SETTINGS
 
-        settings = get_all_settings()
-        return jsonify({"settings": settings})
-
-    def _validate_setting(key: str, value) -> str | None:
-        """returns an error message or None. only settings whose bad values can
-        brick every subsequent create get validators"""
         try:
-            if key == "storage_limit":
-                v = str(value or "").strip()
-                # 1 GiB floor guards a "20m" typo bricking every session
-                if v and parse_size(v) < 1024**3:
-                    return "storage_limit must be empty or at least 1g"
-            elif key == "log_max_size":
-                v = str(value or "").strip()
-                if v:
-                    parse_size(v)
-            elif key == "log_max_file":
-                if int(value) < 1:
-                    return "log_max_file must be at least 1"
-            elif key == "cgroup_parent":
-                v = str(value or "").strip()
-                if v and not v.endswith(".slice"):
-                    return "cgroup_parent must end in .slice (or be empty to disable)"
-            elif key in ("memory_reservation",):
-                v = str(value or "").strip()
-                if v and v != "0":
-                    parse_size(v)
-            elif key == "swap_limit":
-                v = str(value or "").strip()
-                if v and v not in ("0", "-1"):
-                    parse_size(v)
-        except (ValueError, TypeError):
-            return f"invalid value for {key}: {value!r}"
-        return None
+            settings = get_all_settings()
+        except SettingsValidationError as exc:
+            return jsonify({"error": f"stored settings are invalid: {exc}"}), 500
+        return jsonify(
+            {
+                "settings": settings,
+                "restart_required_settings": sorted(RESTART_REQUIRED_SETTINGS),
+            }
+        )
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/settings", methods=["PUT"])
     @admins_only
     def admin_update_settings():
-        from .models import set_setting, SETTING_DEFAULTS
+        from .models import SettingsValidationError, get_all_settings, set_settings
+        from .settings import RESTART_REQUIRED_SETTINGS, parse_api_updates, validate_effective_settings
 
-        if not isinstance(request.json, dict):
-            return jsonify({"error": "invalid request"}), 400
+        try:
+            updates = parse_api_updates(request.json)
+            # Friendly preflight; set_settings repeats this under the singleton
+            # revision row lock so concurrent disjoint writes cannot bypass it.
+            effective = get_all_settings()
+            effective.update(updates)
+            validate_effective_settings(effective)
+            set_settings(updates)
+        except SettingsValidationError as exc:
+            return jsonify({"error": str(exc)}), 400
 
-        # validate every submitted key BEFORE applying any: set_setting commits
-        # per key, so a mid-loop 400 would partially apply the batch
-        updates = {k: v for k, v in request.json.items() if k in SETTING_DEFAULTS}
-        for key, value in updates.items():
-            error = _validate_setting(key, value)
-            if error:
-                return jsonify({"error": error}), 400
-
-        for key, value in updates.items():
-            set_setting(key, value)
-        return jsonify({"success": True})
+        # Image, resource, network, and connection settings affect host
+        # eligibility or new-container kwargs. Reload this
+        # worker immediately and notify the other workers over the shared bus.
+        _reload_contexts_everywhere()
+        restart_required = sorted(RESTART_REQUIRED_SETTINGS.intersection(updates))
+        response: dict[str, object] = {"success": True}
+        if restart_required:
+            response["restart_required"] = restart_required
+        return jsonify(response)
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/events/stream")
     @admins_only
@@ -1473,13 +1313,29 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             event_logger.add_listener(event_listener)
 
             try:
-                recent_events = event_logger.get_recent_events(limit=200)
+                try:
+                    recent_events = get_persisted_events(limit=200)
+                except Exception:
+                    logger.warning(
+                        "persisted event bootstrap unavailable; using this worker's live cache", exc_info=True
+                    )
+                    recent_events = event_logger.get_recent_events(limit=200)
+                seen_order = deque(str(event.get("id")) for event in recent_events if event.get("id"))
+                seen_ids = set(seen_order)
                 for event in recent_events:
                     yield f"data: {json.dumps(event)}\n\n"
 
                 while True:
                     try:
                         event = event_queue.get(timeout=30)
+                        event_id = str(event.get("id")) if event.get("id") else ""
+                        if event_id and event_id in seen_ids:
+                            continue
+                        if event_id:
+                            seen_ids.add(event_id)
+                            seen_order.append(event_id)
+                            while len(seen_order) > 1000:
+                                seen_ids.discard(seen_order.popleft())
                         yield f"data: {json.dumps(event)}\n\n"
                     except queue.Empty:
                         yield ": keepalive\n\n"
@@ -1501,7 +1357,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_get_recent_events():
         limit = min(request.args.get("limit", 100, type=int), 2000)
-        events = event_logger.get_recent_events(limit=limit)
+        try:
+            events = get_persisted_events(limit=limit)
+        except Exception:
+            logger.exception("failed to read persisted event log")
+            return jsonify({"error": "persistent event log unavailable"}), 503
         return jsonify({"events": events})
 
     return remote_desktop_bp

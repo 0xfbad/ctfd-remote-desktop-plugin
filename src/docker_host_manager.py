@@ -6,6 +6,7 @@ import time
 import threading
 import logging
 from datetime import datetime
+from typing import Literal
 import docker
 import gevent.monkey
 import gevent.threadpool
@@ -16,6 +17,10 @@ from .exceptions import HostsUnavailableException
 
 logger = logging.getLogger(__name__)
 
+SESSION_LABEL_MANAGED = "org.ctfd.remote-desktop.managed"
+SESSION_LABEL_USER_ID = "org.ctfd.remote-desktop.user-id"
+SESSION_LABEL_UUID = "org.ctfd.remote-desktop.session-uuid"
+
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
@@ -24,11 +29,24 @@ DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docke
 DEFAULT_CLIENT_TIMEOUT = 10
 # per-context pool size, caps concurrent in-flight blocking calls per host
 THREADPOOL_SIZE = 4
-
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
 ContainerResult = dict[str, str | dict[str, int]]
 ImageInfo = dict[str, int | str]
+ContainerState = Literal["running", "paused", "created", "exited", "not_found", "unknown"]
+
+
+def normalize_container_state(value: object) -> ContainerState:
+    """Map Docker's open-ended status strings to the plugin's closed state set."""
+    if value == "running":
+        return "running"
+    if value == "paused":
+        return "paused"
+    if value == "created":
+        return "created"
+    if value in ("exited", "dead", "removing"):
+        return "exited"
+    return "unknown"
 
 
 def parse_size(s: str | int) -> int:
@@ -77,7 +95,7 @@ def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
             return f"ssh://{hostname}"
         return f"ssh://root@{hostname}"
 
-    if os.path.exists(LOCAL_SOCKET_PATH):
+    if context_name == LOCAL_CONTEXT_NAME and os.path.exists(LOCAL_SOCKET_PATH):
         return f"unix://{LOCAL_SOCKET_PATH}"
 
     return None
@@ -149,7 +167,7 @@ class DockerHostManager:
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
-        # pool.apply needs the gevent hub. cli paths (flask db upgrade) have no
+        # pool.apply needs the gevent hub. CLI paths have no
         # hub and apply() hangs in futex, so fall back to inline there
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
@@ -208,14 +226,10 @@ class DockerHostManager:
             except Exception:
                 pass
 
-    def _init_semaphores(self) -> None:
-        from .models import get_setting
-
-        limit = get_setting("max_concurrent_creates")
-
+    def _init_semaphores(self, limit: int) -> None:
         new_semaphores: dict[str, threading.BoundedSemaphore] = {}
         for ctx_name in self._context_configs:
-            new_semaphores[ctx_name] = threading.BoundedSemaphore(int(limit))  # type: ignore[arg-type]
+            new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
 
         self._semaphores = new_semaphores
 
@@ -238,15 +252,14 @@ class DockerHostManager:
                 pass
 
     def load_contexts(self, contexts: list[DesktopDockerContextModel]) -> None:
-        from .models import get_setting
+        from .models import get_all_settings
 
         new_configs: dict[str, str] = {}
         new_pub_hostnames: dict[str, str] = {}
 
-        rd_network = str(get_setting("rd_network_name") or "rd-isolated")
-        network_isolation = bool(get_setting("network_isolation"))
-        network_pool_size = int(get_setting("network_pool_size") or 0)
-        storage_limit = str(get_setting("storage_limit") or "").strip()
+        effective_profile = get_all_settings()
+        rd_network = str(effective_profile["rd_network_name"] or "bridge")
+        storage_limit = str(effective_profile["storage_limit"] or "").strip()
 
         for ctx in contexts:
             endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
@@ -255,35 +268,17 @@ class DockerHostManager:
                 continue
 
             def _check(endpoint=endpoint, ctx_name=ctx.context_name):
-                from .models import network_slot_name
-
                 client = None
                 try:
                     client = docker.DockerClient(base_url=endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
                     client.ping()
-                    if network_isolation:
-                        # warn-only at load; the hard fail-closed happens at create
-                        # (the daemon rejects a create against a missing network)
-                        try:
-                            present = {n.name for n in client.networks.list()}
-                            for i in range(network_pool_size):
-                                if network_slot_name(i) not in present:
-                                    logger.warning(
-                                        f"context {ctx_name} missing docker network "
-                                        f"'{network_slot_name(i)}' - run provisioning/network/net-pool.sh"
-                                    )
-                        except Exception as e:
-                            logger.warning(f"context {ctx_name} network pool check failed: {e}")
-                    elif rd_network != "bridge":
-                        # bridge is the docker default and always present, skip the probe so an operator
-                        # using bridge as an emergency rollback doesn't see spurious warnings
+                    if rd_network != "bridge":
                         try:
                             found = client.networks.list(names=[rd_network])
                             if not found:
                                 logger.warning(
                                     f"context {ctx_name} missing docker network '{rd_network}' "
-                                    "- container creates will fail. run the rd-isolated network "
-                                    "runbook on this host"
+                                    "- container creates will fail"
                                 )
                         except Exception as e:
                             logger.warning(f"context {ctx_name} network check failed for '{rd_network}': {e}")
@@ -326,7 +321,10 @@ class DockerHostManager:
             self._pub_hostnames = new_pub_hostnames
             self._config_generation += 1
 
-        self._init_semaphores()
+        create_limit = effective_profile["max_concurrent_creates"]
+        if type(create_limit) is not int:
+            raise ValueError("max_concurrent_creates must be an integer")
+        self._init_semaphores(create_limit)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
         return self._pub_hostnames.get(context_name)
@@ -339,7 +337,8 @@ class DockerHostManager:
         return self._pub_hostnames.get(context_name)
 
     def get_connected_contexts(self) -> list[str]:
-        return list(self._context_configs.keys())
+        with self._lock:
+            return list(self._context_configs)
 
     def ping(self, context_name: str) -> bool:
         # use a fresh ephemeral client. cached clients share paramiko transports
@@ -366,33 +365,34 @@ class DockerHostManager:
         hostname: str | None = None,
         extra_hosts: dict[str, str] | None = None,
         network: str | None = None,
-        volumes: dict[str, dict[str, str]] | None = None,
+        labels: dict[str, str] | None = None,
     ) -> ContainerResult:
-        from .models import get_setting
+        from .models import get_all_settings
 
-        pids_limit = get_setting("pids_limit")
-        cap_drop = [c.strip() for c in str(get_setting("cap_drop")).split(",") if c.strip()]
-        cap_add = [c.strip() for c in str(get_setting("cap_add")).split(",") if c.strip()]
+        effective_profile = get_all_settings()
+        pids_limit = effective_profile["pids_limit"]
+        cap_drop = [c.strip() for c in str(effective_profile["cap_drop"]).split(",") if c.strip()]
+        cap_add = [c.strip() for c in str(effective_profile["cap_add"]).split(",") if c.strip()]
 
         # settings-gated hardening kwargs, validated here so a bad value fails
         # loudly before any docker call. "" / 0 omits the kwarg entirely, which
         # is load-bearing on the ext4 dev box (storage_opt is xfs-only)
         extra_kwargs: dict = {}
 
-        storage_limit = str(get_setting("storage_limit") or "").strip()
+        storage_limit = str(effective_profile["storage_limit"] or "").strip()
         if storage_limit:
             parse_size(storage_limit)
             extra_kwargs["storage_opt"] = {"size": storage_limit}
 
-        log_max_size = str(get_setting("log_max_size") or "").strip()
+        log_max_size = str(effective_profile["log_max_size"] or "").strip()
         if log_max_size:
             # max-file must be a string: daemon log-opts are map[string]string
             extra_kwargs["log_config"] = {
                 "type": "json-file",
-                "config": {"max-size": log_max_size, "max-file": str(int(get_setting("log_max_file") or 3))},
+                "config": {"max-size": log_max_size, "max-file": str(int(effective_profile["log_max_file"] or 3))},
             }
 
-        mem_reservation_raw = str(get_setting("memory_reservation") or "").strip()
+        mem_reservation_raw = str(effective_profile["memory_reservation"] or "").strip()
         if mem_reservation_raw not in ("", "0"):
             mem_reservation = parse_size(mem_reservation_raw)
             if memory is not None and mem_reservation > memory:
@@ -406,7 +406,7 @@ class DockerHostManager:
             # default gives a swap cushion equal to the RAM limit so spikes
             # spill to swap instead of dying. "0" = strict no-swap isolation,
             # "-1" = unlimited, "<size>" = explicit swap amount
-            swap_raw = str(get_setting("swap_limit") or "").strip()
+            swap_raw = str(effective_profile["swap_limit"] or "").strip()
             if swap_raw == "-1":
                 extra_kwargs["memswap_limit"] = -1
             elif swap_raw == "0":
@@ -415,18 +415,18 @@ class DockerHostManager:
                 swap_bytes = parse_size(swap_raw) if swap_raw else memory
                 extra_kwargs["memswap_limit"] = memory + swap_bytes
 
-        oom_score_adj = max(0, min(1000, int(get_setting("oom_score_adj") or 0)))
+        oom_score_adj = max(0, min(1000, int(effective_profile["oom_score_adj"] or 0)))
         if oom_score_adj:
             extra_kwargs["oom_score_adj"] = oom_score_adj
 
-        nofile_soft = int(get_setting("nofile_soft") or 0)
-        nofile_hard = int(get_setting("nofile_hard") or 0)
+        nofile_soft = int(effective_profile["nofile_soft"] or 0)
+        nofile_hard = int(effective_profile["nofile_hard"] or 0)
         if nofile_soft > 0:
             if nofile_hard < nofile_soft:
                 raise ValueError(f"nofile_hard {nofile_hard} < nofile_soft {nofile_soft}")
             extra_kwargs["ulimits"] = [docker.types.Ulimit(name="nofile", soft=nofile_soft, hard=nofile_hard)]
 
-        cgroup_parent = str(get_setting("cgroup_parent") or "").strip()
+        cgroup_parent = str(effective_profile["cgroup_parent"] or "").strip()
         if cgroup_parent:
             if not cgroup_parent.endswith(".slice"):
                 raise ValueError(f"cgroup_parent must end in .slice on systemd-cgroup hosts, got {cgroup_parent!r}")
@@ -459,7 +459,7 @@ class DockerHostManager:
                         pids_limit=pids_limit,
                         extra_hosts=extra_hosts or {},
                         network=network,
-                        volumes=volumes or None,
+                        labels=labels or {},
                         **extra_kwargs,
                     )
                     break
@@ -544,6 +544,56 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
+    def remove_paused_managed_orphan(
+        self,
+        context_name: str,
+        container_id: str,
+        container_name: str,
+        expected_labels: dict[str, str],
+    ) -> dict[str, str]:
+        """Remove one exact paused plugin container and return its labels.
+
+        Re-resolving by immutable ID and comparing the full ID/name prevents a
+        stale dashboard request from deleting a replacement container.
+        """
+
+        def _do() -> dict[str, str]:
+            client = self._get_client(context_name)
+            try:
+                container = client.containers.get(container_id)
+                container.reload()
+                actual_id = str(container.id or "")
+                actual_name = str(container.name or "")
+                labels = dict(((container.attrs or {}).get("Config") or {}).get("Labels") or {})
+                if actual_id != container_id or actual_name != container_name:
+                    raise ValueError("paused orphan identity changed; refresh and retry")
+                expected_identity = {
+                    SESSION_LABEL_MANAGED: expected_labels.get(SESSION_LABEL_MANAGED),
+                    SESSION_LABEL_USER_ID: expected_labels.get(SESSION_LABEL_USER_ID),
+                    SESSION_LABEL_UUID: expected_labels.get(SESSION_LABEL_UUID),
+                }
+                actual_identity = {key: labels.get(key) for key in expected_identity}
+                if expected_identity[SESSION_LABEL_MANAGED] != "true":
+                    raise ValueError("expected labels do not identify a managed container")
+                if actual_identity != expected_identity:
+                    raise ValueError("paused orphan ownership labels changed; refresh and retry")
+                if normalize_container_state(container.status) != "paused":
+                    raise ValueError("container is no longer paused; refusing removal")
+                container.remove(force=True)
+                return {str(key): str(value) for key, value in labels.items()}
+            except docker.errors.NotFound as exc:
+                raise ValueError("paused orphan no longer exists; refresh and retry") from exc
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                raise
+            except ValueError:
+                raise
+            except Exception as exc:
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}") from exc
+
+        return self._call(context_name, _do)
+
     @staticmethod
     def _parse_created_ts(created_raw: str) -> float:
         if not created_raw:
@@ -565,25 +615,32 @@ class DockerHostManager:
         except (ValueError, AttributeError):
             return 0.0
 
-    def _list_by_prefix(self, client, name_prefix: str) -> list[dict[str, str | float]]:
+    def _list_by_prefix(self, client, name_prefix: str) -> list[dict[str, object]]:
         containers = client.containers.list(all=True, filters={"name": name_prefix})
-        results: list[dict[str, str | float]] = []
+        results: list[dict[str, object]] = []
         for c in containers:
+            # Docker's `name` filter is a partial/regex match, not a prefix
+            # guarantee. Enforce the caller's namespace locally before any
+            # reconciliation code can treat a returned object as a session.
+            if not str(c.name or "").startswith(name_prefix):
+                continue
             created_raw = c.attrs.get("Created", "") if c.attrs else ""
             results.append(
                 {
+                    "id": str(c.id or ""),
                     "name": c.name or "",
                     "created_ts": self._parse_created_ts(created_raw),
                     "status": c.status or "",
+                    "labels": dict(((c.attrs or {}).get("Config") or {}).get("Labels") or {}),
                 }
             )
         return results
 
-    def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]]:
-        # lenient listing: swallows errors and returns [] so a flapping host
-        # can't break a sweep loop. NEVER wire slot/capacity release to this -
-        # an error looks identical to "no containers" (use the strict variant)
-        def _do() -> list[dict[str, str | float]]:
+    def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, object]]:
+        # Lenient listing swallows errors and returns [] so a flapping host
+        # cannot break a read-only status loop. Destructive callers must use
+        # the strict variant because an error looks identical to no containers.
+        def _do() -> list[dict[str, object]]:
             try:
                 client = self._get_client(context_name)
                 return self._list_by_prefix(client, name_prefix)
@@ -593,11 +650,11 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
-    def list_session_containers_strict(self, context_name: str, name_prefix: str) -> list[dict[str, str | float]] | None:
+    def list_session_containers_strict(self, context_name: str, name_prefix: str) -> list[dict[str, object]] | None:
         # strict listing: None on any error, so callers can distinguish "host
-        # answered: nothing there" from "host unreachable". the reconcile sweep
-        # and the network-slot reaper must only act on a non-None result
-        def _do() -> list[dict[str, str | float]] | None:
+        # answered: nothing there" from "host unreachable". The reconcile
+        # sweep only acts on a non-None result.
+        def _do() -> list[dict[str, object]] | None:
             try:
                 client = self._get_client(context_name)
                 return self._list_by_prefix(client, name_prefix)
@@ -684,7 +741,8 @@ class DockerHostManager:
                 container = client.containers.get(container_name)
                 container.pause()
             except docker.errors.NotFound:
-                logger.debug(f"container {container_name} not found for pause")
+                logger.warning(f"container {container_name} not found for pause")
+                raise
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
@@ -701,7 +759,8 @@ class DockerHostManager:
                 container = client.containers.get(container_name)
                 container.unpause()
             except docker.errors.NotFound:
-                logger.debug(f"container {container_name} not found for unpause")
+                logger.warning(f"container {container_name} not found for unpause")
+                raise
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
@@ -727,78 +786,33 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
-    def container_stats(self, context_name: str, container_id: str) -> dict | None:
-        # single stats snapshot for the tier-1 telemetry sampler. best-effort:
-        # never raises into the scheduler job (None means "no sample this tick")
-        if context_name not in self._context_configs:
-            return None
+    def inspect_container_state(self, context_name: str, container_id: str) -> ContainerState:
+        """Return a strict state without conflating transport failure with absence.
 
-        def _do():
-            try:
-                client = self._get_client(context_name)
-                # one_shot reaches APIClient.stats via **kwargs passthrough (API >= 1.41)
-                return client.containers.get(container_id).stats(stream=False, one_shot=True)
-            except docker.errors.NotFound:
-                return None
-            except Exception:
-                self._clear_client(context_name)
-                return None
+        Destructive callers must treat ``paused`` and ``unknown`` as holds.
+        ``not_found`` is returned only for Docker's explicit NotFound response.
+        """
 
-        return self._call(context_name, _do)
-
-    def read_host_telemetry(self, context_name: str) -> dict | None:
-        # tier-2 telemetry: read the host-side PSI snapshot written by
-        # provisioning/compute's rd-telemetry timer, via a throwaway helper
-        # container. deliberately NOT run_container - the no-volumes invariant
-        # test on run_container stays strict; do not merge this into it.
-        # the helper is platform-side, so it stays in the default cgroup
-        if context_name not in self._context_configs:
-            return None
-
-        from .models import get_setting
-
-        reader_image = str(get_setting("telemetry_reader_image") or "busybox:latest")
-
-        def _do():
-            try:
-                client = self._get_client(context_name)
-                output = client.containers.run(
-                    reader_image,
-                    command=["cat", "/telemetry/current.json"],
-                    volumes={"/var/lib/rd-telemetry": {"bind": "/telemetry", "mode": "ro"}},
-                    network_mode="none",
-                    remove=True,
-                    mem_limit="32m",
-                    pids_limit=16,
-                )
-                if isinstance(output, bytes):
-                    output = output.decode("utf-8", errors="replace")
-                return json.loads(output)
-            except Exception:
-                self._clear_client(context_name)
-                return None
-
-        return self._call(context_name, _do)
-
-    def is_container_running(self, context_name: str, container_id: str) -> bool:
         def _do():
             try:
                 client = self._get_client(context_name)
                 container = client.containers.get(container_id)
-                # paused counts as alive: a paused session is an evidence hold
-                # (io tripwire / admin), not a dead container to reap
-                return container.status in ("running", "paused")
+                return normalize_container_state(container.status)
             except docker.errors.NotFound:
-                return False
+                return "not_found"
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
-                # raw EOFError surfaces when ssh MaxSessions is exhausted
                 self._clear_client(context_name)
-                raise
+                return "unknown"
             except Exception:
-                # gevent.InvalidThreadUseError, paramiko ChannelException etc surface when the cached
-                # client is reused from a different gevent hub. drop the client and surface as a typed
-                # transient so _verify_or_reap treats it optimistically instead of 500'ing the route
                 self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}")
+                return "unknown"
 
-        return self._call(context_name, _do)
+        state = self._call(context_name, _do)
+        return state if state in ("running", "paused", "created", "exited", "not_found") else "unknown"
+
+    def is_container_running(self, context_name: str, container_id: str) -> bool:
+        state = self.inspect_container_state(context_name, container_id)
+        if state == "unknown":
+            raise HostsUnavailableException(f"container state unavailable on {context_name}")
+        # Paused is alive: it is an evidence hold, not a dead container to reap.
+        return state in ("running", "paused")
