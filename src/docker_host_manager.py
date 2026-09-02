@@ -5,8 +5,10 @@ import json
 import time
 import threading
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal
+from urllib.parse import urlsplit
 import docker
 import gevent.monkey
 import gevent.threadpool
@@ -14,6 +16,7 @@ import paramiko
 
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
+from .utils import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
 
@@ -82,18 +85,80 @@ def _scan_context_meta(context_name: str | None = None) -> ContextMeta | list[Co
     return None if context_name else results
 
 
+def _metadata_name_and_endpoint(meta: object) -> tuple[str | None, str | None]:
+    """Extract only the typed fields used from Docker's untrusted JSON shape."""
+    if not isinstance(meta, Mapping):
+        return None, None
+    name = meta.get("Name")
+    endpoints = meta.get("Endpoints")
+    if not isinstance(endpoints, Mapping):
+        return name if isinstance(name, str) and name else None, None
+    docker_endpoint = endpoints.get("docker")
+    if not isinstance(docker_endpoint, Mapping):
+        return name if isinstance(name, str) and name else None, None
+    endpoint = docker_endpoint.get("Host")
+    return (
+        name if isinstance(name, str) and name else None,
+        endpoint if isinstance(endpoint, str) and endpoint else None,
+    )
+
+
+def _validate_endpoint(candidate: str, context_name: str) -> str | None:
+    """Allow only the one local socket or a well-formed SSH transport.
+
+    Docker context metadata is operator-controlled state mounted into CTFd, but
+    it must not silently widen the control plane to unauthenticated TCP daemons
+    or arbitrary Unix sockets. Keep metadata and manually-entered endpoints on
+    the same allowlist.
+    """
+    if not candidate or candidate != candidate.strip() or any(c.isspace() for c in candidate):
+        return None
+    if candidate.startswith("unix://"):
+        if context_name == LOCAL_CONTEXT_NAME and candidate == f"unix://{LOCAL_SOCKET_PATH}":
+            return candidate
+        return None
+    try:
+        parsed = urlsplit(candidate)
+        parsed_port = parsed.port  # force validation of malformed/out-of-range ports
+        parsed_hostname = parsed.hostname
+        parsed_username = parsed.username
+        parsed_password = parsed.password
+    except (UnicodeError, ValueError):
+        return None
+    has_userinfo = "@" in parsed.netloc
+    if (
+        parsed.scheme != "ssh"
+        or not parsed_hostname
+        or parsed.netloc.endswith(":")
+        or (parsed_port is not None and parsed_port < 1)
+        or (has_userinfo and (not parsed_username or "@" in parsed_username or parsed.netloc.count("@") != 1))
+        or parsed_password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
+    ):
+        return None
+    return candidate
+
+
 def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
     # docker stores context dirs by hash, not name, so scan for a match
     meta = _scan_context_meta(context_name)
     if meta:
-        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host")  # type: ignore[union-attr]
-        if endpoint:
-            return endpoint
+        _name, endpoint = _metadata_name_and_endpoint(meta)
+        if endpoint is not None:
+            validated = _validate_endpoint(endpoint, context_name)
+            if validated is not None:
+                return validated
 
     if hostname:
-        if "@" in hostname:
-            return f"ssh://{hostname}"
-        return f"ssh://root@{hostname}"
+        # The admin API also accepts an explicit Docker endpoint for manually
+        # configured contexts. Do not corrupt ssh://host into
+        # ssh://root@ssh://host when context metadata is unavailable.
+        candidate = hostname if "://" in hostname else f"ssh://{hostname if '@' in hostname else f'root@{hostname}'}"
+        validated = _validate_endpoint(candidate, context_name)
+        if validated is not None:
+            return validated
 
     if context_name == LOCAL_CONTEXT_NAME and os.path.exists(LOCAL_SOCKET_PATH):
         return f"unix://{LOCAL_SOCKET_PATH}"
@@ -103,11 +168,13 @@ def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
 
 def discover_contexts() -> list[DiscoveredContext]:
     discovered: list[DiscoveredContext] = []
-    for meta in _scan_context_meta():  # type: ignore[union-attr]
-        name = meta.get("Name", "")  # type: ignore[union-attr]
-        endpoint = meta.get("Endpoints", {}).get("docker", {}).get("Host", "")  # type: ignore[union-attr]
-        if name:
-            discovered.append({"name": str(name), "endpoint": str(endpoint)})
+    metadata = _scan_context_meta()
+    for meta in metadata if isinstance(metadata, list) else []:
+        name, endpoint = _metadata_name_and_endpoint(meta)
+        if name is not None and endpoint is not None:
+            validated = _validate_endpoint(endpoint, name)
+            if validated is not None:
+                discovered.append({"name": name, "endpoint": validated})
 
     if not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered):
         if os.path.exists(LOCAL_SOCKET_PATH):
@@ -266,6 +333,11 @@ class DockerHostManager:
             if not endpoint:
                 logger.warning(f"no endpoint for context '{ctx.context_name}', skipping")
                 continue
+            try:
+                public_hostname = normalize_public_hostname(ctx.pub_hostname)
+            except ValueError as exc:
+                logger.error(f"invalid public hostname for context '{ctx.context_name}': {exc}")
+                continue
 
             def _check(endpoint=endpoint, ctx_name=ctx.context_name):
                 client = None
@@ -311,7 +383,7 @@ class DockerHostManager:
 
             if err is None:
                 new_configs[ctx.context_name] = endpoint
-                new_pub_hostnames[ctx.context_name] = ctx.pub_hostname
+                new_pub_hostnames[ctx.context_name] = public_hostname
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
             else:
                 logger.error(f"could not connect to context '{ctx.context_name}': {err}")
@@ -327,14 +399,27 @@ class DockerHostManager:
         self._init_semaphores(create_limit)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
-        return self._pub_hostnames.get(context_name)
+        with self._lock:
+            return self._pub_hostnames.get(context_name)
 
     def get_check_hostname(self, context_name: str) -> str | None:
-        # local socket contexts need the host gateway since ports bind on the host, not localhost
-        endpoint = self._context_configs.get(context_name, "")
+        return self.get_connection_hostnames(context_name)[1]
+
+    def get_connection_hostnames(self, context_name: str) -> tuple[str | None, str | None]:
+        """Snapshot the user-facing and readiness addresses atomically."""
+        with self._lock:
+            configured = self._pub_hostnames.get(context_name)
+            endpoint = self._context_configs.get(context_name, "")
+        # A local Docker daemon publishes ports on the host. CTFd itself runs
+        # in a container, so readiness/proxy traffic must use the bridge
+        # gateway even when users need a different public DNS name for SSH.
         if endpoint.startswith("unix://"):
-            return _get_host_gateway()
-        return self._pub_hostnames.get(context_name)
+            return configured or None, _get_host_gateway()
+        # Remote runners expose their published ports at the configured runner
+        # address; a local bridge-gateway fallback is not meaningful for them.
+        if configured:
+            return configured, configured
+        return None, None
 
     def get_connected_contexts(self) -> list[str]:
         with self._lock:

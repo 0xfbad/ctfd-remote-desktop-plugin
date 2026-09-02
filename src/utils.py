@@ -1,8 +1,40 @@
 from __future__ import annotations
 
 import functools
+import ipaddress
+import re
 
 from flask import jsonify, request
+
+
+_DNS_NAME_RE = re.compile(
+    r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
+)
+
+
+def normalize_public_hostname(value: object) -> str:
+    """Validate a URL host without accepting a scheme, path, or port."""
+    if not isinstance(value, str) or not value or len(value) > 253:
+        raise ValueError("pub_hostname must be a valid hostname or IP address without a port")
+    if value != value.strip() or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        raise ValueError("pub_hostname must be a valid hostname or IP address without a port")
+    if any(char in value for char in ("/", "@", "?", "#")):
+        raise ValueError("pub_hostname must be a valid hostname or IP address without a port")
+
+    bracketed = value.startswith("[") or value.endswith("]")
+    if bracketed and not (value.startswith("[") and value.endswith("]")):
+        raise ValueError("pub_hostname must be a valid hostname or IP address without a port")
+    address_candidate = value[1:-1] if bracketed else value
+    try:
+        address = ipaddress.ip_address(address_candidate)
+        if bracketed and address.version != 6:
+            raise ValueError
+        return f"[{address.compressed}]" if address.version == 6 else address.compressed
+    except ValueError:
+        if bracketed or not _DNS_NAME_RE.fullmatch(value):
+            raise ValueError("pub_hostname must be a valid hostname or IP address without a port") from None
+    return value.lower()
 
 
 def _response_status(response):

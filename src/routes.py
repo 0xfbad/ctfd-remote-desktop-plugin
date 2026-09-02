@@ -27,7 +27,7 @@ from .models import (
 )
 from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
 from .exceptions import HostsUnavailableException
-from .utils import ratelimit_per_user
+from .utils import normalize_public_hostname, ratelimit_per_user
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,54 @@ def _infra_status(error: str | None) -> int:
         return 500
     lowered = error.lower()
     return 503 if any(tok in lowered for tok in _INFRA_ERROR_TOKENS) else 500
+
+
+def _json_integer(value: object, *, minimum: int, field: str) -> int:
+    """Parse an integer JSON scalar without bool/float truncation."""
+    if type(value) is not int:
+        if field == "weight":
+            raise ValueError("weight must be an integer")
+        raise ValueError("max_containers must be a non-negative integer or null")
+    if value < minimum:
+        if field == "weight":
+            raise ValueError("weight must be at least 1")
+        raise ValueError("max_containers must be a non-negative integer or null")
+    return value
+
+
+def _context_hostname(value: object) -> str | None:
+    """Validate the optional SSH target before it reaches the database."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 512
+        or value != value.strip()
+        or any(char.isspace() or ord(char) == 127 for char in value)
+    ):
+        raise ValueError("hostname must be a non-empty string of at most 512 characters without whitespace")
+    candidate = value if value.startswith("ssh://") else f"ssh://{'root@' if '@' not in value else ''}{value}"
+    try:
+        parsed = urlparse(candidate)
+        parsed_port = parsed.port
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.scheme != "ssh"
+        or not parsed.hostname
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+        or parsed_port == 0
+        or (parsed.username is not None and (not parsed.username or "@" in parsed.username))
+        or parsed.path not in ("", "/")
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("hostname must be an SSH target such as root@runner.example or ssh://root@runner.example")
+    return value
 
 
 def _request_tz() -> datetime.tzinfo:
@@ -195,8 +243,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
             # ssh is a direct connection to the container host, not proxied through CTFd
             if container_info.get("ssh_port"):
+                ssh_host = str(container_info["pub_hostname"])
+                if ssh_host.startswith("[") and ssh_host.endswith("]"):
+                    ssh_host = ssh_host[1:-1]
                 ssh_info = {
-                    "host": container_info["pub_hostname"],
+                    "host": ssh_host,
                     "port": container_info["ssh_port"],
                     "username": container_info["container_username"],
                     "password": container_info["vnc_password"],
@@ -1140,31 +1191,40 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         enabled = request.json.get("enabled", True)
         max_containers = request.json.get("max_containers")
 
-        if not context_name:
+        if (
+            not isinstance(context_name, str)
+            or not context_name
+            or context_name != context_name.strip()
+            or len(context_name) > 512
+        ):
             return jsonify({"error": "context_name is required"}), 400
-        if not pub_hostname:
-            return jsonify({"error": "pub_hostname is required"}), 400
-
-        existing = DesktopDockerContextModel.query.filter_by(context_name=context_name).first()
-        if existing:
-            return jsonify({"error": "context already exists"}), 400
+        try:
+            hostname = _context_hostname(hostname)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if type(enabled) is not bool:
+            return jsonify({"error": "enabled must be a boolean"}), 400
+        try:
+            pub_hostname = normalize_public_hostname(pub_hostname)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         try:
-            weight = int(weight)
-            if weight < 1:
-                return jsonify({"error": "weight must be at least 1"}), 400
-        except ValueError:
-            return jsonify({"error": "weight must be an integer"}), 400
+            weight = _json_integer(weight, minimum=1, field="weight")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
 
         if max_containers in (None, ""):
             max_containers = None
         else:
             try:
-                max_containers = int(str(max_containers))
-                if max_containers < 0:
-                    raise ValueError
-            except (ValueError, TypeError):
-                return jsonify({"error": "max_containers must be a non-negative integer or null"}), 400
+                max_containers = _json_integer(max_containers, minimum=0, field="max_containers")
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+        existing = DesktopDockerContextModel.query.filter_by(context_name=context_name).first()
+        if existing:
+            return jsonify({"error": "context already exists"}), 400
 
         new_context = DesktopDockerContextModel(
             context_name=context_name,

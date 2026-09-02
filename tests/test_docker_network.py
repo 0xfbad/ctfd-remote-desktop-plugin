@@ -96,6 +96,30 @@ def test_run_container_default_network_is_none():
     assert call_kwargs.get("network") is None
 
 
+def test_unix_context_keeps_public_name_but_checks_bridge_gateway():
+    mgr = _make_manager()
+    mgr._pub_hostnames = {"alpha": "runner.public.example"}
+
+    with patch("_rd_plugin.docker_host_manager._get_host_gateway", return_value="172.17.0.1") as gateway:
+        assert mgr.get_connection_hostnames("alpha") == (
+            "runner.public.example",
+            "172.17.0.1",
+        )
+        assert mgr.get_pub_hostname("alpha") == "runner.public.example"
+        assert mgr.get_check_hostname("alpha") == "172.17.0.1"
+    assert gateway.call_count == 2
+
+
+def test_check_hostname_uses_gateway_only_without_configured_address():
+    mgr = _make_manager()
+    mgr._pub_hostnames = {}
+
+    with patch("_rd_plugin.docker_host_manager._get_host_gateway", return_value="172.17.0.1") as gateway:
+        assert mgr.get_connection_hostnames("alpha") == (None, "172.17.0.1")
+        assert mgr.get_check_hostname("alpha") == "172.17.0.1"
+    assert gateway.call_count == 2
+
+
 def test_container_manager_reads_setting_and_passes_through():
     """create_container reads rd_network_name and forwards to host_manager"""
     from _rd_plugin.container_manager import ContainerManager

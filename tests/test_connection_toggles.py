@@ -352,6 +352,44 @@ def test_page_uses_proxy_only_urls_without_forwarded_headers():
     assert "http://" not in kwargs["vnc_url"]
 
 
+def test_page_formats_bracketed_ipv6_for_openssh():
+    from routes import create_routes
+
+    cm = MagicMock()
+    cm.get_creation_status.return_value = None
+    cm.get_container_info.return_value = {
+        "container_id": "cid",
+        "container_name": "rd-session-7",
+        "vnc_port": 40001,
+        "novnc_port": 40002,
+        "ttyd_port": None,
+        "ssh_port": 40022,
+        "docker_context": "alpha",
+        "pub_hostname": "[2001:db8::1]",
+        "container_username": "student_root",
+        "vnc_password": "secret",
+        "created_at": 1.0,
+        "vnc_url": "/remote-desktop/vnc/7/vnc.html#password=secret",
+    }
+    bp = create_routes(cm, MagicMock())
+    handler = _get_handler(bp, "remote_desktop_page")
+    settings = {
+        "remote_desktop_enabled": True,
+        "require_verified": False,
+        "max_extensions": 3,
+        "ssh_enabled": True,
+        "web_terminal_enabled": False,
+    }
+    with (
+        patch("routes.get_current_user", return_value=MagicMock(id=7)),
+        patch("routes.render_template") as render,
+        patch("models.get_setting", side_effect=lambda key, default=None: settings.get(key, default)),
+    ):
+        handler()
+
+    assert render.call_args.kwargs["ssh_info"]["host"] == "2001:db8::1"
+
+
 # -- 5. template plain-text guards -------------------------------------------
 
 
