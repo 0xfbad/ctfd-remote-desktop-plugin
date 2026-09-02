@@ -2,7 +2,18 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
-from docker_host_manager import _resolve_endpoint, discover_contexts
+from docker_host_manager import _apply_ssh_connect_timeouts, _resolve_endpoint, discover_contexts
+
+
+def test_paramiko_connect_phases_receive_explicit_bounds():
+    params: dict[str, object] = {"hostname": "runner.example"}
+    _apply_ssh_connect_timeouts(params, 3)
+    assert params == {
+        "hostname": "runner.example",
+        "timeout": 3.0,
+        "banner_timeout": 3.0,
+        "auth_timeout": 3.0,
+    }
 
 
 def test_meta_file_endpoint():

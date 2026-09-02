@@ -62,6 +62,15 @@ websockify connection to it stays inside the container. Per-session bridge
 isolation remains deployment work rather than a property of the current shared
 `bridge` default.
 
+`max_concurrent_creates` is a process-local Docker-create throttle, not a
+distributed host limit. With `W` CTFd worker processes and a value of `N`, as
+many as `W × N` creates may enter Docker concurrently; use each context's
+database-backed `max_containers` as the hard admission limit and size the local
+throttle with the worker count in mind. A live settings reload preserves the
+old semaphore for its in-flight callers and creates a new generation when the
+limit changes, so old and new work can overlap briefly. Drain creates and
+restart all workers when a strict immediate reduction is required.
+
 ## Development
 
 ```bash

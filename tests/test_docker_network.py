@@ -16,7 +16,6 @@ def _make_manager():
     mgr = DockerHostManager()
     mgr._context_configs = {"alpha": "unix:///fake.sock"}
     mgr._config_generation = 1
-    mgr._client_generation = 1
     return mgr
 
 
@@ -279,6 +278,7 @@ def test_load_contexts_no_warning_when_network_present(caplog):
     ):
         mgr.load_contexts([_stub_context_row("alpha")])
 
+    assert mgr.get_connected_contexts() == ["alpha"]
     warned = [r for r in caplog.records if "missing" in r.message]
     assert not warned, f"unexpected warning when network is present: {[r.message for r in warned]}"
 
@@ -323,3 +323,79 @@ def test_load_contexts_warns_when_network_probe_throws(caplog):
 
     warned = [r for r in caplog.records if "network check failed" in r.message]
     assert warned, f"expected probe-error warning, got: {[r.message for r in caplog.records]}"
+
+
+def test_failed_startup_probe_retains_config_and_recovers_on_ping():
+    """A transient load failure remains probeable by the periodic health job."""
+    from _rd_plugin.docker_host_manager import DockerHostManager
+    from _rd_plugin.docker_host_manager import docker
+
+    mgr = DockerHostManager()
+    startup_client = MagicMock()
+    startup_client.ping.side_effect = docker.errors.DockerException("runner booting")
+
+    with (
+        patch("_rd_plugin.docker_host_manager._resolve_endpoint", return_value="ssh://root@alpha"),
+        patch("_rd_plugin.docker_host_manager.docker.DockerClient", return_value=startup_client),
+        patch("models.get_all_settings", return_value=_settings_dispatch("bridge")),
+    ):
+        mgr.load_contexts([_stub_context_row("alpha")])
+
+    assert mgr._context_configs == {"alpha": "ssh://root@alpha"}
+    assert mgr.get_connected_contexts() == []
+    assert mgr.get_connection_hostnames("alpha") == ("alpha.example.com", "alpha.example.com")
+    startup_client.close.assert_called_once_with()
+
+    with patch("_rd_plugin.docker_host_manager.ping_endpoint", return_value=True) as probe:
+        assert mgr.ping("alpha") is True
+
+    probe.assert_called_once_with("ssh://root@alpha", timeout=3)
+    assert mgr.get_connected_contexts() == ["alpha"]
+
+
+def test_failed_ping_removes_only_matching_endpoint_from_connected_list():
+    from _rd_plugin.docker_host_manager import DockerHostManager
+
+    mgr = DockerHostManager()
+    mgr._context_configs = {
+        "alpha": "ssh://root@alpha",
+        "beta": "ssh://root@beta",
+    }
+    mgr._connected_contexts = {"alpha", "beta"}
+
+    with patch("_rd_plugin.docker_host_manager.ping_endpoint", return_value=False):
+        assert mgr.ping("alpha") is False
+
+    assert mgr.get_connected_contexts() == ["beta"]
+
+
+def test_stale_ping_result_cannot_overwrite_reloaded_endpoint_state():
+    from _rd_plugin.docker_host_manager import DockerHostManager
+
+    mgr = DockerHostManager()
+    mgr._context_configs = {"alpha": "ssh://root@old-alpha"}
+
+    def probe_then_reload(_endpoint, timeout):
+        assert timeout == 3
+        with mgr._lock:
+            mgr._context_configs["alpha"] = "ssh://root@new-alpha"
+            mgr._connected_contexts.add("alpha")
+        return False
+
+    with patch("_rd_plugin.docker_host_manager.ping_endpoint", side_effect=probe_then_reload):
+        assert mgr.ping("alpha") is False
+
+    assert mgr.get_connected_contexts() == ["alpha"]
+    assert mgr._context_client_epochs.get("alpha", 0) == 0
+
+
+def test_ping_endpoint_closes_ephemeral_client_after_failure():
+    from _rd_plugin.docker_host_manager import docker, ping_endpoint
+
+    client = MagicMock()
+    client.ping.side_effect = docker.errors.DockerException("connection lost")
+
+    with patch("_rd_plugin.docker_host_manager.docker.DockerClient", return_value=client):
+        assert ping_endpoint("ssh://root@alpha") is False
+
+    client.close.assert_called_once_with()

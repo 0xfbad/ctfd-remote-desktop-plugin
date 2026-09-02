@@ -37,6 +37,70 @@ DiscoveredContext = dict[str, str]
 ContainerResult = dict[str, str | dict[str, int]]
 ImageInfo = dict[str, int | str]
 ContainerState = Literal["running", "paused", "created", "exited", "not_found", "unknown"]
+ClientKey = tuple[str, int]
+
+_SSH_ADAPTER_PATCH_LOCK = threading.RLock()
+_SSH_CONNECT_TIMEOUT = threading.local()
+_SSH_ADAPTER_PATCHED = False
+
+
+def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
+    """Bound Paramiko's TCP, banner, and authentication phases.
+
+    Docker SDK's ``timeout=`` covers HTTP/channel I/O but is not forwarded to
+    ``SSHClient.connect``. Without these explicit values a blackholed runner
+    can occupy a context worker forever.
+    """
+    bounded = max(1.0, float(timeout))
+    params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded)
+
+
+def _install_bounded_ssh_adapter() -> None:
+    """Install a process-wide, API-compatible timeout fix for docker-py 7.x."""
+    global _SSH_ADAPTER_PATCHED
+    if _SSH_ADAPTER_PATCHED:
+        return
+    with _SSH_ADAPTER_PATCH_LOCK:
+        if _SSH_ADAPTER_PATCHED:
+            return
+        try:
+            from docker.api import client as api_client
+        except (ImportError, AttributeError):
+            # Unit tests use a deliberately tiny docker stub. Production's
+            # pinned docker-py dependency always exposes this module.
+            return
+        original_adapter = api_client.SSHHTTPAdapter
+        if getattr(original_adapter, "_ctfd_bounded_connect", False):
+            _SSH_ADAPTER_PATCHED = True
+            return
+
+        # docker-py keeps the adapter on api_client so it can be replaced by
+        # tests and by alternate transports. The runtime base is a real class,
+        # but mypy cannot prove that through this dynamic compatibility seam.
+        class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
+            _ctfd_bounded_connect = True
+
+            def _create_paramiko_client(self, base_url):
+                super()._create_paramiko_client(base_url)
+                timeout = getattr(_SSH_CONNECT_TIMEOUT, "value", DEFAULT_CLIENT_TIMEOUT)
+                _apply_ssh_connect_timeouts(self.ssh_params, timeout)
+
+        api_client.SSHHTTPAdapter = BoundedSSHHTTPAdapter
+        _SSH_ADAPTER_PATCHED = True
+
+
+def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT):
+    if not endpoint.startswith("ssh://"):
+        return docker.DockerClient(base_url=endpoint, timeout=timeout)
+    _install_bounded_ssh_adapter()
+    _SSH_CONNECT_TIMEOUT.value = timeout
+    try:
+        return docker.DockerClient(base_url=endpoint, timeout=timeout)
+    finally:
+        try:
+            del _SSH_CONNECT_TIMEOUT.value
+        except AttributeError:
+            pass
 
 
 def normalize_container_state(value: object) -> ContainerState:
@@ -200,27 +264,46 @@ def _get_host_gateway() -> str:
 
 
 def ping_endpoint(endpoint: str, timeout: int = 3) -> bool:
+    client = None
     try:
-        client = docker.DockerClient(base_url=endpoint, timeout=timeout)
+        client = _new_docker_client(endpoint, timeout=timeout)
         client.ping()
-        client.close()
         return True
     except Exception:
         return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
 
 
 class DockerHostManager:
     def __init__(self) -> None:
         self._context_configs: dict[str, str] = {}
         self._pub_hostnames: dict[str, str] = {}
+        # Resolved configuration must survive a transient startup/reload probe
+        # failure so periodic ping can recover it. Keep reachability separate
+        # from the endpoint catalog used to create clients and proxy active
+        # rows.
+        self._connected_contexts: set[str] = set()
         # keyed by (context_name, thread_ident) because paramiko Channels bind
         # gevent.Event to the Hub of the creating thread
-        self._clients: dict[tuple[str, int], docker.DockerClient] = {}
+        self._clients: dict[ClientKey, docker.DockerClient] = {}
+        self._client_generations: dict[ClientKey, int] = {}
+        # A transport failure invalidates every cached client for that context,
+        # but peers may still be in flight.  Increment the context epoch and
+        # let each worker replace its own client on its next call instead of
+        # closing a Paramiko transport from the wrong thread.
+        self._client_epochs: dict[ClientKey, int] = {}
+        self._context_client_epochs: dict[str, int] = {}
+        self._client_threads: dict[ClientKey, threading.Thread] = {}
         self._config_generation: int = 0
-        self._client_generation: int = -1
         # reentrant so wrapped ops can re-enter lock-protected helpers
         self._lock: threading.RLock = threading.RLock()
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
+        self._semaphore_limits: dict[str, int] = {}
         # per-context pool isolates blocking paramiko calls so one hung host
         # doesn't starve the others
         self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
@@ -243,31 +326,81 @@ class DockerHostManager:
 
     def _get_client(self, context_name: str) -> docker.DockerClient:
         tid = threading.get_ident()
+        current_thread = threading.current_thread()
         to_close: list[docker.DockerClient] = []
+        missing_context = False
+        client_error: Exception | None = None
         with self._lock:
-            if self._client_generation != self._config_generation:
-                to_close.extend(self._clients.values())
-                self._clients = {}
-                self._client_generation = self._config_generation
-            else:
-                # prune entries for dead threads. gevent threadpool workers
-                # rarely die so this is a cheap safety net, not a hot path.
-                # bounded by num_contexts * THREADPOOL_SIZE (3 * 4 = 12)
-                live_idents = {t.ident for t in threading.enumerate()}
-                dead_keys = [k for k in self._clients if k[1] not in live_idents]
-                for k in dead_keys:
-                    to_close.append(self._clients.pop(k))
-
             key = (context_name, tid)
-            if key in self._clients:
-                client = self._clients[key]
-            else:
+
+            # Thread identifiers can be reused after a worker exits. Track the
+            # owning Thread object as well as its ident so a replacement never
+            # inherits a paramiko transport bound to the old worker's Hub.
+            dead_keys = [
+                cached_key
+                for cached_key in self._clients
+                if (owner := self._client_threads.get(cached_key)) is None or not owner.is_alive()
+            ]
+            for dead_key in dead_keys:
+                to_close.append(self._clients.pop(dead_key))
+                self._client_generations.pop(dead_key, None)
+                self._client_epochs.pop(dead_key, None)
+                self._client_threads.pop(dead_key, None)
+
+            # A reload can retire a context that this worker never requests
+            # again. Sweep every stale entry owned by the calling thread, not
+            # just the requested key, so repeated context removal cannot leave
+            # one SSH transport behind per retired context. Peer workers remain
+            # untouched because closing their Paramiko transports here could
+            # abort an in-flight Docker operation on another gevent Hub.
+            owned_stale_keys = [
+                cached_key
+                for cached_key in self._clients
+                if self._client_threads.get(cached_key) is current_thread
+                and (
+                    cached_key[0] not in self._context_configs
+                    or self._client_generations.get(cached_key) != self._config_generation
+                    or self._client_epochs.get(cached_key) != self._context_client_epochs.get(cached_key[0], 0)
+                )
+            ]
+            for stale_key in owned_stale_keys:
+                to_close.append(self._clients.pop(stale_key))
+                self._client_generations.pop(stale_key, None)
+                self._client_epochs.pop(stale_key, None)
+                self._client_threads.pop(stale_key, None)
+
+            client = self._clients.get(key)
+            owner = self._client_threads.get(key)
+            generation = self._client_generations.get(key)
+            client_epoch = self._client_epochs.get(key)
+            context_epoch = self._context_client_epochs.get(context_name, 0)
+            if client is not None and (
+                owner is not current_thread or generation != self._config_generation or client_epoch != context_epoch
+            ):
+                # Reloads are lazy: roll only this worker's cache entry. Closing
+                # another thread's in-flight SSH transport can abort a create.
+                to_close.append(self._clients.pop(key))
+                self._client_generations.pop(key, None)
+                self._client_epochs.pop(key, None)
+                self._client_threads.pop(key, None)
+                client = None
+
+            if client is None:
                 url = self._context_configs.get(context_name)
-                if not url:
-                    # typed so callers can map a stale-row miss to a 503 instead of a 500
-                    raise HostsUnavailableException(f"no client for context '{context_name}'")
-                client = docker.DockerClient(base_url=url, timeout=DEFAULT_CLIENT_TIMEOUT)
-                self._clients[key] = client
+                if url:
+                    try:
+                        client = _new_docker_client(url, timeout=DEFAULT_CLIENT_TIMEOUT)
+                    except Exception as exc:
+                        # Finish closing entries already retired by this sweep
+                        # before surfacing an invalid endpoint/client failure.
+                        client_error = exc
+                    else:
+                        self._clients[key] = client
+                        self._client_generations[key] = self._config_generation
+                        self._client_epochs[key] = context_epoch
+                        self._client_threads[key] = current_thread
+                else:
+                    missing_context = True
 
         # close outside the lock, paramiko teardown can block on SSH for seconds
         for old in to_close:
@@ -275,43 +408,78 @@ class DockerHostManager:
                 old.close()
             except Exception:
                 pass
+        if client_error is not None:
+            raise client_error
+        if missing_context:
+            # typed so callers can map a stale-row miss to a 503 instead of a 500
+            raise HostsUnavailableException(f"no client for context '{context_name}'")
+        assert client is not None
         return client
 
     def _clear_client(self, context_name: str) -> None:
-        # drop EVERY cached client for this context across all threads so any
-        # worker that next calls _get_client builds a fresh one. preserves the
-        # original contract (next call gets a new client) but accounts for N
-        # cached entries instead of 1
-        to_close: list[docker.DockerClient] = []
+        # Mark every peer stale without closing another worker's potentially
+        # in-flight SSH transport. Each worker observes the epoch lazily and
+        # replaces its own client on its next operation. This also lets a fresh
+        # out-of-pool ping invalidate the actual thread-pool clients.
+        key = (context_name, threading.get_ident())
         with self._lock:
-            keys = [k for k in self._clients if k[0] == context_name]
-            for k in keys:
-                to_close.append(self._clients.pop(k))
-        for old in to_close:
+            self._context_client_epochs[context_name] = self._context_client_epochs.get(context_name, 0) + 1
+            old = self._clients.pop(key, None)
+            self._client_generations.pop(key, None)
+            self._client_epochs.pop(key, None)
+            self._client_threads.pop(key, None)
+        if old is not None:
             try:
                 old.close()
             except Exception:
                 pass
 
     def _init_semaphores(self, limit: int) -> None:
-        new_semaphores: dict[str, threading.BoundedSemaphore] = {}
-        for ctx_name in self._context_configs:
-            new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
+        """Configure the per-process create limit for each current context.
 
-        self._semaphores = new_semaphores
+        This deliberately does not pretend to be a distributed semaphore:
+        every CTFd process enforces its own limit. Preserve matching objects
+        across settings reloads so in-flight acquisitions remain in the same
+        semaphore generation.
+        """
+        with self._lock:
+            old_semaphores = self._semaphores
+            old_limits = self._semaphore_limits
+            new_semaphores: dict[str, threading.BoundedSemaphore] = {}
+            for ctx_name in self._context_configs:
+                old = old_semaphores.get(ctx_name)
+                if old is not None and old_limits.get(ctx_name) == limit:
+                    new_semaphores[ctx_name] = old
+                else:
+                    new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
 
-    def acquire_semaphore(self, context_name: str, timeout: int = 10) -> bool:
-        sem = self._semaphores.get(context_name)
+            self._semaphores = new_semaphores
+            self._semaphore_limits = dict.fromkeys(new_semaphores, limit)
+
+    def acquire_semaphore(self, context_name: str, timeout: int = 10) -> threading.BoundedSemaphore | None:
+        """Acquire and return the exact semaphore object that must be released."""
+        with self._lock:
+            sem = self._semaphores.get(context_name)
         if sem is None:
-            return True
+            return None
 
         acquired = sem.acquire(blocking=True, timeout=timeout)
         if not acquired:
             raise Exception("server busy, please try again shortly")
-        return True
+        return sem
 
-    def release_semaphore(self, context_name: str) -> None:
-        sem = self._semaphores.get(context_name)
+    def release_semaphore(self, semaphore: threading.BoundedSemaphore | str | None) -> None:
+        """Release an acquisition token.
+
+        A context name remains accepted for compatibility, but new callers
+        must pass the object returned by :meth:`acquire_semaphore`. Looking up
+        by name cannot provide generation-safe ownership across a reload.
+        """
+        if isinstance(semaphore, str):
+            with self._lock:
+                sem = self._semaphores.get(semaphore)
+        else:
+            sem = semaphore
         if sem is not None:
             try:
                 sem.release()
@@ -323,6 +491,7 @@ class DockerHostManager:
 
         new_configs: dict[str, str] = {}
         new_pub_hostnames: dict[str, str] = {}
+        new_connected_contexts: set[str] = set()
 
         effective_profile = get_all_settings()
         rd_network = str(effective_profile["rd_network_name"] or "bridge")
@@ -339,10 +508,17 @@ class DockerHostManager:
                 logger.error(f"invalid public hostname for context '{ctx.context_name}': {exc}")
                 continue
 
+            # Retain every syntactically resolved configuration regardless of
+            # this one probe's result. Otherwise a runner that is briefly down
+            # during startup disappears from the endpoint catalog, and the
+            # periodic health check has no URL with which to recover it.
+            new_configs[ctx.context_name] = endpoint
+            new_pub_hostnames[ctx.context_name] = public_hostname
+
             def _check(endpoint=endpoint, ctx_name=ctx.context_name):
                 client = None
                 try:
-                    client = docker.DockerClient(base_url=endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
+                    client = _new_docker_client(endpoint, timeout=DEFAULT_CLIENT_TIMEOUT)
                     client.ping()
                     if rd_network != "bridge":
                         try:
@@ -382,21 +558,21 @@ class DockerHostManager:
                 err = e
 
             if err is None:
-                new_configs[ctx.context_name] = endpoint
-                new_pub_hostnames[ctx.context_name] = public_hostname
+                new_connected_contexts.add(ctx.context_name)
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
             else:
                 logger.error(f"could not connect to context '{ctx.context_name}': {err}")
 
-        with self._lock:
-            self._context_configs = new_configs
-            self._pub_hostnames = new_pub_hostnames
-            self._config_generation += 1
-
         create_limit = effective_profile["max_concurrent_creates"]
         if type(create_limit) is not int:
             raise ValueError("max_concurrent_creates must be an integer")
-        self._init_semaphores(create_limit)
+
+        with self._lock:
+            self._context_configs = new_configs
+            self._pub_hostnames = new_pub_hostnames
+            self._connected_contexts = new_connected_contexts
+            self._config_generation += 1
+            self._init_semaphores(create_limit)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
         with self._lock:
@@ -423,16 +599,29 @@ class DockerHostManager:
 
     def get_connected_contexts(self) -> list[str]:
         with self._lock:
-            return list(self._context_configs)
+            return [name for name in self._context_configs if name in self._connected_contexts]
 
     def ping(self, context_name: str) -> bool:
         # use a fresh ephemeral client. cached clients share paramiko transports
         # that wedge on dead-but-unreaped TCP sockets after idle periods, blocking
         # the 30s health_check past its interval for the full kernel retransmit cycle
-        url = self._context_configs.get(context_name)
+        with self._lock:
+            url = self._context_configs.get(context_name)
         if not url:
             return False
-        if ping_endpoint(url, timeout=3):
+        reachable = ping_endpoint(url, timeout=3)
+        # Do not let a probe of a retired/replaced endpoint overwrite the new
+        # catalog's reachability state when it completes after a reload.
+        with self._lock:
+            endpoint_is_current = self._context_configs.get(context_name) == url
+            if endpoint_is_current:
+                if reachable:
+                    self._connected_contexts.add(context_name)
+                else:
+                    self._connected_contexts.discard(context_name)
+        if not endpoint_is_current:
+            return False
+        if reachable:
             return True
         self._clear_client(context_name)
         return False

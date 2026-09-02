@@ -37,7 +37,6 @@ def _host_manager():
     manager = DockerHostManager()
     manager._context_configs = {"runner-a": "unix:///fake.sock"}
     manager._config_generation = 1
-    manager._client_generation = 1
     return manager
 
 

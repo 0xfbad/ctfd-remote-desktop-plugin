@@ -49,7 +49,6 @@ def _make_host_manager():
     mgr = DockerHostManager()
     mgr._context_configs = {"ctx1": "unix:///fake.sock"}
     mgr._config_generation = 1
-    mgr._client_generation = 1
     return mgr
 
 
