@@ -145,6 +145,7 @@ def validate_database_schema(app: Any) -> None:
             "content",
         },
         "desktop_settings": {"key", "value"},
+        "desktop_plugin_metadata": {"key", "value"},
         "desktop_event_log": {
             "id",
             "event_id",
@@ -249,6 +250,10 @@ def validate_database_schema(app: Any) -> None:
             "key": (False, ("char", "string"), 512),
             "value": (True, ("text",), None),
         },
+        "desktop_plugin_metadata": {
+            "key": (False, ("char", "string"), 128),
+            "value": (False, ("char", "string"), 512),
+        },
         "desktop_event_log": {
             "id": (False, ("int",), None),
             "event_id": (False, ("char", "string"), 128),
@@ -305,6 +310,7 @@ def validate_database_schema(app: Any) -> None:
         "desktop_session_operations": ("user_id",),
         "desktop_reports": ("id",),
         "desktop_settings": ("key",),
+        "desktop_plugin_metadata": ("key",),
         "desktop_event_log": ("id",),
     }
     for table, expected_columns in expected_primary_keys.items():

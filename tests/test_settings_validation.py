@@ -210,16 +210,65 @@ def test_initialize_settings_seeds_missing_defaults_and_canonicalizes_numbers():
 
     with (
         patch("models.DesktopSettingsModel") as model,
+        patch("models.DesktopPluginMetadataModel") as metadata_model,
         patch.object(models.db.session, "add") as add,
         patch.object(models.db.session, "commit") as commit,
     ):
         model.query = query
+        metadata_model.query.filter_by.return_value.first.return_value = None
         models.initialize_settings()
 
     assert bool_row.value == "true"
     assert cpu_row.value == "2.0"
     assert add.call_count >= len(settings.PUBLIC_SETTING_KEYS) - 2
     commit.assert_called_once()
+
+
+def test_initialize_settings_migrates_only_exact_contract_one_defaults():
+    cap_row = SimpleNamespace(
+        key="cap_add",
+        value="CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE",
+    )
+    readiness_row = SimpleNamespace(key="vnc_ready_attempts", value="180")
+    revision, rows = _stored_rows(cap_row, readiness_row)
+    query = _mock_settings_query(rows, revision)
+
+    with (
+        patch("models.DesktopSettingsModel") as model,
+        patch("models.DesktopPluginMetadataModel") as metadata_model,
+        patch.object(models.db.session, "add") as add,
+    ):
+        model.query = query
+        metadata_model.query.filter_by.return_value.first.return_value = None
+        models.initialize_settings()
+
+    assert cap_row.value == settings.SETTING_DEFAULTS["cap_add"]
+    assert readiness_row.value == str(settings.SETTING_DEFAULTS["vnc_ready_attempts"])
+    assert revision.value == "2"
+    assert any(
+        call.kwargs == {"key": "settings_schema_version", "value": "2"}
+        for call in metadata_model.call_args_list
+    )
+    assert add.called
+
+
+def test_initialize_settings_preserves_custom_legacy_profile_values():
+    cap_row = SimpleNamespace(key="cap_add", value="NET_RAW")
+    readiness_row = SimpleNamespace(key="vnc_ready_attempts", value="240")
+    revision, rows = _stored_rows(cap_row, readiness_row)
+    query = _mock_settings_query(rows, revision)
+
+    with (
+        patch("models.DesktopSettingsModel") as model,
+        patch("models.DesktopPluginMetadataModel") as metadata_model,
+    ):
+        model.query = query
+        metadata_model.query.filter_by.return_value.first.return_value = None
+        models.initialize_settings()
+
+    assert cap_row.value == "NET_RAW"
+    assert readiness_row.value == "240"
+    assert revision.value == "1"
 
 
 def test_unknown_persisted_row_fails_startup_normalization():

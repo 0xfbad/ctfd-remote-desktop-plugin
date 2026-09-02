@@ -63,7 +63,11 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "initial_duration": _spec(3600, minimum=60, maximum=604800),
     "extension_duration": _spec(1800, minimum=0, maximum=604800),
     "max_extensions": _spec(3, minimum=0, maximum=100),
-    "vnc_ready_attempts": _spec(180, minimum=1, maximum=3600),
+    # The image deliberately withholds noVNC until Xvnc, the XFCE session,
+    # window manager, and panel have each passed their bounded startup gate.
+    # At the 0.5s polling interval, 420 attempts gives that 150s worst-case
+    # phase budget another minute of host-load/key-generation headroom.
+    "vnc_ready_attempts": _spec(420, minimum=1, maximum=3600),
     "http_request_timeout": _spec(3, minimum=1, maximum=120),
     "cleanup_interval": _spec(300, minimum=5, maximum=86400, restart_required=True),
     "pids_limit": _spec(4096, minimum=64, maximum=1048576),
@@ -72,7 +76,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "require_verified": _spec(True),
     "cap_drop": _spec("ALL", max_length=512),
     "cap_add": _spec(
-        "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE",
+        "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE,SYS_CHROOT",
         max_length=512,
         allow_empty=True,
     ),

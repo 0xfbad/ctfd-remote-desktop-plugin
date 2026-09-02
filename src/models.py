@@ -227,6 +227,19 @@ class DesktopSettingsModel(db.Model):
     value = db.Column(db.Text)
 
 
+class DesktopPluginMetadataModel(db.Model):
+    """Version markers kept outside strict settings for rollback safety.
+
+    Contract-1 plugin binaries reject unknown ``desktop_settings`` keys at
+    startup. They safely ignore this additive table, so a code rollback does
+    not require emergency settings-row surgery.
+    """
+
+    __tablename__ = "desktop_plugin_metadata"
+    key = db.Column(db.String(128), primary_key=True)
+    value = db.Column(db.String(512), nullable=False)
+
+
 class DesktopEventLogModel(db.Model):
     __tablename__ = "desktop_event_log"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -302,6 +315,33 @@ def initialize_settings() -> None:
     _ensure_revision_row()
     try:
         effective, by_key, revision = _locked_profile()
+        schema_row = DesktopPluginMetadataModel.query.filter_by(key="settings_schema_version").first()
+        try:
+            schema_version = int(str(schema_row.value)) if schema_row is not None else 1
+        except (TypeError, ValueError) as exc:
+            raise SettingsValidationError("invalid settings schema version") from exc
+        if schema_version < 1 or schema_version > 2:
+            raise SettingsValidationError("unsupported settings schema version")
+        public_profile_migrated = False
+        if schema_version < 2:
+            # Settings schema 2 adds SYS_CHROOT for su/runuser and a readiness
+            # budget longer than the image's serial bounded startup gates.
+            # Upgrade only rows equal to the exact v1 defaults so deliberate
+            # operator overrides survive unchanged.
+            legacy_cap_add = "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE"
+            cap_row = by_key.get("cap_add")
+            if cap_row is not None and decode_stored_setting("cap_add", cap_row.value) == legacy_cap_add:
+                effective["cap_add"] = SETTING_DEFAULTS["cap_add"]
+                public_profile_migrated = True
+            readiness_row = by_key.get("vnc_ready_attempts")
+            if (
+                readiness_row is not None
+                and decode_stored_setting("vnc_ready_attempts", readiness_row.value) == 180
+            ):
+                effective["vnc_ready_attempts"] = SETTING_DEFAULTS["vnc_ready_attempts"]
+                public_profile_migrated = True
+            schema_version = 2
+
         for key, value in effective.items():
             canonical = serialize_setting(key, value)
             row = by_key.get(key)
@@ -314,9 +354,17 @@ def initialize_settings() -> None:
             row = by_key.get(key)
             if row is not None:
                 row.value = serialize_setting(key, decode_stored_setting(key, row.value))
-        revision.value = serialize_setting(
-            "_settings_revision", decode_stored_setting("_settings_revision", revision.value)
-        )
+        if schema_row is None:
+            db.session.add(
+                DesktopPluginMetadataModel(key="settings_schema_version", value=str(schema_version))
+            )
+        else:
+            schema_row.value = str(schema_version)
+
+        revision_number = int(str(decode_stored_setting("_settings_revision", revision.value)))
+        if public_profile_migrated:
+            revision_number = 1 if revision_number >= 2147483647 else revision_number + 1
+        revision.value = serialize_setting("_settings_revision", revision_number)
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -324,20 +372,21 @@ def initialize_settings() -> None:
 
 
 def set_setting(key: str, value: SettingValue) -> None:
-    """Persist an explicitly classified internal setting."""
+    """Persist an explicitly classified, non-runtime internal setting."""
     if key != "image_cache":
         raise SettingsValidationError(f"setting {key!r} is not writable through the internal settings path")
     parsed = validate_setting_value(key, value)
     _ensure_revision_row()
     try:
-        _effective, by_key, revision = _locked_profile()
+        _effective, by_key, _revision = _locked_profile()
         row = by_key.get(key)
         if row is None:
             db.session.add(DesktopSettingsModel(key=key, value=serialize_setting(key, parsed)))
         else:
             row.value = serialize_setting(key, parsed)
-        revision_number = int(str(decode_stored_setting("_settings_revision", revision.value)))
-        revision.value = str(1 if revision_number >= 2147483647 else revision_number + 1)
+        # image_cache is diagnostics only. Keep the revision row locked as the
+        # cross-worker write mutex, but do not advance the runtime revision or
+        # admission-fenced workers would reload on every matrix GET.
         db.session.commit()
     except Exception:
         db.session.rollback()

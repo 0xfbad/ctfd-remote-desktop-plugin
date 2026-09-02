@@ -147,6 +147,7 @@ def test_two_workers_bootstrap_the_fresh_schema_and_constraints() -> None:
             "desktop_session_history",
             "desktop_session_operations",
             "desktop_settings",
+            "desktop_plugin_metadata",
             "desktop_event_log",
         } <= tables
 
