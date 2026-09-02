@@ -57,7 +57,13 @@ def _base_settings(**overrides):
     return settings
 
 
-def _run_background_create(settings, ports_return):
+def _run_background_create(
+    settings,
+    ports_return,
+    resolved_username="alice",
+    resolved_error=None,
+    minted_cookie=None,
+):
     """drive the real _create_container_background with a mocked host_manager;
     returns (run_container kwargs, patched DesktopContainerInfoModel mock)"""
     cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
@@ -69,8 +75,10 @@ def _run_background_create(settings, ports_return):
     }
     cm.host_manager.exec_in_container.return_value = (0, "")
     cm.orchestrator.select_and_reserve.return_value = "alpha"
-    cm.host_manager.get_pub_hostname.return_value = "alpha.example.com"
-    cm.host_manager.get_check_hostname.return_value = "alpha.example.com"
+    cm.host_manager.get_connection_hostnames.return_value = (
+        "alpha.example.com",
+        "alpha.example.com",
+    )
 
     user = MagicMock()
     user.id = 1
@@ -78,9 +86,15 @@ def _run_background_create(settings, ports_return):
     user.email = "alice@example.com"
 
     with (
-        patch("container_manager._mint_session_cookie", return_value=None),
+        patch("container_manager._mint_session_cookie", return_value=minted_cookie),
         patch.object(cm, "_get_setting", side_effect=lambda k: settings.get(k)),
         patch.object(cm, "wait_for_vnc_ready", return_value=True),
+        patch.object(
+            cm,
+            "_read_resolved_username",
+            return_value=resolved_username,
+            side_effect=resolved_error,
+        ),
         patch("container_manager._display_name", return_value=(user, "alice")),
         patch("container_manager.DesktopContainerInfoModel") as model,
         patch("container_manager.db"),
@@ -89,7 +103,7 @@ def _run_background_create(settings, ports_return):
         cm._create_container_background(user_id=1, container_url="http://ctfd", extra_hosts=None)
 
     cm.host_manager.run_container.assert_called_once()
-    return cm.host_manager.run_container.call_args.kwargs, model
+    return cm, cm.host_manager.run_container.call_args.kwargs, model
 
 
 @pytest.mark.parametrize("ssh,ttyd", [(True, True), (False, True), (True, False), (False, False)])
@@ -100,19 +114,20 @@ def test_create_call_ports_env_and_row_agree(ssh, ttyd):
     ports_return = {p: port_numbers[p] for p in expected_ports}
 
     settings = _base_settings(ssh_enabled=ssh, web_terminal_enabled=ttyd)
-    kwargs, model = _run_background_create(settings, ports_return)
+    _cm, kwargs, model = _run_background_create(settings, ports_return)
 
     assert kwargs["ports"] == expected_ports
     assert kwargs["env"]["ENABLE_SSH"] == ("1" if ssh else "0")
     assert kwargs["env"]["ENABLE_TTYD"] == ("1" if ttyd else "0")
 
     row_kwargs = model.call_args.kwargs
+    assert row_kwargs["vnc_port"] == 5900
     assert row_kwargs["ssh_port"] == (port_numbers["22/tcp"] if ssh else None)
     assert row_kwargs["ttyd_port"] == (port_numbers["7682/tcp"] if ttyd else None)
 
 
 def test_create_call_applies_immutable_orphan_ownership_labels():
-    kwargs, model = _run_background_create(
+    _cm, kwargs, model = _run_background_create(
         _base_settings(),
         {"5900/tcp": 40001, "6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004},
     )
@@ -122,6 +137,17 @@ def test_create_call_applies_immutable_orphan_ownership_labels():
         SESSION_LABEL_USER_ID: "1",
         SESSION_LABEL_UUID: session_uuid,
     }
+
+
+def test_create_row_uses_image_resolved_username():
+    ports = {"5900/tcp": 40001, "6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004}
+    _cm, kwargs, model = _run_background_create(_base_settings(), ports, resolved_username="student_tcpdump")
+
+    # The requested display-name slug is still what the image receives, but
+    # SSH/UI instructions use the collision-safe account selected by startup.
+    assert kwargs["env"]["CTFD_USERNAME"] == "alice"
+    assert model.call_args.kwargs["container_username"] == "student_tcpdump"
+    assert "SHELL_LOGGING" not in kwargs["env"]
 
 
 # -- 3. settings -------------------------------------------------------------

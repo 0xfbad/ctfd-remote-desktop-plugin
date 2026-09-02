@@ -123,6 +123,8 @@ _RESERVED_NAMES = {
 CreationStatusDict = dict[str, str]
 ContainerInfoDict = dict[str, str | int | float | None]
 TimerDict = dict[str, bool | int]
+_RESOLVED_USERNAME_ATTEMPTS = 3
+_RESOLVED_USERNAME_RETRY_DELAY_SECONDS = 0.2
 TimerStatusDict = dict[str, bool | int | str]
 ResultDict = dict[str, bool | str | int]
 ContainerListEntry = dict[str, str | int | float | bool | TimerDict | None]
@@ -388,6 +390,55 @@ class ContainerManager:
             return _sanitize_username(user.email.split("@")[0], user.id)
         return _sanitize_username(user.name, user.id)
 
+    def _read_resolved_username(self, context_name: str, container_name: str) -> str:
+        """Read the image's authoritative Linux account name.
+
+        The base image contains system accounts that a display-name sanitizer
+        cannot predict. The image resolves those collisions and persists the
+        result, so silently retaining the requested name would publish invalid
+        SSH credentials to the user.
+        """
+        command = [
+            "/bin/bash",
+            "-c",
+            "/usr/local/bin/remote-desktop-healthcheck && cat -- /var/lib/remote-desktop/resolved-username",
+        ]
+        last_exception: Exception | None = None
+        for attempt in range(_RESOLVED_USERNAME_ATTEMPTS):
+            try:
+                code, output = self.host_manager.exec_in_container(
+                    context_name,
+                    container_name,
+                    command,
+                )
+            except Exception as exc:
+                last_exception = exc
+                code, output = -1, ""
+
+            if code != -1:
+                break
+            if attempt < _RESOLVED_USERNAME_ATTEMPTS - 1:
+                time.sleep(_RESOLVED_USERNAME_RETRY_DELAY_SECONDS)
+        else:
+            if last_exception is not None:
+                raise RuntimeError("desktop image did not publish its resolved Linux username") from last_exception
+            raise RuntimeError("desktop image did not publish its resolved Linux username")
+
+        if code != 0:
+            raise RuntimeError("desktop image did not publish its resolved Linux username or pass its health check")
+        if isinstance(output, bytes):
+            try:
+                output = output.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise RuntimeError("desktop image returned an invalid Linux username") from exc
+        if not isinstance(output, str) or len(output) > 128:
+            raise RuntimeError("desktop image returned an invalid Linux username")
+
+        resolved = output[:-1] if output.endswith("\n") else output
+        if re.fullmatch(r"[a-z_][a-z0-9_]{0,31}", resolved) is None:
+            raise RuntimeError("desktop image returned an invalid Linux username")
+        return resolved
+
     def wait_for_vnc_ready(
         self,
         hostname: str,
@@ -609,6 +660,7 @@ class ContainerManager:
             if not vnc_ready:
                 raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
 
+            container_username = self._read_resolved_username(context_name, container_name)
             vnc_url = proxy_vnc_url(user_id, vnc_password)
 
             # Check both the durable cross-worker cancellation flag and the

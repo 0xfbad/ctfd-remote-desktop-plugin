@@ -8,6 +8,7 @@ CTFd plugin for on-demand Docker desktop sessions. Users can open a browser desk
 - A local Docker Engine Unix socket accessible to the CTFd container
 - A desktop image available to Docker that listens for noVNC on 6080 and container-internal VNC on 5900; ttyd on 7682 and SSH on 22 are optional
 - The image must accept `CTFD_USERNAME`, `VNC_PASSWORD`, `RESOLUTION`, and `MAX_LIFETIME`. It may use `CTFD_URL`, `CTFD_COOKIE_NAME`, and `CTFD_COOKIE_VALUE` for CTFd autologin.
+- Before noVNC reports ready, the image must atomically publish the actual Linux account name as a single `^[a-z_][a-z0-9_]{0,31}$` line at `/var/lib/remote-desktop/resolved-username`. Missing or invalid handoff data fails creation so the UI never advertises incorrect SSH credentials.
 
 The repository does not build or publish the desktop image. The plugin starts disabled so an administrator can set and verify the image before allowing sessions.
 
