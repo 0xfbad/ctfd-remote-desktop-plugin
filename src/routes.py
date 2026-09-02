@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import time
 import datetime
 import logging
@@ -506,25 +507,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
     @admins_only
     def admin_peek_session():
-        admin_user = get_current_user()
-        user_id = request.form.get("user_id", type=int)
-        if user_id is None:
-            return jsonify({"error": "user_id must be an integer"}), 400
-        target_user = Users.query.filter_by(id=user_id).first()
-        if not target_user:
-            return jsonify({"error": "User not found"}), 404
-        target_username = username_or_fallback(target_user, user_id)
-
-        _log_admin_target_action(
-            admin_user,
-            f"admin {admin_user.name} viewing session for {target_username}",
-            "peek",
-            user_id,
-            target_username,
-            target_user,
-            level="info",
-        )
-        return jsonify({"success": True})
+        # Same-origin admin monitoring would forward the administrator's CTFd
+        # cookie to student-controlled noVNC assets. Keep the legacy endpoint
+        # fail-closed for cached dashboards until monitoring has a separate,
+        # trusted origin/client boundary.
+        return jsonify({"error": "Cross-user session monitoring is disabled"}), 403
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/extend", methods=["POST"])
     @admins_only
@@ -864,7 +851,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         )
 
     def _proxy_auth(
-        user_id_header: str, port_attr: str, host_header: str, port_header: str
+        user_id_header: str,
+        port_attr: str,
+        host_header: str,
+        port_header: str,
+        authorization_header: str | None = None,
     ) -> Response | tuple[str, int]:
         from .models import DesktopContainerInfoModel, LIFECYCLE_ACTIVE
 
@@ -877,11 +868,15 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except (ValueError, TypeError):
             return "", 400
         current_user = get_current_user()
-        if current_user.id != user_id and not is_admin():
+        # Administrators may connect to their own desktop, but cross-user
+        # access is deliberately disabled until it can use a separate origin
+        # and a trusted viewer rather than student-controlled web content.
+        if current_user.id != user_id:
             return "", 403
 
-        # auth_request fires on every static asset, keep it db-only
-        # liveness reap happens via /api/status calling get_container_info
+        # auth_request fires on every static asset. Liveness reap happens via
+        # /api/status; this path only reads the session row and the host
+        # manager's in-memory context snapshot.
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         port = getattr(row, port_attr, None) if row else None
         lifecycle_state = getattr(row, "lifecycle_state", LIFECYCLE_ACTIVE) if row else None
@@ -890,13 +885,32 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not row or lifecycle_state != LIFECYCLE_ACTIVE or port is None:
             return "", 404
 
-        check_hostname = container_manager.host_manager.get_check_hostname(row.docker_context)
-        if not check_hostname:
+        # The public address stored on the session is for the user's browser.
+        # CTFd itself reaches published ports through the Docker bridge gateway
+        # for a local unix-socket context, and through the configured runner for
+        # a remote context. Context endpoint edits are fenced while work exists,
+        # so this in-memory lookup cannot redirect an active session.
+        try:
+            docker_context = getattr(row, "docker_context", None)
+            if not isinstance(docker_context, str) or not docker_context:
+                return "", 502
+            check_hostname = container_manager.host_manager.get_check_hostname(docker_context)
+            if not isinstance(check_hostname, str) or not check_hostname:
+                return "", 502
+        except Exception:
+            logger.exception("failed to resolve internal proxy host for user %s", user_id)
             return "", 502
 
         resp = Response("", 200)
         resp.headers[host_header] = check_hostname
         resp.headers[port_header] = str(port)
+        if authorization_header is not None:
+            username = getattr(row, "container_username", None)
+            password = getattr(row, "vnc_password", None)
+            if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
+                return "", 502
+            token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            resp.headers[authorization_header] = f"Basic {token}"
         return resp
 
     @remote_desktop_bp.route("/remote-desktop/vnc/auth", methods=["GET"])
@@ -907,7 +921,13 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/terminal/auth", methods=["GET"])
     @authed_only
     def terminal_auth():
-        return _proxy_auth("X-Terminal-User-ID", "ttyd_port", "X-Terminal-Host", "X-Terminal-Port")
+        return _proxy_auth(
+            "X-Terminal-User-ID",
+            "ttyd_port",
+            "X-Terminal-Host",
+            "X-Terminal-Port",
+            "X-Terminal-Authorization",
+        )
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/stats/per-host", methods=["GET"])
     @admins_only

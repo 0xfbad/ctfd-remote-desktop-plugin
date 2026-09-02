@@ -6,7 +6,7 @@ CTFd plugin for on-demand Docker desktop sessions. Users can open a browser desk
 
 - A fresh CTFd checkout using its Docker Compose deployment
 - A local Docker Engine Unix socket accessible to the CTFd container
-- A desktop image available to Docker that exposes noVNC on 6080 and VNC on 5900; ttyd on 7682 and SSH on 22 are optional
+- A desktop image available to Docker that listens for noVNC on 6080 and container-internal VNC on 5900; ttyd on 7682 and SSH on 22 are optional
 - The image must accept `CTFD_USERNAME`, `VNC_PASSWORD`, `RESOLUTION`, and `MAX_LIFETIME`. It may use `CTFD_URL`, `CTFD_COOKIE_NAME`, and `CTFD_COOKIE_VALUE` for CTFd autologin.
 
 The repository does not build or publish the desktop image. The plugin starts disabled so an administrator can set and verify the image before allowing sessions.
@@ -47,7 +47,20 @@ Key defaults:
 | `storage_limit` | empty | Optional Docker writable-layer quota. |
 | `cgroup_parent` | empty | Optional Docker parent cgroup. |
 
-Desktop and browser-terminal traffic is authenticated through nginx `auth_request`. Direct SSH requires the published SSH port to be reachable from the user's machine.
+Desktop and browser-terminal traffic is authorized through nginx `auth_request`.
+The proxy also injects per-session HTTP Basic credentials when connecting to
+ttyd, so discovering its random backend port does not expose an unauthenticated
+writable shell. Docker still publishes the backends on random host ports in
+40000–59999, but production must **not** allow that range wholesale. Docker's
+forwarding firewall sees the destination after DNAT, so match the container
+port: allow 6080 and 7682 only from the CTFd proxy; allow 22 only from intended
+SSH client ranges; and deny other new
+inbound session flows. Install this in `DOCKER-USER` for Docker's iptables
+backend, or an equivalent nftables forward hook, rather than relying on the
+host `INPUT` chain. The plugin does not publish raw VNC/5900; noVNC's
+websockify connection to it stays inside the container. Per-session bridge
+isolation remains deployment work rather than a property of the current shared
+`bridge` default.
 
 ## Development
 

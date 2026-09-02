@@ -50,12 +50,26 @@ def _invoke_missing_user(handler):
         return handler(), logger
 
 
-@pytest.mark.parametrize("name", ["kill", "peek", "extend"])
+@pytest.mark.parametrize("name", ["kill", "extend"])
 def test_admin_action_returns_404_when_target_missing(handlers, name):
     (result, logger) = _invoke_missing_user(handlers[name])
     payload, status = result
     assert status == 404
     assert payload == {"error": "User not found"}
+    logger.log_event.assert_not_called()
+
+
+def test_admin_monitoring_endpoint_is_disabled_without_target_lookup_or_logging(handlers):
+    with (
+        patch("routes.Users") as users,
+        patch("routes.jsonify", side_effect=lambda payload: payload),
+        patch("routes.event_logger") as logger,
+    ):
+        payload, status = handlers["peek"]()
+
+    assert status == 403
+    assert payload == {"error": "Cross-user session monitoring is disabled"}
+    users.query.filter_by.assert_not_called()
     logger.log_event.assert_not_called()
 
 

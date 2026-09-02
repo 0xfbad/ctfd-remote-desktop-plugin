@@ -23,10 +23,10 @@ TEMPLATES = Path(__file__).resolve().parent.parent / "src" / "templates"
 @pytest.mark.parametrize(
     "ssh,ttyd,expected",
     [
-        (True, True, ["5900/tcp", "6080/tcp", "22/tcp", "7682/tcp"]),
-        (False, True, ["5900/tcp", "6080/tcp", "7682/tcp"]),
-        (True, False, ["5900/tcp", "6080/tcp", "22/tcp"]),
-        (False, False, ["5900/tcp", "6080/tcp"]),
+        (True, True, ["6080/tcp", "22/tcp", "7682/tcp"]),
+        (False, True, ["6080/tcp", "7682/tcp"]),
+        (True, False, ["6080/tcp", "22/tcp"]),
+        (False, False, ["6080/tcp"]),
     ],
 )
 def test_connection_ports_matrix(ssh, ttyd, expected):
@@ -192,6 +192,97 @@ def test_terminal_auth_404_when_ttyd_port_null():
     cm.host_manager.get_check_hostname.assert_not_called()
 
 
+def test_terminal_auth_uses_internal_context_host_and_injects_upstream_basic_auth():
+    from types import SimpleNamespace
+
+    from routes import create_routes
+
+    class FakeResponse:
+        def __init__(self, _body, _status):
+            self.headers = {}
+
+    cm = MagicMock()
+    cm.host_manager.get_check_hostname.return_value = "172.18.0.1"
+    bp = create_routes(cm, MagicMock())
+    handler = _get_handler(bp, "terminal_auth")
+    row = SimpleNamespace(
+        ttyd_port=40003,
+        lifecycle_state="active",
+        docker_context="alpha",
+        pub_hostname="RUNNER.Example.EDU",
+        container_username="student_root",
+        vnc_password="ttydpw1",
+    )
+
+    with (
+        patch("routes.request") as req,
+        patch("routes.get_current_user", return_value=MagicMock(id=7)),
+        patch("routes.Response", FakeResponse),
+        patch("models.DesktopContainerInfoModel") as model,
+    ):
+        req.headers.get.return_value = "7"
+        model.query.filter_by.return_value.first.return_value = row
+        result = handler()
+
+    assert result.headers == {
+        "X-Terminal-Host": "172.18.0.1",
+        "X-Terminal-Port": "40003",
+        "X-Terminal-Authorization": "Basic c3R1ZGVudF9yb290OnR0eWRwdzE=",
+    }
+    cm.host_manager.get_check_hostname.assert_called_once_with("alpha")
+
+
+@pytest.mark.parametrize("handler_name", ["vnc_auth", "terminal_auth"])
+def test_proxy_auth_denies_cross_user_admin_before_backend_lookup(handler_name):
+    from routes import create_routes
+
+    cm = MagicMock()
+    handler = _get_handler(create_routes(cm, MagicMock()), handler_name)
+
+    with (
+        patch("routes.request") as req,
+        patch("routes.get_current_user", return_value=MagicMock(id=1)),
+        patch("routes.is_admin", return_value=True),
+        patch("models.DesktopContainerInfoModel") as model,
+    ):
+        req.headers.get.return_value = "7"
+        assert handler() == ("", 403)
+
+    model.query.filter_by.assert_not_called()
+    cm.host_manager.get_check_hostname.assert_not_called()
+
+
+def test_vnc_proxy_auth_preserves_owner_access():
+    from types import SimpleNamespace
+
+    from routes import create_routes
+
+    class FakeResponse:
+        def __init__(self, _body, _status):
+            self.headers = {}
+
+    cm = MagicMock()
+    cm.host_manager.get_check_hostname.return_value = "172.18.0.1"
+    handler = _get_handler(create_routes(cm, MagicMock()), "vnc_auth")
+    row = SimpleNamespace(
+        novnc_port=40002,
+        lifecycle_state="active",
+        docker_context="alpha",
+    )
+
+    with (
+        patch("routes.request") as req,
+        patch("routes.get_current_user", return_value=MagicMock(id=7)),
+        patch("routes.Response", FakeResponse),
+        patch("models.DesktopContainerInfoModel") as model,
+    ):
+        req.headers.get.return_value = "7"
+        model.query.filter_by.return_value.first.return_value = row
+        result = handler()
+
+    assert result.headers == {"X-VNC-Host": "172.18.0.1", "X-VNC-Port": "40002"}
+
+
 def test_remote_desktop_page_passes_toggle_kwargs_to_template():
     from routes import create_routes
 
@@ -280,3 +371,9 @@ def test_config_page_has_toggle_checkboxes_and_setting_keys():
     keys_src = text[start:end]
     assert "'ssh_enabled'" in keys_src
     assert "'web_terminal_enabled'" in keys_src
+
+
+def test_admin_dashboard_has_no_cross_user_monitor_action():
+    text = (TEMPLATES / "remote_desktop_dashboard.html").read_text()
+    assert "peekVNC" not in text
+    assert "/remote-desktop/dashboard/api/peek" not in text

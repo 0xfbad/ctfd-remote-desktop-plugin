@@ -141,9 +141,9 @@ def _sanitize_username(raw: str, user_id: int | None = None) -> str:
 
 
 def _connection_ports(ssh_enabled: bool, web_terminal_enabled: bool) -> list[str]:
-    # VNC/noVNC are mandatory (the readiness gate polls 6080 and the columns
-    # are NOT NULL); ssh and the web terminal are per-deployment toggles
-    ports = ["5900/tcp", "6080/tcp"]
+    # noVNC is mandatory (the readiness gate polls 6080). Xvnc's 5900 listener
+    # stays container-internal for websockify and is never published raw.
+    ports = ["6080/tcp"]
     if ssh_enabled:
         ports.append("22/tcp")
     if web_terminal_enabled:
@@ -579,7 +579,9 @@ class ContainerManager:
             port_map: dict[str, int] = result["ports"]  # type: ignore[assignment]
             container_id = str(result["container_id"])
             ssh_port = port_map.get("22/tcp")
-            vnc_port = port_map["5900/tcp"]
+            # Kept non-null for the existing schema. This is now the internal
+            # Xvnc listener, not a published host port.
+            vnc_port = 5900
             novnc_port = port_map["6080/tcp"]
             ttyd_port = port_map.get("7682/tcp")
 
@@ -1222,10 +1224,7 @@ class ContainerManager:
                 "paused": bool(row.paused_at),
                 "lifecycle_state": self._row_lifecycle_state(row),
                 "created_at": row.created_at,
-                "vnc_port": row.vnc_port,
                 "novnc_port": row.novnc_port,
-                "vnc_password": row.vnc_password,
-                "vnc_url": proxy_vnc_url(row.user_id, row.vnc_password),
                 "timer": self._timer_from_row(row),
             }
             containers.append(container_data)

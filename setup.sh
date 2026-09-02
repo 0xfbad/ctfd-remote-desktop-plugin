@@ -476,6 +476,11 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host $host;
+      # Never expose the CTFd browser session or client credentials to the
+      # per-session noVNC backend, whose static files are container-controlled.
+      proxy_set_header Cookie "";
+      proxy_set_header Authorization "";
+      proxy_set_header Proxy-Authorization "";
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
@@ -483,6 +488,7 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_send_timeout 86400s;
       proxy_buffering off;
       proxy_cache off;
+      proxy_hide_header Set-Cookie;
       add_header Cache-Control "no-store";
     }
 
@@ -504,15 +510,21 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       auth_request /remote-desktop/terminal/auth;
       auth_request_set $terminal_host $upstream_http_x_terminal_host;
       auth_request_set $terminal_port $upstream_http_x_terminal_port;
+      auth_request_set $terminal_authorization $upstream_http_x_terminal_authorization;
 
       proxy_pass http://$terminal_host:$terminal_port/$terminal_path$is_args$args;
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
+      # Preserve an explicit public port so ttyd's Origin check sees the same
+      # authority the browser sent (for example https://ctfd.example:8443).
+      proxy_set_header Host $http_host;
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header Cookie "";
+      proxy_set_header Authorization $terminal_authorization;
+      proxy_set_header Proxy-Authorization "";
       proxy_set_header Accept-Encoding "";
       gunzip on;
 
@@ -524,6 +536,7 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_send_timeout 86400s;
       proxy_buffering off;
       proxy_cache off;
+      proxy_hide_header Set-Cookie;
       add_header Cache-Control "no-store";
     }
 
@@ -578,6 +591,12 @@ validate_managed_nginx_config() {
         [ "$(fixed_count 'location = /remote-desktop/vnc/auth' "$candidate")" -eq 1 ] &&
         [ "$(fixed_count 'location ~ ^/remote-desktop/terminal/' "$candidate")" -eq 1 ] &&
         [ "$(fixed_count 'location = /remote-desktop/terminal/auth' "$candidate")" -eq 1 ] &&
+        [ "$(fixed_count 'proxy_set_header Cookie ""' "$candidate")" -eq 2 ] &&
+        [ "$(fixed_count 'proxy_set_header Authorization ""' "$candidate")" -eq 1 ] &&
+        [ "$(fixed_count 'proxy_set_header Proxy-Authorization ""' "$candidate")" -eq 2 ] &&
+        [ "$(fixed_count "proxy_set_header Authorization \$terminal_authorization" "$candidate")" -eq 1 ] &&
+        [ "$(fixed_count 'proxy_hide_header Set-Cookie' "$candidate")" -eq 2 ] &&
+        [ "$(fixed_count "proxy_set_header Host \$http_host" "$candidate")" -eq 1 ] &&
         [ "$(fixed_count 'location /remote-desktop/static/fonts/' "$candidate")" -eq 1 ]
 }
 

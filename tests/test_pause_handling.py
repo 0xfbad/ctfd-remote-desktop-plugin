@@ -331,6 +331,9 @@ def test_get_all_containers_expired_paused_row_kept_and_flagged(container_manage
     mock_destroy.assert_not_called()
     assert len(containers) == 1
     assert containers[0]["paused"] is True
+    assert "vnc_password" not in containers[0]
+    assert "vnc_url" not in containers[0]
+    assert "vnc_port" not in containers[0]
 
 
 # ---------------------------------------------------------------------------

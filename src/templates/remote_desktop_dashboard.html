@@ -970,9 +970,6 @@
 					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
 					<td><span class="${statusClass}">${status}</span></td>
 					<td class="action-buttons">
-						<button class="btn btn-sm" onclick="peekVNC(${container.user_id})" title="Monitor">
-							<i class="fas fa-eye icon-monitor"></i>
-						</button>
 						${pauseBtn}
 						<button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
 							<i class="fas fa-times icon-kill"></i>
@@ -987,30 +984,6 @@
 			`;
 			tbody.innerHTML += row;
 		});
-	}
-
-	function peekVNC(userId) {
-		const container = activeContainers[userId];
-		if (!container || !container.vnc_url) {
-			CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'VNC unavailable', button: 'OK' });
-			return;
-		}
-
-		const username = container.username || `User ${userId}`;
-		const windowName = `vnc_peek_${userId}`;
-		// password may be in fragment (#), use URL API so view_only goes in query string
-		const peekUrl = new URL(container.vnc_url, window.location.origin);
-		peekUrl.searchParams.set('view_only', 'true');
-		const vncWindow = window.open(peekUrl.toString(), windowName, 'width=1200,height=800,scrollbars=yes,resizable=yes');
-
-		if (!vncWindow) {
-			CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Failed to open VNC (check popup blocker)', button: 'OK' });
-		} else {
-			const fd = new FormData();
-			fd.append('nonce', CTFd.config.csrfNonce);
-			fd.append('user_id', userId);
-			fetch('/remote-desktop/dashboard/api/peek', {method: 'POST', credentials: 'same-origin', body: fd});
-		}
 	}
 
 	function killContainer(userId) {

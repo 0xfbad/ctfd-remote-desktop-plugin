@@ -162,6 +162,13 @@ def test_setup_updates_http_and_https_independently_and_is_idempotent(tmp_path):
         assert content.count("# END CTFD-REMOTE-DESKTOP MANAGED LOCATIONS") == 1
         assert content.count("location ~ ^/remote-desktop/vnc/") == 1
         assert content.count("location ~ ^/remote-desktop/terminal/") == 1
+        assert content.count('proxy_set_header Cookie "";') == 2
+        assert content.count('proxy_set_header Authorization "";') == 1
+        assert content.count('proxy_set_header Proxy-Authorization "";') == 2
+        assert content.count("proxy_set_header Authorization $terminal_authorization;") == 1
+        assert content.count("proxy_hide_header Set-Cookie;") == 2
+        assert content.count("proxy_set_header Cookie $http_cookie;") == 2
+        assert content.count("proxy_set_header Host $http_host;") == 1
         assert content.count("location /remote-desktop/static/fonts/") == 1
         assert content.index("# BEGIN CTFD-REMOTE-DESKTOP") < content.index("location / {")
         assert path.stat().st_ino == original_inodes[path]
