@@ -79,7 +79,7 @@ def test_destroy_orders_remote_confirmation_before_history_and_release(container
         order.append("history")
         return history
 
-    cm.orchestrator.release_slot.side_effect = lambda _ctx: order.append("capacity-release")
+    cm.orchestrator.release_active_slot_in_transaction.side_effect = lambda *_args: order.append("capacity-release")
 
     with (
         patch.object(cm, "_locked_operation", return_value=operation),
@@ -94,7 +94,8 @@ def test_destroy_orders_remote_confirmation_before_history_and_release(container
         result = cm.destroy_container(7)
 
     assert result["success"]
-    assert order == ["docker-stop", "history", "active-delete", "capacity-release"]
+    assert order == ["docker-stop", "capacity-release", "history", "active-delete"]
+    cm.orchestrator.release_slot.assert_not_called()
 
 
 def test_stale_worker_cannot_advance_replaced_creation_lease(container_manager):

@@ -42,6 +42,12 @@ def _patched_run_container(mgr, **overrides):
         }
     }
     mock_client.containers.run.return_value = mock_container
+    resolved_image = MagicMock()
+    resolved_image.id = "sha256:immutable-desktop-image"
+    resolved_image.attrs = {
+        "Config": {"Labels": {"edu.ucsc.ctfd-remote-desktop.contract": "3"}},
+    }
+    mock_client.images.get.return_value = resolved_image
 
     # keyed dispatch: run_container reads many settings now; a blanket
     # return_value would feed e.g. cgroup_parent="4096" into the validators
@@ -79,6 +85,7 @@ def test_run_container_passes_network_kwarg_to_docker():
     mgr = _make_manager()
     call_kwargs = _patched_run_container(mgr, network="ctfd-desktops")
     assert call_kwargs["network"] == "ctfd-desktops"
+    assert call_kwargs["init"] is True
 
 
 def test_run_container_passes_override_network_name():
@@ -148,8 +155,10 @@ def test_container_manager_reads_setting_and_passes_through():
         "ports": {"22/tcp": 1, "5900/tcp": 2, "6080/tcp": 3, "7682/tcp": 4},
     }
     cm.orchestrator.select_and_reserve.return_value = "alpha"
-    cm.host_manager.get_pub_hostname.return_value = "alpha.example.com"
-    cm.host_manager.get_check_hostname.return_value = "alpha.example.com"
+    cm.host_manager.get_connection_hostnames.return_value = (
+        "alpha.example.com",
+        "alpha.example.com",
+    )
 
     user = MagicMock()
     user.id = 1
@@ -160,6 +169,7 @@ def test_container_manager_reads_setting_and_passes_through():
         patch("container_manager._mint_session_cookie", return_value=None),
         patch.object(cm, "_get_setting", side_effect=lambda k: settings.get(k)),
         patch.object(cm, "wait_for_vnc_ready", return_value=True),
+        patch.object(cm, "_read_resolved_username", return_value="alice"),
         patch("container_manager._display_name", return_value=(user, "alice")),
         patch("container_manager.DesktopContainerInfoModel"),
         patch("container_manager.db"),
@@ -168,6 +178,9 @@ def test_container_manager_reads_setting_and_passes_through():
         cm._create_container_background(user_id=1, container_url="http://ctfd", extra_hosts=None)
 
     cm.host_manager.run_container.assert_called_once()
+    cm.host_manager.get_connection_hostnames.assert_called_once_with("alpha")
+    cm.host_manager.get_pub_hostname.assert_not_called()
+    cm.host_manager.get_check_hostname.assert_not_called()
     call_kwargs = cm.host_manager.run_container.call_args.kwargs
     assert call_kwargs["network"] == "ctfd-desktops"
 
@@ -201,8 +214,10 @@ def test_container_manager_passes_overridden_network():
         "ports": {"22/tcp": 1, "5900/tcp": 2, "6080/tcp": 3, "7682/tcp": 4},
     }
     cm.orchestrator.select_and_reserve.return_value = "alpha"
-    cm.host_manager.get_pub_hostname.return_value = "alpha.example.com"
-    cm.host_manager.get_check_hostname.return_value = "alpha.example.com"
+    cm.host_manager.get_connection_hostnames.return_value = (
+        "alpha.example.com",
+        "alpha.example.com",
+    )
 
     user = MagicMock()
     user.id = 1
@@ -213,6 +228,7 @@ def test_container_manager_passes_overridden_network():
         patch("container_manager._mint_session_cookie", return_value=None),
         patch.object(cm, "_get_setting", side_effect=lambda k: settings.get(k)),
         patch.object(cm, "wait_for_vnc_ready", return_value=True),
+        patch.object(cm, "_read_resolved_username", return_value="alice"),
         patch("container_manager._display_name", return_value=(user, "alice")),
         patch("container_manager.DesktopContainerInfoModel"),
         patch("container_manager.db"),

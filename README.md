@@ -10,7 +10,7 @@ CTFd plugin for on-demand Docker desktop sessions. Users can open a browser desk
 - The image must accept `CTFD_USERNAME`, `VNC_PASSWORD`, `RESOLUTION`, and `MAX_LIFETIME`. It may use `CTFD_URL`, `CTFD_COOKIE_NAME`, and `CTFD_COOKIE_VALUE` for CTFd autologin.
 - Before noVNC reports ready, the image must atomically publish the actual Linux account name as a single `^[a-z_][a-z0-9_]{0,31}$` line at `/var/lib/remote-desktop/resolved-username`. Missing or invalid handoff data fails creation so the UI never advertises incorrect SSH credentials.
 
-The repository does not build or publish the desktop image. The plugin starts disabled so an administrator can set and verify the image before allowing sessions.
+The repository does not build or publish the desktop image. The plugin starts disabled so an administrator can set and verify the image before allowing sessions. Session containers use Docker's built-in init process for signal forwarding and orphan reaping; use the pinned Docker SDK range from `requirements.txt` and a Docker-compatible daemon that supports the `init` create option.
 
 ## Install
 
@@ -71,6 +71,43 @@ throttle with the worker count in mind. A live settings reload preserves the
 old semaphore for its in-flight callers and creates a new generation when the
 limit changes, so old and new work can overlap briefly. Drain creates and
 restart all workers when a strict immediate reduction is required.
+
+Session containers use `auto_remove`, and the image ends a session after three
+consecutive health failures or the loss of a supervised core service. This
+fail-fast policy avoids advertising a broken desktop, but container exit also
+permanently deletes the writable layer. The filesystem is not durable storage;
+students must export important work, and operators requiring post-failure
+recovery need a different container lifecycle before enabling the service.
+
+## Contract-3 rollout order
+
+Roll out the proxy, image, and strict plugin as one ordered compatibility
+change. Disable new allocations first and drain existing sessions when
+uninterrupted class use matters.
+
+1. Run the updated `setup.sh`, validate nginx, and reload it so the noVNC and
+   ttyd proxy behavior is in place while the currently deployed plugin/image
+   pair is still available.
+2. Publish the tested desktop manifest by digest, with image label
+   `edu.ucsc.ctfd-remote-desktop.contract=3`, pull that exact digest on every
+   Docker context, and verify the digest and label out of band on every daemon:
+
+   ```bash
+   docker --context CONTEXT image inspect REPOSITORY@sha256:DIGEST \
+     --format '{{json .RepoDigests}} contract={{index .Config.Labels "edu.ucsc.ctfd-remote-desktop.contract"}}'
+   ```
+
+   Require the expected digest and `contract=3`. Do not change the active image
+   setting while an older plugin/image pair is still serving sessions.
+3. Deploy and restart the contract-enforcing plugin with Remote Desktop still
+   disabled. Configure the exact digest, run the plugin image scan, and require
+   a compatible result from every context.
+4. Exercise noVNC and ttyd through the real nginx `auth_request` path (plus SSH
+   if enabled), and only then enable new allocations.
+
+Keep the previous proxy config, plugin revision, and image digest as a matched
+rollback set; do not roll the strict plugin back while leaving assumptions
+about a newer proxy/image contract undocumented.
 
 ## Development
 

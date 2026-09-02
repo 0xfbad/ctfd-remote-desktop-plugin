@@ -768,7 +768,7 @@
             var latest = null;
             ctxs.forEach(function(ctx) {
                 var e = mx[img] && mx[img][ctx];
-                if (e && e.available && e.info) {
+                if (e && e.available && e.info && e.info.contract_status === 'compatible') {
                     if (!latest || e.info.created > latest.created) latest = e.info;
                 }
             });
@@ -782,10 +782,17 @@
         var rows = imgs.map(function(img) {
             var ref = newestRef(img);
             var anyMissing = false;
+            var anyIncompatible = false;
             var anyOutdated = false;
 
             var cells = ctxs.map(function(ctx) {
                 var entry = mx[img] && mx[img][ctx];
+
+                if (entry && ((entry.info && entry.info.contract_status !== 'compatible') || (entry.available && !entry.info))) {
+                    anyIncompatible = true;
+                    return '<td class="text-center" style="background:rgba(220,53,69,0.06)">' +
+                        '<i class="fas fa-ban text-danger" title="Incompatible image contract ' + escapeHtml((entry.info && entry.info.contract) || 'missing') + '. Expected contract 2; rebuild or load the current image."></i></td>';
+                }
 
                 if (!entry || !entry.available) {
                     anyMissing = true;
@@ -794,10 +801,6 @@
                 }
 
                 var info = entry.info;
-                if (!info) {
-                    return '<td class="text-center">' +
-                        '<i class="fas fa-check-circle text-success" title="Available"></i></td>';
-                }
 
                 // compare by size instead of hash, locally built images have unique IDs per host
                 var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb;
@@ -821,7 +824,8 @@
             }).join('');
 
             var badge = '';
-            if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
+            if (anyIncompatible) badge = ' <span class="badge bg-danger">incompatible contract</span>';
+            else if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
             else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">possibly outdated</span>';
 
             return '<tr><td>' + escapeHtml(img) + badge + '</td>' + cells + '</tr>';

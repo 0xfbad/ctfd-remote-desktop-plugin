@@ -150,6 +150,25 @@ def test_create_row_uses_image_resolved_username():
     assert "SHELL_LOGGING" not in kwargs["env"]
 
 
+def test_invalid_image_handoff_fails_closed_and_cleans_up():
+    ports = {"5900/tcp": 40001, "6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004}
+    cm, _kwargs, model = _run_background_create(
+        _base_settings(),
+        ports,
+        resolved_error=RuntimeError("desktop image readiness contract failed"),
+    )
+
+    cm.host_manager.force_remove_container.assert_called_once()
+    context_name, container_name = cm.host_manager.force_remove_container.call_args.args
+    assert context_name == "alpha"
+    assert container_name.startswith("rd-session-1-")
+    cm.host_manager.stop_container.assert_not_called()
+    cm.orchestrator.release_slot.assert_called_once_with("alpha")
+    model.assert_not_called()
+    assert cm.creation_status[1]["status"] == "failed"
+    assert "readiness contract" in cm.creation_status[1]["error"]
+
+
 def test_create_failure_revokes_minted_ctfd_session():
     ports = {"6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004}
     with patch("container_manager._revoke_session_cookie", return_value=True) as revoke:

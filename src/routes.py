@@ -25,7 +25,13 @@ from .models import (
     END_REASON_ADMIN_KILLED,
     _esc,
 )
-from .docker_host_manager import LOCAL_CONTEXT_NAME, LOCAL_SOCKET_PATH, discover_contexts, ping_endpoint
+from .docker_host_manager import (
+    IMAGE_CONTRACT_VERSION,
+    LOCAL_CONTEXT_NAME,
+    LOCAL_SOCKET_PATH,
+    discover_contexts,
+    ping_endpoint,
+)
 from .exceptions import HostsUnavailableException
 from .utils import normalize_public_hostname, ratelimit_per_user
 
@@ -178,6 +184,28 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         orchestrator.load_from_db()
         event_bus.publish({"_control": "reload_contexts"})
+
+    def _lock_context_for_administration(model, context_id: int):
+        """Start a clean transaction and lock a fresh context row.
+
+        Admission reserves update the same row, so this lock makes a drain/edit
+        or delete decision atomic with the predicates in Orchestrator._try_reserve.
+        populate_existing avoids consulting a stale identity-map value after the
+        rollback.
+        """
+        db.session.rollback()
+        return model.query.filter_by(id=context_id).populate_existing().with_for_update().first()
+
+    def _context_has_live_work(context, container_model, operation_model) -> bool:
+        has_rows = container_model.query.filter_by(docker_context=context.context_name).first() is not None
+        has_reservations = (
+            operation_model.query.filter_by(
+                docker_context=context.context_name,
+                capacity_reserved=True,
+            ).first()
+            is not None
+        )
+        return int(context.active_sessions or 0) > 0 or has_rows or has_reservations
 
     # builds the frontend TimerDict shape; keep in sync with
     # container_manager._timer_from_row which builds the same shape
@@ -776,21 +804,28 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         display = docker_image.removesuffix(":latest")
 
         connected = container_manager.host_manager.get_connected_contexts()
-        if not connected:
-            return jsonify(images=[display], contexts=[], matrix={})
-
         matrix: dict[str, dict[str, dict[str, object]]] = {display: {}}
+        if not connected:
+            set_setting(
+                "image_cache",
+                json.dumps({"matrix": matrix, "contexts": [], "scanned_at": time.time()}),
+            )
+            return jsonify(images=[display], contexts=[], matrix=matrix)
 
         def _info(ctx_name):
             return ctx_name, container_manager.host_manager.get_image_info(ctx_name, docker_image)
 
-        with ThreadPoolExecutor(max_workers=min(len(connected), 8)) as pool:
+        pool = ThreadPoolExecutor(max_workers=min(len(connected), 8))
+        futures = {}
+        try:
             futures = {pool.submit(_info, ctx): ctx for ctx in connected}
             try:
                 for future in as_completed(futures, timeout=15):
                     try:
                         ctx_name, info = future.result()
-                        entry: dict[str, object] = {"available": info is not None}
+                        entry: dict[str, object] = {
+                            "available": bool(info and info.get("contract_status") == "compatible")
+                        }
                         if info:
                             entry["info"] = info
                         matrix[display][ctx_name] = entry
@@ -800,6 +835,12 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 for future, ctx in futures.items():
                     if ctx not in matrix[display]:
                         matrix[display][ctx] = {"available": False}
+        finally:
+            for future in futures:
+                future.cancel()
+            # Do not let a wedged SSH transport turn the advertised 15-second
+            # admin scan timeout into an unbounded wait in Executor.__exit__.
+            pool.shutdown(wait=False, cancel_futures=True)
 
         set_setting(
             "image_cache",
@@ -1244,47 +1285,94 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>", methods=["PUT"])
     @admins_only
     def admin_update_context(context_id):
-        from .models import DesktopDockerContextModel
+        from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
 
         if not isinstance(request.json, dict):
             return jsonify({"error": "invalid request"}), 400
 
-        context = DesktopDockerContextModel.query.get(context_id)
+        payload = request.json
+
+        if "enabled" in payload and type(payload["enabled"]) is not bool:
+            return jsonify({"error": "enabled must be a boolean"}), 400
+        parsed_hostname = None
+        if "hostname" in payload:
+            try:
+                parsed_hostname = _context_hostname(payload["hostname"])
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+        normalized_pub_hostname = None
+        if "pub_hostname" in payload:
+            try:
+                normalized_pub_hostname = normalize_public_hostname(payload["pub_hostname"])
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+        weight = None
+        if "weight" in payload:
+            try:
+                weight = _json_integer(payload["weight"], minimum=1, field="weight")
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+        parsed_max_containers = None
+        if "max_containers" in payload:
+            raw = payload["max_containers"]
+            if raw not in (None, ""):
+                try:
+                    parsed_max_containers = _json_integer(raw, minimum=0, field="max_containers")
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), 400
+
+        context = _lock_context_for_administration(DesktopDockerContextModel, context_id)
         if not context:
+            db.session.rollback()
             return jsonify({"error": "context not found"}), 404
 
-        if "hostname" in request.json:
-            context.hostname = request.json["hostname"]
+        current_pub_hostname = context.pub_hostname
+        try:
+            current_pub_hostname = normalize_public_hostname(current_pub_hostname)
+        except ValueError:
+            pass
+        endpoint_change = ("hostname" in payload and parsed_hostname != context.hostname) or (
+            "pub_hostname" in payload and normalized_pub_hostname != current_pub_hostname
+        )
+        disabling = "enabled" in payload and not payload["enabled"] and bool(context.enabled)
 
-        if "pub_hostname" in request.json:
-            if not request.json["pub_hostname"]:
-                return jsonify({"error": "pub_hostname cannot be empty"}), 400
-            context.pub_hostname = request.json["pub_hostname"]
+        # A row lock alone cannot stop a new reservation immediately after this
+        # transaction commits. Endpoint mutation therefore requires the context
+        # to remain fenced after commit. A request cannot edit an endpoint and
+        # simultaneously re-enable/raise the cap: another process may still
+        # hold the previous in-memory endpoint until the reload event arrives.
+        final_enabled = payload["enabled"] if "enabled" in payload else bool(context.enabled)
+        final_max_containers = parsed_max_containers if "max_containers" in payload else context.max_containers
+        remains_fenced = not final_enabled or final_max_containers == 0
+        if (endpoint_change or disabling) and _context_has_live_work(
+            context,
+            DesktopContainerInfoModel,
+            DesktopSessionOperationModel,
+        ):
+            db.session.rollback()
+            return jsonify({"error": "context has active or in-flight sessions; drain it before changing access"}), 409
 
-        if "weight" in request.json:
-            try:
-                weight = int(request.json["weight"])
-                if weight < 1:
-                    return jsonify({"error": "weight must be at least 1"}), 400
-                context.weight = weight
-            except ValueError:
-                return jsonify({"error": "weight must be an integer"}), 400
+        if endpoint_change and not remains_fenced:
+            db.session.rollback()
+            return jsonify({"error": "drain or disable the context before changing its endpoint"}), 409
 
-        if "max_containers" in request.json:
-            raw = request.json["max_containers"]
-            if raw in (None, ""):
-                context.max_containers = None
-            else:
-                try:
-                    value = int(raw)
-                    if value < 0:
-                        raise ValueError
-                    context.max_containers = value
-                except (ValueError, TypeError):
-                    return jsonify({"error": "max_containers must be a non-negative integer or null"}), 400
+        if "hostname" in payload:
+            context.hostname = parsed_hostname
 
-        if "enabled" in request.json:
-            context.enabled = bool(request.json["enabled"])
+        if "pub_hostname" in payload:
+            context.pub_hostname = normalized_pub_hostname
+
+        if "weight" in payload:
+            context.weight = weight
+
+        if "max_containers" in payload:
+            context.max_containers = parsed_max_containers
+
+        if "enabled" in payload:
+            context.enabled = payload["enabled"]
 
         db.session.commit()
         _reload_contexts_everywhere()
@@ -1294,11 +1382,20 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/contexts/<int:context_id>", methods=["DELETE"])
     @admins_only
     def admin_delete_context(context_id):
-        from .models import DesktopDockerContextModel
+        from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
 
-        context = DesktopDockerContextModel.query.get(context_id)
+        context = _lock_context_for_administration(DesktopDockerContextModel, context_id)
         if not context:
+            db.session.rollback()
             return jsonify({"error": "context not found"}), 404
+
+        if _context_has_live_work(context, DesktopContainerInfoModel, DesktopSessionOperationModel):
+            db.session.rollback()
+            return jsonify({"error": "context has active or in-flight sessions; drain it before deletion"}), 409
+
+        if bool(context.enabled) and context.max_containers != 0:
+            db.session.rollback()
+            return jsonify({"error": "drain or disable the context before deletion"}), 409
 
         db.session.delete(context)
         db.session.commit()
@@ -1320,9 +1417,22 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "context unreachable (ping failed)"}), 503
 
         docker_image = str(get_setting("docker_image"))
-        image_ok = container_manager.host_manager.check_image(context.context_name, docker_image)
-        if not image_ok:
+        image_info = container_manager.host_manager.get_image_info(context.context_name, docker_image)
+        if image_info is None:
             return jsonify({"error": f"image {docker_image} not found on context"}), 503
+        if image_info.get("contract_status") != "compatible":
+            found_contract = image_info.get("contract", "missing")
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            f"image {docker_image} has incompatible remote-desktop contract "
+                            f"{found_contract!r}; expected {IMAGE_CONTRACT_VERSION!r}"
+                        )
+                    }
+                ),
+                503,
+            )
 
         return jsonify({"success": True})
 

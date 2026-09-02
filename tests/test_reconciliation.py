@@ -180,7 +180,12 @@ def test_verify_or_reap_vanished_reaps_row(container_manager):
     # The first transaction releases locks before strict state inspection, a
     # second fences teardown, and a third finalizes after exact removal.
     assert mock_db.session.commit.call_count == 3
-    cm.orchestrator.release_slot.assert_called_once_with("ctx1")
+    cm.orchestrator.release_active_slot_in_transaction.assert_called_once_with(
+        "ctx1",
+        42,
+        cm._session_uuid(row),
+    )
+    cm.orchestrator.release_slot.assert_not_called()
     mock_history.assert_called_once()
     assert mock_history.call_args.kwargs["end_reason"] == "reconciliation"
 

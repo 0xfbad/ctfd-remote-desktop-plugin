@@ -332,7 +332,7 @@ def test_manual_context_reload_publishes_cross_worker():
 def test_context_test_checks_configured_image_after_ping():
     cm = MagicMock()
     cm.host_manager.ping.return_value = True
-    cm.host_manager.check_image.return_value = False
+    cm.host_manager.get_image_info.return_value = None
     bp = create_routes(cm, MagicMock())
     handler = _get_latest_handler(bp, "admin_test_context")
     context = MagicMock(context_name="alpha")
@@ -346,7 +346,8 @@ def test_context_test_checks_configured_image_after_ping():
         payload, status = handler(1)
     assert status == 503
     assert "not found" in payload["error"]
-    cm.host_manager.check_image.assert_called_once()
+    cm.host_manager.get_image_info.assert_called_once_with("alpha", "img:latest")
+    cm.host_manager.check_image.assert_not_called()
 
 
 # -- pause / unpause ----------------------------------------------------------

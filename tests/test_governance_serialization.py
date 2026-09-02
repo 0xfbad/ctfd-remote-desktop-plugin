@@ -58,6 +58,12 @@ def _run_with_settings(mgr, settings_overrides=None, **call_overrides):
         }
     }
     mock_client.containers.run.return_value = mock_container
+    resolved_image = MagicMock()
+    resolved_image.id = "sha256:immutable-desktop-image"
+    resolved_image.attrs = {
+        "Config": {"Labels": {"edu.ucsc.ctfd-remote-desktop.contract": "3"}},
+    }
+    mock_client.images.get.return_value = resolved_image
 
     from settings import SETTING_DEFAULTS
 

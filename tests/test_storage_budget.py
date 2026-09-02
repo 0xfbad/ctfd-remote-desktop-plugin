@@ -63,6 +63,12 @@ def _run_with_settings(mgr, settings_overrides=None, **call_overrides):
         }
     }
     mock_client.containers.run.return_value = mock_container
+    resolved_image = MagicMock()
+    resolved_image.id = "sha256:immutable-desktop-image"
+    resolved_image.attrs = {
+        "Config": {"Labels": {"edu.ucsc.ctfd-remote-desktop.contract": "3"}},
+    }
+    mock_client.images.get.return_value = resolved_image
 
     settings = _effective_settings(settings_overrides)
 
@@ -153,6 +159,12 @@ def test_apierror_non_port_message_raises_without_retry():
     mock_client.containers.run.side_effect = docker.errors.APIError(
         "500 Server Error: --storage-opt is supported only for overlay over xfs"
     )
+    resolved_image = MagicMock()
+    resolved_image.id = "sha256:immutable-desktop-image"
+    resolved_image.attrs = {
+        "Config": {"Labels": {"edu.ucsc.ctfd-remote-desktop.contract": "3"}},
+    }
+    mock_client.images.get.return_value = resolved_image
 
     settings = _effective_settings({"storage_limit": "20g"})
 

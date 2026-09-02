@@ -170,7 +170,7 @@ def test_destroy_paused_row_admin_kill_uses_force_remove(container_manager):
     assert result["success"] is True
     # frozen container: stop would block the full timeout before SIGKILL,
     # force_remove is immediate
-    cm.host_manager.force_remove_container.assert_called_once_with("ctx1", row.container_name)
+    cm.host_manager.force_remove_container.assert_called_once_with("ctx1", str(row.container_id))
     cm.host_manager.stop_container.assert_not_called()
     mock_db.session.delete.assert_called_once_with(row)
 

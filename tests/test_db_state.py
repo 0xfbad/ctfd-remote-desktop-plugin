@@ -75,8 +75,9 @@ def test_destroy_deletes_db_row(container_manager):
 
     assert result["success"]
     mock_db.session.delete.assert_called_once_with(row)
-    cm.host_manager.stop_container.assert_called_once_with("ctx1", "kali-desktop-1-1234")
-    cm.orchestrator.release_slot.assert_called_once_with("ctx1")
+    cm.host_manager.stop_container.assert_called_once_with("ctx1", str(row.container_id))
+    cm.orchestrator.release_active_slot_in_transaction.assert_called_once()
+    cm.orchestrator.release_slot.assert_not_called()
 
 
 def test_destroy_no_container(container_manager):
@@ -161,7 +162,8 @@ def test_destroy_all_containers_admin(container_manager):
 
     assert summary == {"requested": 2, "completed": 2, "cancelling": 0, "stopping": 0, "failed": 0}
     assert cm.host_manager.stop_container.call_count == 2
-    assert cm.orchestrator.release_slot.call_count == 2
+    assert cm.orchestrator.release_active_slot_in_transaction.call_count == 2
+    cm.orchestrator.release_slot.assert_not_called()
 
 
 def test_destroy_all_containers_admin_empty_fleet_still_logs(container_manager):

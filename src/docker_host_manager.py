@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 SESSION_LABEL_MANAGED = "org.ctfd.remote-desktop.managed"
 SESSION_LABEL_USER_ID = "org.ctfd.remote-desktop.user-id"
 SESSION_LABEL_UUID = "org.ctfd.remote-desktop.session-uuid"
+IMAGE_CONTRACT_LABEL = "edu.ucsc.ctfd-remote-desktop.contract"
+IMAGE_CONTRACT_VERSION = "3"
 
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
@@ -104,6 +106,21 @@ def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT):
             del _SSH_CONNECT_TIMEOUT.value
         except AttributeError:
             pass
+
+
+def _image_contract(image: object) -> str | None:
+    """Return the image/plugin compatibility label without trusting SDK shapes."""
+    attrs = getattr(image, "attrs", None)
+    if not isinstance(attrs, Mapping):
+        return None
+    config = attrs.get("Config")
+    if not isinstance(config, Mapping):
+        return None
+    labels = config.get("Labels")
+    if not isinstance(labels, Mapping):
+        return None
+    contract = labels.get(IMAGE_CONTRACT_LABEL)
+    return str(contract) if contract is not None else None
 
 
 def normalize_container_state(value: object) -> ContainerState:
@@ -715,17 +732,40 @@ class DockerHostManager:
 
         def _do():
             client = self._get_client(context_name)
+            try:
+                resolved_image = client.images.get(image)
+            except docker.errors.ImageNotFound as exc:
+                raise docker.errors.DockerException(
+                    f"desktop image {image!r} was not found on context {context_name!r}"
+                ) from exc
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                raise
+
+            contract = _image_contract(resolved_image)
+            if contract != IMAGE_CONTRACT_VERSION:
+                raise docker.errors.DockerException(
+                    f"desktop image {image!r} on context {context_name!r} has "
+                    f"{IMAGE_CONTRACT_LABEL}={contract!r}; expected {IMAGE_CONTRACT_VERSION!r}"
+                )
+            resolved_image_id = getattr(resolved_image, "id", None)
+            if not isinstance(resolved_image_id, str) or not resolved_image_id:
+                raise docker.errors.DockerException(
+                    f"desktop image {image!r} on context {context_name!r} did not resolve to an immutable image ID"
+                )
+
             last_err: Exception | None = None
             container = None
             for _ in range(50):
                 port_bindings = {p: _sysrand.randint(40000, 59999) for p in ports}
                 try:
                     container = client.containers.run(
-                        image,
+                        resolved_image_id,
                         name=name,
                         hostname=hostname or name,
                         detach=True,
                         auto_remove=True,
+                        init=True,
                         environment=env,
                         ports=port_bindings,
                         shm_size=shm_size,
@@ -752,27 +792,35 @@ class DockerHostManager:
             else:
                 raise docker.errors.DockerException(f"failed to find available ports after retries: {last_err}")
 
-            port_map: dict[str, int] = {}
-            for attempt in range(5):
-                container.reload()
-                network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
+            port_map: dict[str, int] | None = None
+            try:
+                for attempt in range(5):
+                    container.reload()
+                    network_ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
 
-                all_mapped = True
-                for p in ports:
-                    bindings = network_ports.get(p)
-                    if bindings and len(bindings) > 0:
-                        port_map[p] = int(bindings[0]["HostPort"])
-                    else:
-                        all_mapped = False
+                    current_map: dict[str, int] = {}
+                    for port in ports:
+                        bindings = network_ports.get(port)
+                        if bindings and len(bindings) > 0:
+                            current_map[port] = int(bindings[0]["HostPort"])
 
-                if all_mapped and port_map:
-                    break
+                    if len(current_map) == len(ports) and current_map:
+                        port_map = current_map
+                        break
 
-                if attempt < 4:
-                    time.sleep(0.3)
+                    if attempt < 4:
+                        time.sleep(0.3)
+            except Exception:
+                # A reload/attrs failure commonly means this thread's SSH or
+                # Docker transport is no longer usable. Invalidate all peers
+                # lazily, drop this exact client now, and let cleanup reconnect.
+                self._clear_client(context_name)
+                raise
 
-            if not port_map:
-                raise Exception(f"could not get port mappings for {name}")
+            if port_map is None:
+                raise docker.errors.DockerException(
+                    f"could not get all port mappings for {name}; expected {sorted(ports)!r}"
+                )
 
             return {
                 "container_id": container.id,
@@ -945,7 +993,17 @@ class DockerHostManager:
         def _do():
             try:
                 client = self._get_client(context_name)
-                client.images.get(image)
+                img = client.images.get(image)
+                contract = _image_contract(img)
+                if contract != IMAGE_CONTRACT_VERSION:
+                    logger.warning(
+                        "image %s on context %s has remote-desktop contract %r; expected %r",
+                        image,
+                        context_name,
+                        contract,
+                        IMAGE_CONTRACT_VERSION,
+                    )
+                    return False
                 return True
             except docker.errors.ImageNotFound:
                 return False
@@ -957,6 +1015,58 @@ class DockerHostManager:
                 return False
 
         return self._call(context_name, _do)
+
+    def check_storage_limit_compatibility(self, context_name: str, storage_limit: str) -> bool:
+        """Return whether a configured overlay writable-layer quota can work.
+
+        Docker's per-container ``overlay2.size`` option requires overlay2 on an
+        XFS backing filesystem. Treat missing/unknown daemon metadata as
+        ineligible when quotas are configured: admitting work and discovering
+        the mismatch at create time strands a durable reservation and gives the
+        user a generic startup failure.
+        """
+        if not storage_limit.strip():
+            return True
+
+        def _do() -> bool:
+            try:
+                client = self._get_client(context_name)
+                info = client.info() or {}
+                driver = str(info.get("Driver") or "").strip().lower()
+                status = {
+                    str(key).strip().lower(): str(value).strip().lower()
+                    for key, value in (info.get("DriverStatus") or [])
+                }
+                backing = status.get("backing filesystem", "")
+                supports_dtype = status.get("supports d_type", "")
+                compatible = (
+                    driver == "overlay2"
+                    and backing == "xfs"
+                    and supports_dtype
+                    in (
+                        "true",
+                        "1",
+                        "yes",
+                    )
+                )
+                if not compatible:
+                    logger.warning(
+                        "context %s is ineligible for storage_limit=%s (driver=%r backing=%r supports_d_type=%r)",
+                        context_name,
+                        storage_limit,
+                        driver or "unknown",
+                        backing or "unknown",
+                        supports_dtype or "unknown",
+                    )
+                return compatible
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
+                self._clear_client(context_name)
+                return False
+            except Exception:
+                self._clear_client(context_name)
+                return False
+
+        return bool(self._call(context_name, _do))
 
     def get_image_info(self, context_name: str, image: str) -> ImageInfo | None:
         def _do():
@@ -979,7 +1089,15 @@ class DockerHostManager:
                 except (ValueError, AttributeError):
                     created = raw.replace("T", " ")
                 short_id = img.short_id.replace("sha256:", "")
-                return {"size_mb": size_mb, "created": created, "id": short_id}
+                contract = _image_contract(img)
+                contract_status = "compatible" if contract == IMAGE_CONTRACT_VERSION else "incompatible"
+                return {
+                    "size_mb": size_mb,
+                    "created": created,
+                    "id": short_id,
+                    "contract": str(contract) if contract is not None else "missing",
+                    "contract_status": contract_status,
+                }
             except docker.errors.ImageNotFound:
                 return None
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
