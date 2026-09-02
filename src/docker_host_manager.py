@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import io
 import json
+import math
+import tarfile
 import time
 import threading
 import logging
@@ -1025,6 +1028,118 @@ class DockerHostManager:
                 raise HostsUnavailableException(f"transient client failure on {context_name}")
 
         return self._call(context_name, _do)
+
+    def extend_paused_lifetime_deadline(
+        self,
+        context_name: str,
+        container_name: str,
+        paused_at: float,
+        *,
+        minimum_remaining: int = 60,
+    ) -> int:
+        """Credit a held interval to the image's persisted lifetime deadline.
+
+        Docker archive I/O remains available while the container cgroup is
+        frozen. The image watchdog is therefore unable to observe the file
+        while it is replaced, and the plugin verifies the exact content before
+        allowing unpause. The file mtime records the last credited instant, so
+        a crash/retry adds only the new portion of the hold rather than the
+        entire interval again.
+        """
+        state_dir = "/var/lib/remote-desktop"
+        filename = "max-lifetime-deadline"
+        path = f"{state_dir}/{filename}"
+
+        def _read(container) -> tuple[int, float]:
+            stream, _stat = container.get_archive(path)
+            archive_buffer = bytearray()
+            for chunk in stream:
+                archive_buffer.extend(chunk)
+                if len(archive_buffer) > 1024 * 1024:
+                    raise ValueError("maximum-lifetime deadline archive was oversized")
+            archive = bytes(archive_buffer)
+            if not archive:
+                raise ValueError("maximum-lifetime deadline archive was empty")
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as tar:
+                members = [
+                    member
+                    for member in tar.getmembers()
+                    if member.isfile() and os.path.basename(member.name.rstrip("/")) == filename
+                ]
+                if len(members) != 1:
+                    raise ValueError("maximum-lifetime deadline file was missing or ambiguous")
+                member = members[0]
+                if member.uid != 0 or member.gid != 0 or member.mode & 0o777 != 0o600:
+                    raise ValueError("maximum-lifetime deadline file has unsafe metadata")
+                extracted = tar.extractfile(member)
+                if extracted is None:
+                    raise ValueError("maximum-lifetime deadline file was unreadable")
+                raw = extracted.read(32)
+                if extracted.read(1):
+                    raise ValueError("maximum-lifetime deadline file was oversized")
+            try:
+                value = raw.decode("ascii").strip()
+            except UnicodeDecodeError as exc:
+                raise ValueError("maximum-lifetime deadline was not ASCII") from exc
+            if not value.isdigit() or value.startswith("0") or len(value) > 10:
+                raise ValueError("maximum-lifetime deadline was invalid")
+            return int(value), float(member.mtime or 0)
+
+        def _do() -> int:
+            client = self._get_client(context_name)
+            try:
+                container = client.containers.get(container_name)
+                container.reload()
+                if normalize_container_state(container.status) != "paused":
+                    raise ValueError("container is no longer paused; refusing deadline update")
+
+                now = time.time()
+                if not math.isfinite(paused_at) or paused_at <= 0 or paused_at > now + 1:
+                    raise ValueError("paused timestamp is invalid")
+                current_deadline, credited_mtime = _read(container)
+                if credited_mtime > now + 1:
+                    raise ValueError("maximum-lifetime deadline mtime is in the future")
+
+                credit_from = max(paused_at, credited_mtime)
+                credit_seconds = max(0, math.ceil(now - credit_from))
+                new_deadline = current_deadline + credit_seconds
+                if new_deadline - now < minimum_remaining:
+                    raise ValueError("maximum-lifetime deadline is too close to resume safely")
+                if new_deadline > 9_999_999_999:
+                    raise ValueError("maximum-lifetime deadline extension overflowed")
+
+                if credit_seconds:
+                    payload = f"{new_deadline}\n".encode("ascii")
+                    buffer = io.BytesIO()
+                    with tarfile.open(fileobj=buffer, mode="w") as tar:
+                        member = tarfile.TarInfo(filename)
+                        member.size = len(payload)
+                        member.mode = 0o600
+                        member.uid = 0
+                        member.gid = 0
+                        member.mtime = int(now)
+                        tar.addfile(member, io.BytesIO(payload))
+                    if container.put_archive(state_dir, buffer.getvalue()) is False:
+                        raise ValueError("Docker rejected maximum-lifetime deadline update")
+
+                verified_deadline, verified_mtime = _read(container)
+                if verified_deadline != new_deadline:
+                    raise ValueError("maximum-lifetime deadline readback did not match")
+                if credit_seconds and verified_mtime < int(now) - 1:
+                    raise ValueError("maximum-lifetime deadline metadata was not updated")
+                return verified_deadline
+            except docker.errors.NotFound:
+                raise
+            except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                self._clear_client(context_name)
+                raise
+            except ValueError:
+                raise
+            except Exception as exc:
+                self._clear_client(context_name)
+                raise HostsUnavailableException(f"transient client failure on {context_name}") from exc
+
+        return int(self._call(context_name, _do))
 
     def unpause_container(self, context_name: str, container_name: str) -> None:
         def _do():

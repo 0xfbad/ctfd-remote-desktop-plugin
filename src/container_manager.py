@@ -1743,6 +1743,7 @@ class ContainerManager:
         session_uuid = self._session_uuid(row)
         context_name = row.docker_context
         container_name = row.container_name
+        paused_at = float(row.paused_at)
         # Mark the explicit admin operation before remote I/O. pause_watch keeps
         # HELD rows sticky but deliberately ignores this transient state.
         row.lifecycle_state = LIFECYCLE_UNPAUSING
@@ -1751,6 +1752,17 @@ class ContainerManager:
             operation.updated_at = time.time()
         db.session.commit()
         try:
+            # The image enforces an independent absolute lifetime and Docker's
+            # AutoRemove would erase a held writable layer if that deadline
+            # fired immediately after thaw. Credit the frozen interval through
+            # Docker's archive API while the cgroup is still paused, verify the
+            # persisted deadline, and fail closed before unpause on any error.
+            self.host_manager.extend_paused_lifetime_deadline(
+                context_name,
+                container_name,
+                paused_at,
+                minimum_remaining=self.UNPAUSE_LEASE_SECONDS,
+            )
             self.host_manager.unpause_container(context_name, container_name)
         except Exception as e:
             db.session.rollback()
