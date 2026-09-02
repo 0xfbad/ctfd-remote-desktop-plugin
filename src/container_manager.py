@@ -69,6 +69,22 @@ def _display_name(user_id: int) -> tuple[Users | None, str]:
     return user, username_or_fallback(user, user_id)
 
 
+def _revoke_session_cookie(app: Flask, sid: str | None) -> bool:
+    """Revoke one server-side CTFd session, retaining the caller's handle on failure."""
+    if not sid:
+        return True
+    try:
+        from CTFd.cache import cache
+
+        # An absent key is already revoked, so any non-exceptional backend
+        # response satisfies the security invariant.
+        cache.delete(app.session_interface.key_prefix + sid)
+        return True
+    except Exception as exc:
+        logger.warning("failed to revoke CTFd session sid: %s", exc)
+        return False
+
+
 def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None:
     # CTFd uses server-side sessions, save_session writes to the cache
     # backend so just signing the sid wouldn't populate it.
@@ -81,14 +97,31 @@ def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None
 
     cookie_name = app.session_cookie_name
     with app.test_request_context():
-        login_user(user)
-        sid = session.sid
-        resp = Response()
-        app.session_interface.save_session(app, session, resp)
-        for header in resp.headers.getlist("Set-Cookie"):
-            if header.startswith(f"{cookie_name}="):
-                value = header.split(f"{cookie_name}=", 1)[1].split(";", 1)[0]
-                return cookie_name, value, sid
+        sid: str | None = None
+        try:
+            login_user(user)
+            raw_sid = session.sid
+            if not isinstance(raw_sid, str) or not raw_sid:
+                raise RuntimeError("CTFd session interface did not provide a revocable sid")
+            sid = raw_sid
+            resp = Response()
+            app.session_interface.save_session(app, session, resp)
+            for header in resp.headers.getlist("Set-Cookie"):
+                if header.startswith(f"{cookie_name}="):
+                    value = header.split(f"{cookie_name}=", 1)[1].split(";", 1)[0]
+                    return cookie_name, value, sid
+            # save_session has already materialized the cache entry. Do not
+            # leave a credential behind when an unexpected session interface
+            # omits the browser cookie header.
+            if not _revoke_session_cookie(app, sid):
+                logger.error("failed to roll back CTFd session after cookie mint returned no header")
+        except Exception:
+            # save_session can fail after a backend accepted the write. Once a
+            # sid exists, make a best-effort rollback before propagating the
+            # creation failure to the outer lifecycle handler.
+            if sid and not _revoke_session_cookie(app, sid):
+                logger.error("failed to roll back CTFd session after cookie mint raised")
+            raise
     return None
 
 
@@ -515,6 +548,8 @@ class ContainerManager:
 
         context_name: str | None = None
         container_name: str | None = None
+        cookie_sid: str | None = None
+        cookie_app: Flask | None = None
 
         try:
             if fenced and not self._update_operation(user_id, session_uuid, worker_uuid, OP_SELECTING):
@@ -593,9 +628,9 @@ class ContainerManager:
 
                 from flask import current_app
 
-                cookie_sid: str | None = None
                 if user is not None:
-                    minted = _mint_session_cookie(current_app._get_current_object(), user)
+                    cookie_app = current_app._get_current_object()
+                    minted = _mint_session_cookie(cookie_app, user)
                     if minted:
                         cookie_name, cookie_value, cookie_sid = minted
                         container_env["CTFD_COOKIE_NAME"] = cookie_name
@@ -747,6 +782,9 @@ class ContainerManager:
             )
 
         except Exception as e:
+            if cookie_sid and cookie_app is not None:
+                _revoke_session_cookie(cookie_app, cookie_sid)
+
             stopped_ok = False
             if container_name and context_name:
                 try:
@@ -1039,7 +1077,8 @@ class ContainerManager:
                 return {"success": False, "error": "Session is not in a destroyable state"}
 
             row = current
-            cookie_sid = current.cookie_sid
+            raw_cookie_sid = getattr(current, "cookie_sid", None)
+            cookie_sid = raw_cookie_sid if isinstance(raw_cookie_sid, str) and raw_cookie_sid else None
             was_paused = (
                 self._is_paused(current)
                 or lifecycle_state in (LIFECYCLE_HELD, LIFECYCLE_UNPAUSING)
@@ -1062,14 +1101,11 @@ class ContainerManager:
         # Remote/cache/log operations deliberately run without database locks.
         # Revoke the minted CTFd session before remote teardown. A cache failure
         # must not turn a confirmed Docker stop into an untracked session.
+        cookie_revoked = True
         if cookie_sid:
-            try:
-                from flask import current_app
-                from CTFd.cache import cache
+            from flask import current_app
 
-                cache.delete(current_app.session_interface.key_prefix + cookie_sid)
-            except Exception as e:
-                logger.warning(f"failed to revoke cookie_sid for user {user_id}: {e}")
+            cookie_revoked = _revoke_session_cookie(current_app, cookie_sid)
 
         try:
             if (
@@ -1109,6 +1145,33 @@ class ContainerManager:
                 f"stop outcome unknown for {container_name}: context unavailable; retaining the capacity reservation"
             )
             return {"success": False, "error": "Container stop outcome is unknown; cleanup will be retried"}
+
+        if not cookie_revoked:
+            # Docker teardown is confirmed, but the CTFd login credential may
+            # still be valid. Retain the active row (and therefore cookie_sid)
+            # as the retry handle instead of erasing the only revocation key.
+            with self._get_destroy_lock(user_id):
+                db.session.rollback()
+                operation = self._locked_operation(user_id, create=True)
+                current = (
+                    self._locked_active_row(user_id)
+                    if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
+                    else row
+                )
+                if current is None or self._session_uuid(current) != session_uuid:
+                    db.session.rollback()
+                    return {"success": False, "error": "Session changed while credential revocation was pending"}
+                current.lifecycle_state = LIFECYCLE_CLEANUP_PENDING
+                current.lifecycle_reason = reason
+                if operation is not None and operation.session_uuid == session_uuid:
+                    operation.state = OP_CLEANUP_PENDING
+                    operation.error = "CTFd session credential revocation pending"
+                    operation.updated_at = time.time()
+                db.session.commit()
+            return {
+                "success": False,
+                "error": "Container stopped; session credential revocation will be retried",
+            }
 
         # Only now is it truthful to write history and remove the authoritative
         # active row. If this process dies before the commit, recovery observes

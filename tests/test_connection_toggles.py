@@ -150,6 +150,20 @@ def test_create_row_uses_image_resolved_username():
     assert "SHELL_LOGGING" not in kwargs["env"]
 
 
+def test_create_failure_revokes_minted_ctfd_session():
+    ports = {"6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004}
+    with patch("container_manager._revoke_session_cookie", return_value=True) as revoke:
+        _run_background_create(
+            _base_settings(),
+            ports,
+            resolved_error=RuntimeError("desktop image readiness contract failed"),
+            minted_cookie=("session", "signed-cookie", "raw-session-sid"),
+        )
+
+    revoke.assert_called_once()
+    assert revoke.call_args.args[1] == "raw-session-sid"
+
+
 # -- 3. settings -------------------------------------------------------------
 
 

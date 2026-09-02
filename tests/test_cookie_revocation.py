@@ -14,6 +14,8 @@ import sys
 import types
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 
 def test_mint_session_cookie_returns_3_tuple():
     """_mint_session_cookie must return the raw sid alongside the signed cookie
@@ -66,6 +68,41 @@ def test_mint_session_cookie_returns_3_tuple():
     assert cookie_name == "session"
     assert cookie_value == "signed-cookie-blob"
     assert sid == "test-sid-1234"
+
+
+def test_mint_session_cookie_revokes_sid_when_save_raises():
+    """A partially successful server-side save must not strand its SID."""
+    from container_manager import _mint_session_cookie
+
+    fake_session = MagicMock()
+    fake_session.sid = "partial-save-sid"
+    flask_stub = sys.modules["flask"]
+
+    auth_module = types.ModuleType("CTFd.utils.security.auth")
+    auth_module.login_user = MagicMock()
+    response_module = types.ModuleType("werkzeug.wrappers")
+    response_module.Response = MagicMock
+
+    app = MagicMock()
+    app.session_cookie_name = "session"
+    app.test_request_context.return_value.__enter__.return_value = MagicMock()
+    app.session_interface.save_session.side_effect = RuntimeError("redis write outcome unknown")
+
+    with (
+        patch.object(flask_stub, "session", fake_session, create=True),
+        patch.dict(
+            sys.modules,
+            {
+                "CTFd.utils.security.auth": auth_module,
+                "werkzeug.wrappers": response_module,
+            },
+        ),
+        patch("container_manager._revoke_session_cookie", return_value=True) as revoke,
+        pytest.raises(RuntimeError, match="outcome unknown"),
+    ):
+        _mint_session_cookie(app, MagicMock(id=1))
+
+    revoke.assert_called_once_with(app, "partial-save-sid")
 
 
 def _make_row_with_sid(user_id=1, cookie_sid="abc-sid"):
@@ -155,11 +192,8 @@ def test_destroy_skips_revoke_when_cookie_sid_missing(container_manager):
     mock_cache.delete.assert_not_called()
 
 
-def test_destroy_swallows_cache_errors(container_manager):
-    """If the cache backend itself errors (redis down, connection lost), the
-    destroy path must still complete - the row delete and history insert are
-    higher-priority than the cache revocation. This keeps container teardown
-    resilient to redis outages."""
+def test_destroy_retains_revocation_handle_when_cache_errors(container_manager):
+    """A Redis outage must not erase the only handle for revoking a live SID."""
     cm = container_manager
     row = _make_row_with_sid(user_id=99, cookie_sid="sid-99")
 
@@ -197,7 +231,10 @@ def test_destroy_swallows_cache_errors(container_manager):
             if original_current_app is not None:
                 flask_stub.current_app = original_current_app
 
-    # destroy still succeeds, history still recorded, row still deleted
-    assert result["success"]
-    mock_history_cls.assert_called_once()
-    mock_db.session.delete.assert_called_once_with(row)
+    # Docker teardown proceeds, but the active row and cookie_sid remain for a
+    # periodic cleanup retry once the cache backend recovers.
+    assert not result["success"]
+    assert "revocation" in result["error"]
+    assert row.lifecycle_state == "cleanup_pending"
+    mock_history_cls.assert_not_called()
+    mock_db.session.delete.assert_not_called()
