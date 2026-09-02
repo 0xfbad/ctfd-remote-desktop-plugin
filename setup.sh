@@ -53,19 +53,6 @@ added(){ echo -e "  ${GREEN}added${NC} $1"; }
 skip() { echo -e "  ${YELLOW}skip${NC}  $1 (already present)"; }
 err()  { echo -e "  ${RED}error${NC} $1"; }
 
-echo "remote desktop plugin setup"
-echo ""
-
-if [ ! -f "$COMPOSE_FILE" ]; then
-    err "docker-compose.yml not found at $COMPOSE_FILE"
-    exit 1
-fi
-
-if [ ! -f "$NGINX_CONF" ]; then
-    err "nginx config not found at $NGINX_CONF"
-    exit 1
-fi
-
 ctfd_service_block() {
     awk '
         /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
@@ -73,57 +60,6 @@ ctfd_service_block() {
         in_ctfd { print }
     ' "$COMPOSE_FILE"
 }
-
-# staging is opt in, a local docker daemon needs only the socket
-STAGE_SSH="${CTFD_RD_STAGE_SSH:-0}"
-STAGE_DOCKER_CONFIG="${CTFD_RD_STAGE_DOCKER_CONFIG:-0}"
-for credential_flag in "$STAGE_SSH" "$STAGE_DOCKER_CONFIG"; do
-    case "$credential_flag" in
-        0|1) ;;
-        *) err "credential staging flags must be 0 or 1"; exit 1 ;;
-    esac
-done
-if [ "$STAGE_SSH" -eq 0 ] && ctfd_service_block | grep -Eq '/home/ctfd/\.ssh'; then
-    err "existing SSH credential staging requires CTFD_RD_STAGE_SSH=1 on every setup run"
-    exit 1
-fi
-if [ "$STAGE_DOCKER_CONFIG" -eq 0 ] && ctfd_service_block | grep -Eq '/home/ctfd/\.docker'; then
-    err "existing Docker credential staging requires CTFD_RD_STAGE_DOCKER_CONFIG=1 on every setup run"
-    exit 1
-fi
-# require the source now, compose would create it later as an empty root owned directory
-if [ "$STAGE_SSH" -eq 1 ] && { [ ! -d "$HOME/.ssh" ] || [ ! -r "$HOME/.ssh" ] || [ ! -x "$HOME/.ssh" ]; }; then
-    err "CTFD_RD_STAGE_SSH=1 requires a readable $HOME/.ssh directory"
-    exit 1
-fi
-if [ "$STAGE_DOCKER_CONFIG" -eq 1 ] && { [ ! -d "$HOME/.docker" ] || [ ! -r "$HOME/.docker" ] || [ ! -x "$HOME/.docker" ]; }; then
-    err "CTFD_RD_STAGE_DOCKER_CONFIG=1 requires a readable $HOME/.docker directory"
-    exit 1
-fi
-
-cp -p "$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.yml"
-cp -p "$NGINX_CONF" "$SETUP_TMP_DIR/http.conf"
-if [ -f "$NGINX_HTTPS_CONF" ]; then
-    cp -p "$NGINX_HTTPS_CONF" "$SETUP_TMP_DIR/https.conf"
-fi
-
-DOCKER_SOCK="${DOCKER_SOCK_OVERRIDE:-/var/run/docker.sock}"
-case "$DOCKER_SOCK" in
-    /*) ;;
-    *) err "Docker socket path must be absolute: $DOCKER_SOCK"; exit 1 ;;
-esac
-case "$DOCKER_SOCK" in
-    *:*|*$'\n'*) err "Docker socket path contains unsupported characters: $DOCKER_SOCK"; exit 1 ;;
-esac
-if [ ! -S "$DOCKER_SOCK" ]; then
-    err "Docker socket not found at $DOCKER_SOCK"
-    exit 1
-fi
-DOCKER_GID=$(stat -c '%g' "$DOCKER_SOCK")
-ok "docker socket gid: $DOCKER_GID"
-
-echo ""
-echo "docker-compose.yml"
 
 ctfd_group_add_block() {
     ctfd_service_block | awk '
@@ -133,20 +69,100 @@ ctfd_group_add_block() {
     '
 }
 
+top_level_volume_exists() {
+    volume_name=$1
+    awk -v volume_name="$volume_name" '
+        /^volumes:[[:space:]]*$/ { in_volumes=1; next }
+        in_volumes && /^[^[:space:]#]/ { in_volumes=0 }
+        in_volumes && $0 ~ "^  " volume_name ":[[:space:]]*" { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$COMPOSE_FILE"
+}
+
+require_config_files() {
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        err "docker-compose.yml not found at $COMPOSE_FILE"
+        exit 1
+    fi
+
+    if [ ! -f "$NGINX_CONF" ]; then
+        err "nginx config not found at $NGINX_CONF"
+        exit 1
+    fi
+}
+
+validate_staging_flag() {
+    case "$1" in
+        0|1) ;;
+        *) err "credential staging flags must be 0 or 1"; exit 1 ;;
+    esac
+}
+
+refuse_stale_staging() {
+    flag_value=$1
+    mount_pattern=$2
+    message=$3
+    if [ "$flag_value" -eq 0 ] && ctfd_service_block | grep -Eq "$mount_pattern"; then
+        err "$message"
+        exit 1
+    fi
+}
+
+# require the source now, compose would create it later as an empty root owned directory
+require_readable_host_dir() {
+    host_dir=$1
+    message=$2
+    if [ ! -d "$host_dir" ] || [ ! -r "$host_dir" ] || [ ! -x "$host_dir" ]; then
+        err "$message"
+        exit 1
+    fi
+}
+
+snapshot_configs() {
+    cp -p "$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.yml"
+    cp -p "$NGINX_CONF" "$SETUP_TMP_DIR/http.conf"
+    if [ -f "$NGINX_HTTPS_CONF" ]; then
+        cp -p "$NGINX_HTTPS_CONF" "$SETUP_TMP_DIR/https.conf"
+    fi
+}
+
+resolve_docker_socket() {
+    DOCKER_SOCK="${DOCKER_SOCK_OVERRIDE:-/var/run/docker.sock}"
+    case "$DOCKER_SOCK" in
+        /*) ;;
+        *) err "Docker socket path must be absolute: $DOCKER_SOCK"; exit 1 ;;
+    esac
+    case "$DOCKER_SOCK" in
+        *:*|*$'\n'*) err "Docker socket path contains unsupported characters: $DOCKER_SOCK"; exit 1 ;;
+    esac
+    if [ ! -S "$DOCKER_SOCK" ]; then
+        err "Docker socket not found at $DOCKER_SOCK"
+        exit 1
+    fi
+    DOCKER_GID=$(stat -c '%g' "$DOCKER_SOCK")
+    ok "docker socket gid: $DOCKER_GID"
+}
+
+rewrite_compose() {
+    failure_message=$1
+    shift
+    awk "$@" "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
+        err "$failure_message"
+        exit 1
+    }
+    chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
+    mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
+}
+
 add_ctfd_volume() {
-    volume_line=$1
-    awk -v addition="$volume_line" '
+    rewrite_compose "could not find the /opt/CTFd source mount inside the ctfd service" \
+        -v addition="$1" '
         /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
         in_ctfd && /^  [a-zA-Z0-9_-]+:[[:space:]]*$/ && !/^  ctfd:/ { in_ctfd=0 }
         { print }
         in_ctfd && /\/opt\/CTFd/ && !added { print addition; added=1 }
         END { if (!added) exit 42 }
-    ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-        err "could not find the /opt/CTFd source mount inside the ctfd service"
-        exit 1
-    }
-    chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
-    mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
+    '
 }
 
 ensure_ctfd_dependency() {
@@ -155,13 +171,14 @@ ensure_ctfd_dependency() {
         skip "ctfd depends_on $dependency"
         return
     fi
+
     if ctfd_service_block | grep -q '^    depends_on:'; then
         # appending a mapping entry to a list yields invalid compose, refuse instead
         first_dependency_line=$(ctfd_service_block | awk '/^    depends_on:/{found=1; next} found && NF {print; exit}')
         case "$first_dependency_line" in
             "      - "*) err "ctfd depends_on uses list form; convert it to mapping form before setup"; exit 1 ;;
         esac
-        awk -v dependency="$dependency" '
+        rewrite_compose "could not update ctfd depends_on" -v dependency="$dependency" '
             /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
             in_ctfd && /^    depends_on:[[:space:]]*$/ && !added {
                 print
@@ -172,12 +189,9 @@ ensure_ctfd_dependency() {
             }
             { print }
             END { if (!added) exit 42 }
-        ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-            err "could not update ctfd depends_on"
-            exit 1
-        }
+        '
     else
-        awk -v dependency="$dependency" '
+        rewrite_compose "could not add ctfd depends_on" -v dependency="$dependency" '
             /^  ctfd:[[:space:]]*$/ && !added {
                 print
                 print "    depends_on:"
@@ -188,21 +202,17 @@ ensure_ctfd_dependency() {
             }
             { print }
             END { if (!added) exit 42 }
-        ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-            err "could not add ctfd depends_on"
-            exit 1
-        }
+        '
     fi
-    chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
-    mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
     added "ctfd depends_on $dependency"
 }
 
 # the plugin owns these service names, every run clobbers an existing block
 install_owned_service() {
     service_name=$1
-    service_block_file=$2
-    awk -v service_line="  ${service_name}:" -v block="$service_block_file" '
+    # shellcheck disable=SC2016
+    rewrite_compose "could not install the canonical $service_name service" \
+        -v service_line="  ${service_name}:" -v block="$2" '
         function emit_block(  line) {
             while ((getline line < block) > 0) print line
             close(block)
@@ -223,22 +233,23 @@ install_owned_service() {
         }
         { print }
         END { if (!emitted) exit 42 }
-    ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-        err "could not install the canonical $service_name service"
-        exit 1
-    }
-    chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
-    mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
+    '
 }
 
-if [ -n "$DOCKER_GID" ]; then
+configure_docker_group_add() {
+    [ -n "$DOCKER_GID" ] || return 0
     docker_group_marker='ctfd-remote-desktop docker socket'
     marker_count=$(ctfd_group_add_block | grep -c "$docker_group_marker" || true)
+
     if [ "$marker_count" -gt 1 ]; then
         err "ctfd group_add contains multiple plugin-managed Docker socket entries"
         exit 1
-    elif [ "$marker_count" -eq 1 ]; then
-        awk -v docker_gid="$DOCKER_GID" -v marker="$docker_group_marker" '
+    fi
+
+    if [ "$marker_count" -eq 1 ]; then
+        # shellcheck disable=SC2016
+        rewrite_compose "could not update the plugin-managed Docker socket group" \
+            -v docker_gid="$DOCKER_GID" -v marker="$docker_group_marker" '
             /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
             in_ctfd && /^  [a-zA-Z0-9_-]+:[[:space:]]*$/ && !/^  ctfd:/ { in_ctfd=0 }
             in_ctfd && /^    group_add:/ { in_group=1 }
@@ -250,21 +261,24 @@ if [ -n "$DOCKER_GID" ]; then
             }
             { print }
             END { if (!updated) exit 42 }
-        ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-            err "could not update the plugin-managed Docker socket group"
-            exit 1
-        }
-        chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
-        mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
+        '
         ok "docker socket group: $DOCKER_GID"
-    elif ctfd_group_add_block | grep -Eq '^    group_add:[[:space:]]*\['; then
+        return
+    fi
+
+    if ctfd_group_add_block | grep -Eq '^    group_add:[[:space:]]*\['; then
         err "ctfd group_add uses inline-list form; convert it to block-list form before setup"
         exit 1
-    elif ctfd_group_add_block | grep -Eq "^      - [\"']?${DOCKER_GID}[\"']?[[:space:]]*$"; then
+    fi
+
+    if ctfd_group_add_block | grep -Eq "^      - [\"']?${DOCKER_GID}[\"']?[[:space:]]*$"; then
         err "ctfd group_add already contains Docker GID $DOCKER_GID without the plugin marker; fresh setup will not adopt it"
         exit 1
-    elif ctfd_group_add_block | grep -q '^    group_add:[[:space:]]*$'; then
-        awk -v docker_gid="$DOCKER_GID" -v marker="$docker_group_marker" '
+    fi
+
+    if ctfd_group_add_block | grep -q '^    group_add:[[:space:]]*$'; then
+        rewrite_compose "could not add the Docker socket group to ctfd group_add" \
+            -v docker_gid="$DOCKER_GID" -v marker="$docker_group_marker" '
             /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
             in_ctfd && /^    group_add:[[:space:]]*$/ && !added {
                 print
@@ -274,64 +288,102 @@ if [ -n "$DOCKER_GID" ]; then
             }
             { print }
             END { if (!added) exit 42 }
-        ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-            err "could not add the Docker socket group to ctfd group_add"
-            exit 1
-        }
-        chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
-        mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
+        '
         added "docker socket group: $DOCKER_GID"
-    else
-        awk -v docker_gid="$DOCKER_GID" '
-            /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
-            in_ctfd && /^    build:[[:space:]]/ && !added {
-                print
-                print "    group_add:"
-                print "      - \"" docker_gid "\" # ctfd-remote-desktop docker socket"
-                added=1
-                next
-            }
-            { print }
-            END { if (!added) exit 42 }
-        ' "$COMPOSE_FILE" >"$SETUP_TMP_DIR/docker-compose.next.yml" || {
-            err "could not find the ctfd build field for group_add insertion"
-            exit 1
-        }
-        chmod --reference="$COMPOSE_FILE" "$SETUP_TMP_DIR/docker-compose.next.yml"
-        mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
-        added "group_add: $DOCKER_GID"
+        return
     fi
+
+    rewrite_compose "could not find the ctfd build field for group_add insertion" \
+        -v docker_gid="$DOCKER_GID" '
+        /^  ctfd:[[:space:]]*$/ { in_ctfd=1 }
+        in_ctfd && /^    build:[[:space:]]/ && !added {
+            print
+            print "    group_add:"
+            print "      - \"" docker_gid "\" # ctfd-remote-desktop docker socket"
+            added=1
+            next
+        }
+        { print }
+        END { if (!added) exit 42 }
+    '
+    added "group_add: $DOCKER_GID"
+}
+
+stage_credentials() {
+    kind=$1
+    volume_label=$2
+    service_block_file=$3
+    if ctfd_service_block | grep -q "ctfd-${kind}:/home/ctfd/.${kind}:ro"; then
+        skip "$volume_label volume"
+    elif ctfd_service_block | grep -q "/home/ctfd/.${kind}"; then
+        err "ctfd already has an unmanaged /home/ctfd/.${kind} mount; fresh setup will not replace it"
+        exit 1
+    else
+        add_ctfd_volume "      - ctfd-${kind}:/home/ctfd/.${kind}:ro"
+        added "$volume_label named volume"
+    fi
+
+    install_owned_service "${kind}-permissions" "$service_block_file"
+    added "canonical ${kind} permissions service"
+    ensure_ctfd_dependency "${kind}-permissions"
+}
+
+ensure_top_level_volume() {
+    volume_name=$1
+    if top_level_volume_exists "$volume_name"; then
+        skip "$volume_name named volume"
+        return
+    fi
+    sed -i '/^volumes:[[:space:]]*$/a\  '"$volume_name"':' "$COMPOSE_FILE"
+    added "$volume_name named volume"
+}
+
+verify_stack() {
+    docker compose -f "$COMPOSE_FILE" config -q
+    ok "docker compose configuration validates"
+
+    if docker compose -f "$COMPOSE_FILE" ps --status running --services 2>/dev/null | grep -qx nginx; then
+        docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -t
+        ok "running nginx configuration validates"
+    else
+        echo -e "  ${YELLOW}warn${NC}  nginx is not running; run 'docker compose exec -T nginx nginx -t' after startup"
+    fi
+}
+
+echo "remote desktop plugin setup"
+echo ""
+
+require_config_files
+
+# staging is opt in, a local docker daemon needs only the socket
+STAGE_SSH="${CTFD_RD_STAGE_SSH:-0}"
+STAGE_DOCKER_CONFIG="${CTFD_RD_STAGE_DOCKER_CONFIG:-0}"
+validate_staging_flag "$STAGE_SSH"
+validate_staging_flag "$STAGE_DOCKER_CONFIG"
+refuse_stale_staging "$STAGE_SSH" '/home/ctfd/\.ssh' \
+    "existing SSH credential staging requires CTFD_RD_STAGE_SSH=1 on every setup run"
+refuse_stale_staging "$STAGE_DOCKER_CONFIG" '/home/ctfd/\.docker' \
+    "existing Docker credential staging requires CTFD_RD_STAGE_DOCKER_CONFIG=1 on every setup run"
+if [ "$STAGE_SSH" -eq 1 ]; then
+    require_readable_host_dir "$HOME/.ssh" "CTFD_RD_STAGE_SSH=1 requires a readable $HOME/.ssh directory"
 fi
+if [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
+    require_readable_host_dir "$HOME/.docker" "CTFD_RD_STAGE_DOCKER_CONFIG=1 requires a readable $HOME/.docker directory"
+fi
+
+snapshot_configs
+resolve_docker_socket
+
+echo ""
+echo "docker-compose.yml"
+
+configure_docker_group_add
 
 if ctfd_service_block | grep -q ':/var/run/docker.sock'; then
     skip "docker socket volume"
 else
     add_ctfd_volume "      - ${DOCKER_SOCK}:/var/run/docker.sock"
     added "docker socket volume"
-fi
-
-if [ "$STAGE_SSH" -eq 1 ]; then
-    if ctfd_service_block | grep -q 'ctfd-ssh:/home/ctfd/.ssh:ro'; then
-        skip "ssh volume"
-    elif ctfd_service_block | grep -q '/home/ctfd/.ssh'; then
-        err "ctfd already has an unmanaged /home/ctfd/.ssh mount; fresh setup will not replace it"
-        exit 1
-    else
-        add_ctfd_volume '      - ctfd-ssh:/home/ctfd/.ssh:ro'
-        added "ssh named volume"
-    fi
-fi
-
-if [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
-    if ctfd_service_block | grep -q 'ctfd-docker:/home/ctfd/.docker:ro'; then
-        skip "docker config volume"
-    elif ctfd_service_block | grep -q '/home/ctfd/.docker'; then
-        err "ctfd already has an unmanaged /home/ctfd/.docker mount; fresh setup will not replace it"
-        exit 1
-    else
-        add_ctfd_volume '      - ctfd-docker:/home/ctfd/.docker:ro'
-        added "docker config named volume"
-    fi
 fi
 
 if [ "$STAGE_SSH" -eq 1 ] || [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
@@ -365,9 +417,7 @@ if [ "$STAGE_SSH" -eq 1 ]; then
         trap - HUP INT TERM EXIT; rm -rf -- "$stage" "$backup"
       '
 COMPOSESERVICE
-    install_owned_service ssh-permissions "$SETUP_TMP_DIR/ssh-permissions.yml"
-    added "canonical ssh permissions service"
-    ensure_ctfd_dependency ssh-permissions
+    stage_credentials ssh ssh "$SETUP_TMP_DIR/ssh-permissions.yml"
 fi
 
 # tls material and registry config can be mode 0600, copy as root then chown inside the volume
@@ -396,20 +446,8 @@ if [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
         trap - HUP INT TERM EXIT; rm -rf -- "$stage" "$backup"
       '
 COMPOSESERVICE
-    install_owned_service docker-permissions "$SETUP_TMP_DIR/docker-permissions.yml"
-    added "canonical docker permissions service"
-    ensure_ctfd_dependency docker-permissions
+    stage_credentials docker "docker config" "$SETUP_TMP_DIR/docker-permissions.yml"
 fi
-
-top_level_volume_exists() {
-    volume_name=$1
-    awk -v volume_name="$volume_name" '
-        /^volumes:[[:space:]]*$/ { in_volumes=1; next }
-        in_volumes && /^[^[:space:]#]/ { in_volumes=0 }
-        in_volumes && $0 ~ "^  " volume_name ":[[:space:]]*" { found=1 }
-        END { exit(found ? 0 : 1) }
-    ' "$COMPOSE_FILE"
-}
 
 if [ "$STAGE_SSH" -eq 1 ] || [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
     if grep -q '^volumes:' "$COMPOSE_FILE" && ! grep -q '^volumes:[[:space:]]*$' "$COMPOSE_FILE"; then
@@ -419,20 +457,10 @@ if [ "$STAGE_SSH" -eq 1 ] || [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
         printf '\nvolumes:\n' >>"$COMPOSE_FILE"
     fi
     if [ "$STAGE_SSH" -eq 1 ]; then
-        if top_level_volume_exists ctfd-ssh; then
-            skip "ctfd-ssh named volume"
-        else
-            sed -i '/^volumes:[[:space:]]*$/a\  ctfd-ssh:' "$COMPOSE_FILE"
-            added "ctfd-ssh named volume"
-        fi
+        ensure_top_level_volume ctfd-ssh
     fi
     if [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
-        if top_level_volume_exists ctfd-docker; then
-            skip "ctfd-docker named volume"
-        else
-            sed -i '/^volumes:[[:space:]]*$/a\  ctfd-docker:' "$COMPOSE_FILE"
-            added "ctfd-docker named volume"
-        fi
+        ensure_top_level_volume ctfd-docker
     fi
 fi
 
@@ -639,15 +667,7 @@ for conf in "$NGINX_CONF" "$NGINX_HTTPS_CONF"; do
     prepare_nginx_config "$conf"
 done
 
-docker compose -f "$COMPOSE_FILE" config -q
-ok "docker compose configuration validates"
-
-if docker compose -f "$COMPOSE_FILE" ps --status running --services 2>/dev/null | grep -qx nginx; then
-    docker compose -f "$COMPOSE_FILE" exec -T nginx nginx -t
-    ok "running nginx configuration validates"
-else
-    echo -e "  ${YELLOW}warn${NC}  nginx is not running; run 'docker compose exec -T nginx nginx -t' after startup"
-fi
+verify_stack
 
 SETUP_OK=1
 

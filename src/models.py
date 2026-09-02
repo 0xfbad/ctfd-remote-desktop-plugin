@@ -285,6 +285,24 @@ def _locked_profile() -> tuple[
     return effective, by_key, revision
 
 
+def _migrate_v1_defaults(
+    effective: dict[str, SettingValue],
+    by_key: dict[str, DesktopSettingsModel],
+) -> bool:
+    # upgrade only rows still equal to the exact v1 defaults so operator overrides survive
+    migrated = False
+    legacy_cap_add = "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE"
+    cap_row = by_key.get("cap_add")
+    if cap_row is not None and decode_stored_setting("cap_add", cap_row.value) == legacy_cap_add:
+        effective["cap_add"] = SETTING_DEFAULTS["cap_add"]
+        migrated = True
+    readiness_row = by_key.get("vnc_ready_attempts")
+    if readiness_row is not None and decode_stored_setting("vnc_ready_attempts", readiness_row.value) == 180:
+        effective["vnc_ready_attempts"] = SETTING_DEFAULTS["vnc_ready_attempts"]
+        migrated = True
+    return migrated
+
+
 def initialize_settings() -> None:
     """seed, validate, and canonically rewrite every settings row at startup"""
     _ensure_revision_row()
@@ -299,16 +317,7 @@ def initialize_settings() -> None:
             raise SettingsValidationError("unsupported settings schema version")
         public_profile_migrated = False
         if schema_version < 2:
-            # upgrade only rows still equal to the exact v1 defaults so operator overrides survive
-            legacy_cap_add = "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE"
-            cap_row = by_key.get("cap_add")
-            if cap_row is not None and decode_stored_setting("cap_add", cap_row.value) == legacy_cap_add:
-                effective["cap_add"] = SETTING_DEFAULTS["cap_add"]
-                public_profile_migrated = True
-            readiness_row = by_key.get("vnc_ready_attempts")
-            if readiness_row is not None and decode_stored_setting("vnc_ready_attempts", readiness_row.value) == 180:
-                effective["vnc_ready_attempts"] = SETTING_DEFAULTS["vnc_ready_attempts"]
-                public_profile_migrated = True
+            public_profile_migrated = _migrate_v1_defaults(effective, by_key)
             schema_version = 2
 
         for key, value in effective.items():

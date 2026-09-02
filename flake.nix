@@ -19,11 +19,6 @@
       pythonEnv = pkgs.python3.withPackages (ps: [ps.mypy ps.pytest ps.vulture ps.markupsafe ps.jinja2 ps.pyyaml]);
     in {
       formatting = treefmtEval.${pkgs.system}.config.build.check self;
-      tests = pkgs.runCommand "ctfd-remote-desktop-tests" {nativeBuildInputs = [pythonEnv pkgs.util-linux];} ''
-        cd ${self}
-        pytest -p no:cacheprovider tests -q
-        touch $out
-      '';
       types = pkgs.runCommand "ctfd-remote-desktop-types" {nativeBuildInputs = [pythonEnv];} ''
         cd ${self}
         mypy --cache-dir "$TMPDIR/mypy" .

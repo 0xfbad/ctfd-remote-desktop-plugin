@@ -280,6 +280,60 @@ def ping_endpoint(endpoint: str, timeout: int = 3) -> bool:
                 pass
 
 
+_DEADLINE_STATE_DIR = "/var/lib/remote-desktop"
+_DEADLINE_FILENAME = "max-lifetime-deadline"
+
+
+def _read_deadline_state(container) -> tuple[int, float]:
+    stream, _stat = container.get_archive(f"{_DEADLINE_STATE_DIR}/{_DEADLINE_FILENAME}")
+    archive_buffer = bytearray()
+    for chunk in stream:
+        archive_buffer.extend(chunk)
+        if len(archive_buffer) > 1024 * 1024:
+            raise ValueError("maximum-lifetime deadline archive was oversized")
+    archive = bytes(archive_buffer)
+    if not archive:
+        raise ValueError("maximum-lifetime deadline archive was empty")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as tar:
+        members = [
+            member
+            for member in tar.getmembers()
+            if member.isfile() and os.path.basename(member.name.rstrip("/")) == _DEADLINE_FILENAME
+        ]
+        if len(members) != 1:
+            raise ValueError("maximum-lifetime deadline file was missing or ambiguous")
+        member = members[0]
+        if member.uid != 0 or member.gid != 0 or member.mode & 0o777 != 0o600:
+            raise ValueError("maximum-lifetime deadline file has unsafe metadata")
+        extracted = tar.extractfile(member)
+        if extracted is None:
+            raise ValueError("maximum-lifetime deadline file was unreadable")
+        raw = extracted.read(32)
+        if extracted.read(1):
+            raise ValueError("maximum-lifetime deadline file was oversized")
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("maximum-lifetime deadline was not ASCII") from exc
+    if not value.isdigit() or value.startswith("0") or len(value) > 10:
+        raise ValueError("maximum-lifetime deadline was invalid")
+    return int(value), float(member.mtime or 0)
+
+
+def _build_deadline_archive(deadline: int, mtime: int) -> bytes:
+    payload = f"{deadline}\n".encode("ascii")
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        member = tarfile.TarInfo(_DEADLINE_FILENAME)
+        member.size = len(payload)
+        member.mode = 0o600
+        member.uid = 0
+        member.gid = 0
+        member.mtime = mtime
+        tar.addfile(member, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
 class DockerHostManager:
     def __init__(self) -> None:
         self._context_configs: dict[str, str] = {}
@@ -319,6 +373,60 @@ class DockerHostManager:
         pool = self._get_threadpool(context_name)
         return pool.apply(fn, args=args, kwds=kwargs)
 
+    def _pop_entry_locked(self, key: ClientKey) -> docker.DockerClient | None:
+        client = self._clients.pop(key, None)
+        self._client_generations.pop(key, None)
+        self._client_epochs.pop(key, None)
+        self._client_threads.pop(key, None)
+        return client
+
+    def _sweep_dead_entries_locked(self, to_close: list[docker.DockerClient]) -> None:
+        # idents are reused after a worker exits, so the owner object decides who inherits a transport
+        dead_keys = [
+            cached_key
+            for cached_key in self._clients
+            if (owner := self._client_threads.get(cached_key)) is None or not owner.is_alive()
+        ]
+        for dead_key in dead_keys:
+            dead_client = self._pop_entry_locked(dead_key)
+            if dead_client is not None:
+                to_close.append(dead_client)
+
+    def _entry_is_stale_locked(self, key: ClientKey) -> bool:
+        return (
+            key[0] not in self._context_configs
+            or self._client_generations.get(key) != self._config_generation
+            or self._client_epochs.get(key) != self._context_client_epochs.get(key[0], 0)
+        )
+
+    def _sweep_owned_stale_entries_locked(
+        self, current_thread: threading.Thread, to_close: list[docker.DockerClient]
+    ) -> None:
+        # sweep every stale key this thread owns, otherwise each retired context leaks one ssh transport
+        owned_stale_keys = [
+            cached_key
+            for cached_key in self._clients
+            if self._client_threads.get(cached_key) is current_thread and self._entry_is_stale_locked(cached_key)
+        ]
+        for stale_key in owned_stale_keys:
+            stale_client = self._pop_entry_locked(stale_key)
+            if stale_client is not None:
+                to_close.append(stale_client)
+
+    def _take_current_client_locked(
+        self, key: ClientKey, current_thread: threading.Thread, to_close: list[docker.DockerClient]
+    ) -> docker.DockerClient | None:
+        client = self._clients.get(key)
+        if client is None:
+            return None
+        if self._client_threads.get(key) is not current_thread or self._entry_is_stale_locked(key):
+            # roll only this worker entry, closing another thread transport can abort its create
+            rolled_client = self._pop_entry_locked(key)
+            if rolled_client is not None:
+                to_close.append(rolled_client)
+            return None
+        return client
+
     def _get_client(self, context_name: str) -> docker.DockerClient:
         tid = threading.get_ident()
         current_thread = threading.current_thread()
@@ -327,50 +435,9 @@ class DockerHostManager:
         client_error: Exception | None = None
         with self._lock:
             key = (context_name, tid)
-
-            # idents are reused after a worker exits, so the owner object decides who inherits a transport
-            dead_keys = [
-                cached_key
-                for cached_key in self._clients
-                if (owner := self._client_threads.get(cached_key)) is None or not owner.is_alive()
-            ]
-            for dead_key in dead_keys:
-                to_close.append(self._clients.pop(dead_key))
-                self._client_generations.pop(dead_key, None)
-                self._client_epochs.pop(dead_key, None)
-                self._client_threads.pop(dead_key, None)
-
-            # sweep every stale key this thread owns, otherwise each retired context leaks one ssh transport
-            owned_stale_keys = [
-                cached_key
-                for cached_key in self._clients
-                if self._client_threads.get(cached_key) is current_thread
-                and (
-                    cached_key[0] not in self._context_configs
-                    or self._client_generations.get(cached_key) != self._config_generation
-                    or self._client_epochs.get(cached_key) != self._context_client_epochs.get(cached_key[0], 0)
-                )
-            ]
-            for stale_key in owned_stale_keys:
-                to_close.append(self._clients.pop(stale_key))
-                self._client_generations.pop(stale_key, None)
-                self._client_epochs.pop(stale_key, None)
-                self._client_threads.pop(stale_key, None)
-
-            client = self._clients.get(key)
-            owner = self._client_threads.get(key)
-            generation = self._client_generations.get(key)
-            client_epoch = self._client_epochs.get(key)
-            context_epoch = self._context_client_epochs.get(context_name, 0)
-            if client is not None and (
-                owner is not current_thread or generation != self._config_generation or client_epoch != context_epoch
-            ):
-                # roll only this worker entry, closing another thread transport can abort its create
-                to_close.append(self._clients.pop(key))
-                self._client_generations.pop(key, None)
-                self._client_epochs.pop(key, None)
-                self._client_threads.pop(key, None)
-                client = None
+            self._sweep_dead_entries_locked(to_close)
+            self._sweep_owned_stale_entries_locked(current_thread, to_close)
+            client = self._take_current_client_locked(key, current_thread, to_close)
 
             if client is None:
                 url = self._context_configs.get(context_name)
@@ -382,7 +449,7 @@ class DockerHostManager:
                     else:
                         self._clients[key] = client
                         self._client_generations[key] = self._config_generation
-                        self._client_epochs[key] = context_epoch
+                        self._client_epochs[key] = self._context_client_epochs.get(context_name, 0)
                         self._client_threads[key] = current_thread
                 else:
                     missing_context = True
@@ -406,10 +473,7 @@ class DockerHostManager:
         key = (context_name, threading.get_ident())
         with self._lock:
             self._context_client_epochs[context_name] = self._context_client_epochs.get(context_name, 0) + 1
-            old = self._clients.pop(key, None)
-            self._client_generations.pop(key, None)
-            self._client_epochs.pop(key, None)
-            self._client_threads.pop(key, None)
+            old = self._pop_entry_locked(key)
         if old is not None:
             try:
                 old.close()
@@ -1068,44 +1132,6 @@ class DockerHostManager:
         """docker archive io still works while the cgroup is frozen so the watchdog cannot observe the replacement
         the file mtime records the last credited instant so a retry adds only the new part of the hold
         """
-        state_dir = "/var/lib/remote-desktop"
-        filename = "max-lifetime-deadline"
-        path = f"{state_dir}/{filename}"
-
-        def _read(container) -> tuple[int, float]:
-            stream, _stat = container.get_archive(path)
-            archive_buffer = bytearray()
-            for chunk in stream:
-                archive_buffer.extend(chunk)
-                if len(archive_buffer) > 1024 * 1024:
-                    raise ValueError("maximum-lifetime deadline archive was oversized")
-            archive = bytes(archive_buffer)
-            if not archive:
-                raise ValueError("maximum-lifetime deadline archive was empty")
-            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as tar:
-                members = [
-                    member
-                    for member in tar.getmembers()
-                    if member.isfile() and os.path.basename(member.name.rstrip("/")) == filename
-                ]
-                if len(members) != 1:
-                    raise ValueError("maximum-lifetime deadline file was missing or ambiguous")
-                member = members[0]
-                if member.uid != 0 or member.gid != 0 or member.mode & 0o777 != 0o600:
-                    raise ValueError("maximum-lifetime deadline file has unsafe metadata")
-                extracted = tar.extractfile(member)
-                if extracted is None:
-                    raise ValueError("maximum-lifetime deadline file was unreadable")
-                raw = extracted.read(32)
-                if extracted.read(1):
-                    raise ValueError("maximum-lifetime deadline file was oversized")
-            try:
-                value = raw.decode("ascii").strip()
-            except UnicodeDecodeError as exc:
-                raise ValueError("maximum-lifetime deadline was not ASCII") from exc
-            if not value.isdigit() or value.startswith("0") or len(value) > 10:
-                raise ValueError("maximum-lifetime deadline was invalid")
-            return int(value), float(member.mtime or 0)
 
         def _do() -> int:
             client = self._get_client(context_name)
@@ -1118,7 +1144,7 @@ class DockerHostManager:
                 now = time.time()
                 if not math.isfinite(paused_at) or paused_at <= 0 or paused_at > now + 1:
                     raise ValueError("paused timestamp is invalid")
-                current_deadline, credited_mtime = _read(container)
+                current_deadline, credited_mtime = _read_deadline_state(container)
                 if credited_mtime > now + 1:
                     raise ValueError("maximum-lifetime deadline mtime is in the future")
 
@@ -1131,20 +1157,11 @@ class DockerHostManager:
                     raise ValueError("maximum-lifetime deadline extension overflowed")
 
                 if credit_seconds:
-                    payload = f"{new_deadline}\n".encode("ascii")
-                    buffer = io.BytesIO()
-                    with tarfile.open(fileobj=buffer, mode="w") as tar:
-                        member = tarfile.TarInfo(filename)
-                        member.size = len(payload)
-                        member.mode = 0o600
-                        member.uid = 0
-                        member.gid = 0
-                        member.mtime = int(now)
-                        tar.addfile(member, io.BytesIO(payload))
-                    if container.put_archive(state_dir, buffer.getvalue()) is False:
+                    archive = _build_deadline_archive(new_deadline, int(now))
+                    if container.put_archive(_DEADLINE_STATE_DIR, archive) is False:
                         raise ValueError("Docker rejected maximum-lifetime deadline update")
 
-                verified_deadline, verified_mtime = _read(container)
+                verified_deadline, verified_mtime = _read_deadline_state(container)
                 if verified_deadline != new_deadline:
                     raise ValueError("maximum-lifetime deadline readback did not match")
                 if credit_seconds and verified_mtime < int(now) - 1:

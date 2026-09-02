@@ -22,8 +22,8 @@ from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
 from . import event_bus
-from .database import prepare_database
-from .database import validate_database_schema
+from .database import prepare_database as _prepare_database
+from .database import validate_database_schema as _validate_database_schema  # noqa: F401
 
 # must precede the instance import below, that import rebinds the package attribute event_logger
 from . import event_logger as event_logger_module
@@ -184,14 +184,6 @@ def _claim_scheduler_leader(app: Flask) -> bool:
         raise RuntimeError("scheduler leadership supports MariaDB/MySQL or SQLite databases")
 
 
-def _prepare_database(app: Flask) -> None:
-    prepare_database(app)
-
-
-def _validate_database_schema(app: Flask) -> None:
-    validate_database_schema(app)
-
-
 def _gunicorn_master_preload_active(frame=None) -> bool:
     """stack inspection covers default file and module gunicorn configs without parsing them again"""
     current = frame if frame is not None else sys._getframe(1)
@@ -227,13 +219,13 @@ def _make_bus_callback(orchestrator: Orchestrator) -> Callable[[dict], None]:
     return _on_bus_message
 
 
-def _seed_defaults(app: Flask) -> None:
+def _seed_defaults() -> None:
     from .models import initialize_settings
 
     initialize_settings()  # locks the revision row and fails startup on an unsafe stored profile
 
 
-def _seed_local_context(app: Flask) -> None:
+def _seed_local_context() -> None:
     from CTFd.models import db
     from sqlalchemy.exc import IntegrityError
 
@@ -311,42 +303,35 @@ def _reconcile_containers(
 
         # a worker may have died after persisting the teardown, retry even if the object still runs
         if lifecycle_state in (LIFECYCLE_STOPPING, LIFECYCLE_CLEANUP_PENDING):
-            result = container_manager.destroy_container(
-                user_id,
-                reason=lifecycle_reason,
-                log_destruction=True,
-            )
-            if result.get("success"):
-                removed += 1
-            else:
+            reason = lifecycle_reason
+        else:
+            try:
+                running = host_manager.is_container_running(docker_context, container_id)
+            except (
+                docker.errors.DockerException,
+                paramiko.ssh_exception.SSHException,
+                EOFError,
+                OSError,
+                # a slow host raises this for every call, deleting rows orphans live sessions
+                HostsUnavailableException,
+            ):
                 kept += 1
-            continue
+                continue
+            except Exception:
+                # an unknown failure is not proof the container is gone, deleting the row orphans it
+                logger.warning(f"reconcile: could not verify {container_id}; retaining row", exc_info=True)
+                kept += 1
+                continue
 
-        try:
-            running = host_manager.is_container_running(docker_context, container_id)
-        except (
-            docker.errors.DockerException,
-            paramiko.ssh_exception.SSHException,
-            EOFError,
-            OSError,
-            # a slow host raises this for every call, deleting rows orphans live sessions
-            HostsUnavailableException,
-        ):
-            kept += 1
-            continue
-        except Exception:
-            # an unknown failure is not proof the container is gone, deleting the row orphans it
-            logger.warning(f"reconcile: could not verify {container_id}; retaining row", exc_info=True)
-            kept += 1
-            continue
+            if running:
+                kept += 1
+                continue
 
-        if running:
-            kept += 1
-            continue
+            reason = END_REASON_RECONCILIATION
 
         result = container_manager.destroy_container(
             user_id,
-            reason=END_REASON_RECONCILIATION,
+            reason=reason,
             log_destruction=True,
         )
         if result.get("success"):
@@ -370,8 +355,8 @@ def load(app: Flask) -> None:
     orchestrator = Orchestrator(host_manager)
 
     with app.app_context():
-        _seed_defaults(app)
-        _seed_local_context(app)
+        _seed_defaults()
+        _seed_local_context()
         orchestrator.load_from_db()
 
     container_manager = ContainerManager(host_manager, orchestrator, app)

@@ -6,7 +6,8 @@ import logging
 import secrets
 import traceback
 import uuid
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, TypeIs
 from threading import Lock
 
 import docker
@@ -50,6 +51,7 @@ from .models import (
 from .event_logger import event_logger
 from .docker_host_manager import (
     DockerHostManager,
+    ContainerResult,
     ContainerState,
     SESSION_LABEL_MANAGED,
     SESSION_LABEL_USER_ID,
@@ -158,6 +160,16 @@ PausedOrphanEntry = dict[str, str | int | float]
 _SESSION_CONTAINER_NAME_RE = re.compile(r"rd-session-([1-9][0-9]*)-([0-9a-f]{8}-[0-9a-f]{3})")
 
 
+@dataclass
+class _CreateAttempt:
+    """creation state mutated mid phase so the failure cleanup sees it after any phase raises"""
+
+    context_name: str | None = None
+    container_create_started: bool = False
+    cookie_sid: str | None = None
+    cookie_app: Flask | None = None
+
+
 def _sanitize_username(raw: str, user_id: int | None = None) -> str:
     name = _USERNAME_RE.sub("", raw.lower())
     # linux usernames must start with a letter or underscore
@@ -179,6 +191,8 @@ def _connection_ports(ssh_enabled: bool, web_terminal_enabled: bool) -> list[str
 
 class ContainerManager:
     UNPAUSE_LEASE_SECONDS = 60
+    RECONCILE_NAME_PREFIX = "rd-session-"
+    RECONCILE_SAFETY_AGE_SECONDS = 300
 
     def __init__(self, host_manager: DockerHostManager, orchestrator: Orchestrator, app: Flask | None = None) -> None:
         self.host_manager = host_manager
@@ -540,136 +554,33 @@ class ContainerManager:
         user, username = _display_name(user_id)
         container_username = self._resolve_username(user) if user else f"user{user_id}"
 
-        context_name: str | None = None
         container_name = f"rd-session-{user_id}-{session_uuid[:12]}"
-        container_create_started = False
-        cookie_sid: str | None = None
-        cookie_app: Flask | None = None
+        attempt = _CreateAttempt()
 
         try:
-            if fenced and not self._update_operation(user_id, session_uuid, worker_uuid, OP_SELECTING):
-                raise RuntimeError("creation lease is no longer owned by this worker")
-            with self.lock:
-                self.creation_status[user_id] = {"status": "selecting_host", "message": "Requesting a server..."}
-
-            if fenced:
-                context_name = self.orchestrator.select_and_reserve(
-                    ReservationClaim(
-                        user_id=user_id,
-                        session_uuid=session_uuid,
-                        worker_lease_uuid=worker_uuid,
-                        container_name=container_name,
-                    )
-                )
-            else:
-                context_name = self.orchestrator.select_and_reserve()
-
-            # same state update acts as a lease heartbeat before the hostname lookup and semaphore wait
-            if fenced and not self._update_operation(
+            context_name, pub_hostname, check_hostname, display_hostname = self._reserve_creation_host(
                 user_id,
                 session_uuid,
                 worker_uuid,
-                OP_RESERVED,
-                docker_context=context_name,
+                fenced,
+                container_name,
+                attempt,
+            )
+
+            result, vnc_password, initial_duration, max_extensions = self._launch_desktop_container(
+                user_id=user_id,
+                user=user,
+                session_uuid=session_uuid,
+                worker_uuid=worker_uuid,
+                fenced=fenced,
                 container_name=container_name,
-                capacity_reserved=True,
-            ):
-                raise RuntimeError("creation cancelled after host reservation")
-
-            pub_hostname, check_hostname = self.host_manager.get_connection_hostnames(context_name)
-            # escaped because the ui renders creation status messages as html
-            display_hostname = _esc(context_name)
-
-            logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
-
-            create_semaphore = None
-            try:
-                create_semaphore = self.host_manager.acquire_semaphore(context_name)
-
-                with self.lock:
-                    self.creation_status[user_id] = {
-                        "status": "starting_container",
-                        "message": f"Starting container on {display_hostname}...",
-                    }
-
-                network_name = str(self._get_setting("rd_network_name") or "bridge")
-
-                if fenced and not self._update_operation(
-                    user_id,
-                    session_uuid,
-                    worker_uuid,
-                    OP_CREATING,
-                ):
-                    raise RuntimeError("creation cancelled before Docker create")
-
-                vnc_password = secrets.token_urlsafe(6)[:8]
-
-                docker_image = str(self._get_setting("docker_image"))
-                resolution = str(self._get_setting("resolution"))
-                shm_size = parse_size(self._get_setting("shm_size"))  # type: ignore[arg-type]
-                memory_limit = parse_size(self._get_setting("memory_limit"))  # type: ignore[arg-type]
-                cpu_limit = self._get_setting("cpu_limit")
-                nano_cpus = int(float(cpu_limit) * 1e9)  # type: ignore[arg-type]
-
-                # read once so ports and env can never disagree for one container
-                ssh_enabled = bool(self._get_setting("ssh_enabled"))
-                web_terminal_enabled = bool(self._get_setting("web_terminal_enabled"))
-
-                initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
-                extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
-                max_extensions = int(self._get_setting("max_extensions"))  # type: ignore[arg-type]
-                # hard ceiling so a container cannot outlive the longest possible session
-                max_lifetime = int(initial_duration + (extension_duration * max_extensions) + 300)
-
-                container_env = {
-                    "VNC_PASSWORD": vnc_password,
-                    "RESOLUTION": resolution,
-                    "CTFD_USERNAME": container_username,
-                    "MAX_LIFETIME": str(max_lifetime),
-                    "CTFD_URL": container_url,
-                    # the image treats an absent var as enabled so always pass an explicit 0
-                    "ENABLE_SSH": "1" if ssh_enabled else "0",
-                    "ENABLE_TTYD": "1" if web_terminal_enabled else "0",
-                }
-
-                from flask import current_app
-
-                if user is not None:
-                    cookie_app = current_app._get_current_object()
-                    minted = _mint_session_cookie(cookie_app, user)
-                    if minted:
-                        cookie_name, cookie_value, cookie_sid = minted
-                        container_env["CTFD_COOKIE_NAME"] = cookie_name
-                        container_env["CTFD_COOKIE_VALUE"] = cookie_value
-                    else:
-                        logger.warning(f"failed to mint session cookie for user {user_id}, autologin disabled")
-
-                # end the implicit transaction opened by the settings reads before remote io
-                db.session.rollback()
-                # past this line a transport failure leaves the create outcome unknown
-                container_create_started = True
-                result = self.host_manager.run_container(
-                    context_name=context_name,
-                    image=docker_image,
-                    name=container_name,
-                    # a context name can carry characters that are invalid in a kernel hostname
-                    hostname=container_name,
-                    env=container_env,
-                    ports=_connection_ports(ssh_enabled, web_terminal_enabled),
-                    shm_size=shm_size,
-                    memory=memory_limit,
-                    nano_cpus=nano_cpus,
-                    extra_hosts=extra_hosts,
-                    network=network_name,
-                    labels={
-                        SESSION_LABEL_MANAGED: "true",
-                        SESSION_LABEL_USER_ID: str(user_id),
-                        SESSION_LABEL_UUID: session_uuid,
-                    },
-                )
-            finally:
-                if create_semaphore is not None:
-                    self.host_manager.release_semaphore(create_semaphore)
+                container_username=container_username,
+                container_url=container_url,
+                extra_hosts=extra_hosts,
+                context_name=context_name,
+                display_hostname=display_hostname,
+                attempt=attempt,
+            )
 
             port_map: dict[str, int] = result["ports"]  # type: ignore[assignment]
             container_id = str(result["container_id"])
@@ -680,36 +591,19 @@ class ContainerManager:
             ttyd_port = port_map.get("7682/tcp")
 
             logger.info(
-                f"container {container_name} created - SSH:{ssh_port} VNC:{vnc_port} noVNC:{novnc_port} ttyd:{ttyd_port}"
+                f"container {container_name} created - "
+                f"SSH:{ssh_port} VNC:{vnc_port} noVNC:{novnc_port} ttyd:{ttyd_port}"
             )
 
-            with self.lock:
-                self.creation_status[user_id] = {
-                    "status": "waiting_vnc",
-                    "message": f"Waiting for {display_hostname} display server...",
-                }
-            if fenced and not self._update_operation(user_id, session_uuid, worker_uuid, OP_WAITING_READY):
-                raise RuntimeError("creation cancelled while waiting for readiness")
-            ready_heartbeat_at = time.monotonic()
-
-            def _vnc_progress(attempt: int, max_attempts: int) -> None:
-                nonlocal ready_heartbeat_at
-                if attempt % 5 == 0:
-                    with self.lock:
-                        self.creation_status[user_id] = {
-                            "status": "waiting_vnc",
-                            "message": f"Waiting for {display_hostname} display server... ({attempt}/{max_attempts})",
-                        }
-                now = time.monotonic()
-                if fenced and now - ready_heartbeat_at >= _READY_HEARTBEAT_INTERVAL_SECONDS:
-                    if not self._update_operation(user_id, session_uuid, worker_uuid, OP_WAITING_READY):
-                        raise RuntimeError("creation cancelled while waiting for readiness")
-                    ready_heartbeat_at = now
-
-            vnc_ready = self.wait_for_vnc_ready(check_hostname, novnc_port, progress_callback=_vnc_progress)  # type: ignore[arg-type]
-
-            if not vnc_ready:
-                raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
+            self._wait_for_session_ready(
+                user_id,
+                session_uuid,
+                worker_uuid,
+                fenced,
+                display_hostname,
+                check_hostname,
+                novnc_port,
+            )
 
             container_username = self._read_resolved_username(context_name, container_name)
             vnc_url = proxy_vnc_url(user_id, vnc_password)
@@ -740,37 +634,11 @@ class ContainerManager:
                 timer_duration=float(initial_duration),
                 extensions_used=0,
                 max_extensions=max_extensions,
-                cookie_sid=cookie_sid,
+                cookie_sid=attempt.cookie_sid,
                 session_uuid=session_uuid,
                 lifecycle_state=LIFECYCLE_ACTIVE,
             )
-            try:
-                if fenced:
-                    db.session.rollback()
-                    operation = self._locked_operation(user_id)
-                    existing = self._locked_active_row(user_id)
-                    if (
-                        operation is None
-                        or operation.session_uuid != session_uuid
-                        or operation.worker_lease_uuid != worker_uuid
-                        or operation.cancel_requested
-                        or existing is not None
-                    ):
-                        db.session.rollback()
-                        raise RuntimeError("creation lease changed before finalization")
-                    db.session.add(row)
-                    operation.state = OP_ACTIVE
-                    operation.updated_at = time.time()
-                    operation.heartbeat_at = operation.updated_at
-                    operation.docker_context = context_name
-                    operation.container_name = container_name
-                    db.session.commit()
-                else:
-                    db.session.add(row)
-                    db.session.commit()
-            except Exception:
-                db.session.rollback()
-                raise
+            self._commit_created_session(user_id, session_uuid, worker_uuid, fenced, row, context_name, container_name)
 
             with self.lock:
                 self.creation_status[user_id] = {
@@ -800,72 +668,327 @@ class ContainerManager:
                 logger.exception("failed to log session_created for committed session %s", session_uuid)
 
         except Exception as e:
-            if cookie_sid and cookie_app is not None:
-                _revoke_session_cookie(cookie_app, cookie_sid)
+            self._cleanup_failed_creation(
+                e,
+                user_id,
+                username,
+                session_uuid,
+                worker_uuid,
+                fenced,
+                container_name,
+                attempt,
+            )
 
-            stopped_ok = False
-            if container_create_started and container_name and context_name:
-                try:
-                    # auto_remove never fires for a container that was created but never started
-                    self.host_manager.force_remove_container(context_name, container_name)
-                    stopped_ok = True
-                    logger.info(f"removed container {container_name} after creation failure")
-                except Exception as stop_error:
-                    logger.error(f"failed to stop container during cleanup: {stop_error}")
+    def _reserve_creation_host(
+        self,
+        user_id: int,
+        session_uuid: str,
+        worker_uuid: str,
+        fenced: bool,
+        container_name: str,
+        attempt: _CreateAttempt,
+    ) -> tuple[str, str | None, str | None, str]:
+        if fenced and not self._update_operation(user_id, session_uuid, worker_uuid, OP_SELECTING):
+            raise RuntimeError("creation lease is no longer owned by this worker")
+        with self.lock:
+            self.creation_status[user_id] = {"status": "selecting_host", "message": "Requesting a server..."}
 
-            # an unconfirmed removal keeps its reservation until the strict audit proves it is gone
-            cleanup_confirmed = not container_create_started or stopped_ok
-            if context_name and cleanup_confirmed and not fenced:
-                try:
-                    self.orchestrator.release_slot(context_name)
-                except Exception as release_error:
-                    logger.error(f"failed to release slot during cleanup: {release_error}")
+        if fenced:
+            context_name = self.orchestrator.select_and_reserve(
+                ReservationClaim(
+                    user_id=user_id,
+                    session_uuid=session_uuid,
+                    worker_lease_uuid=worker_uuid,
+                    container_name=container_name,
+                )
+            )
+        else:
+            context_name = self.orchestrator.select_and_reserve()
+        attempt.context_name = context_name
 
-                try:
-                    if not self.host_manager.ping(context_name):
-                        self.orchestrator.mark_unhealthy(context_name)
-                    else:
-                        logger.info(f"context {context_name} still reachable, not marking unhealthy")
-                except Exception as health_error:
-                    logger.error(f"failed to check context health during cleanup: {health_error}")
+        # same state update acts as a lease heartbeat before the hostname lookup and semaphore wait
+        if fenced and not self._update_operation(
+            user_id,
+            session_uuid,
+            worker_uuid,
+            OP_RESERVED,
+            docker_context=context_name,
+            container_name=container_name,
+            capacity_reserved=True,
+        ):
+            raise RuntimeError("creation cancelled after host reservation")
 
-            logger.error(f"error creating container for user {user_id}: {e}")
-            logger.error(traceback.format_exc())
+        pub_hostname, check_hostname = self.host_manager.get_connection_hostnames(context_name)
+        # escaped because the ui renders creation status messages as html
+        display_hostname = _esc(context_name)
 
-            if fenced:
-                terminal_state = OP_FAILED if cleanup_confirmed else OP_CLEANUP_PENDING
-                try:
-                    self._update_operation(
-                        user_id,
-                        session_uuid,
-                        worker_uuid,
-                        terminal_state,
-                        release_capacity_from=context_name if context_name and cleanup_confirmed else None,
-                        error=str(e),
-                        docker_context=None if cleanup_confirmed else context_name,
-                        container_name=container_name if not cleanup_confirmed else None,
-                        capacity_reserved=bool(context_name and not cleanup_confirmed),
-                    )
-                except Exception:
-                    db.session.rollback()
-                    logger.error("failed to persist creation cleanup state", exc_info=True)
+        logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
+        return context_name, pub_hostname, check_hostname, display_hostname
+
+    def _launch_desktop_container(
+        self,
+        *,
+        user_id: int,
+        user: Users | None,
+        session_uuid: str,
+        worker_uuid: str,
+        fenced: bool,
+        container_name: str,
+        container_username: str,
+        container_url: str,
+        extra_hosts: dict[str, str] | None,
+        context_name: str,
+        display_hostname: str,
+        attempt: _CreateAttempt,
+    ) -> tuple[ContainerResult, str, int, int]:
+        create_semaphore = None
+        try:
+            create_semaphore = self.host_manager.acquire_semaphore(context_name)
 
             with self.lock:
-                # do not escape, the frontend assigns these as text and escaping would show entities
                 self.creation_status[user_id] = {
-                    "status": "failed",
-                    "error": str(e),
-                    "hostname": context_name or "",
+                    "status": "starting_container",
+                    "message": f"Starting container on {display_hostname}...",
                 }
 
-            event_logger.log_event(
-                "session_error",
-                f"failed to create session: {str(e)}",
-                user_id=user_id,
-                username=username,
-                level="error",
-                metadata={"error": str(e), "traceback": traceback.format_exc()},
+            network_name = str(self._get_setting("rd_network_name") or "bridge")
+
+            if fenced and not self._update_operation(
+                user_id,
+                session_uuid,
+                worker_uuid,
+                OP_CREATING,
+            ):
+                raise RuntimeError("creation cancelled before Docker create")
+
+            vnc_password = secrets.token_urlsafe(6)[:8]
+
+            docker_image = str(self._get_setting("docker_image"))
+            resolution = str(self._get_setting("resolution"))
+            shm_size = parse_size(self._get_setting("shm_size"))  # type: ignore[arg-type]
+            memory_limit = parse_size(self._get_setting("memory_limit"))  # type: ignore[arg-type]
+            cpu_limit = self._get_setting("cpu_limit")
+            nano_cpus = int(float(cpu_limit) * 1e9)  # type: ignore[arg-type]
+
+            # read once so ports and env can never disagree for one container
+            ssh_enabled = bool(self._get_setting("ssh_enabled"))
+            web_terminal_enabled = bool(self._get_setting("web_terminal_enabled"))
+
+            initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
+            extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
+            max_extensions = int(self._get_setting("max_extensions"))  # type: ignore[arg-type]
+            # hard ceiling so a container cannot outlive the longest possible session
+            max_lifetime = int(initial_duration + (extension_duration * max_extensions) + 300)
+
+            container_env = {
+                "VNC_PASSWORD": vnc_password,
+                "RESOLUTION": resolution,
+                "CTFD_USERNAME": container_username,
+                "MAX_LIFETIME": str(max_lifetime),
+                "CTFD_URL": container_url,
+                # the image treats an absent var as enabled so always pass an explicit 0
+                "ENABLE_SSH": "1" if ssh_enabled else "0",
+                "ENABLE_TTYD": "1" if web_terminal_enabled else "0",
+            }
+
+            from flask import current_app
+
+            if user is not None:
+                attempt.cookie_app = current_app._get_current_object()
+                minted = _mint_session_cookie(attempt.cookie_app, user)
+                if minted:
+                    cookie_name, cookie_value, attempt.cookie_sid = minted
+                    container_env["CTFD_COOKIE_NAME"] = cookie_name
+                    container_env["CTFD_COOKIE_VALUE"] = cookie_value
+                else:
+                    logger.warning(f"failed to mint session cookie for user {user_id}, autologin disabled")
+
+            # end the implicit transaction opened by the settings reads before remote io
+            db.session.rollback()
+            # past this line a transport failure leaves the create outcome unknown
+            attempt.container_create_started = True
+            result = self.host_manager.run_container(
+                context_name=context_name,
+                image=docker_image,
+                name=container_name,
+                # a context name can carry characters that are invalid in a kernel hostname
+                hostname=container_name,
+                env=container_env,
+                ports=_connection_ports(ssh_enabled, web_terminal_enabled),
+                shm_size=shm_size,
+                memory=memory_limit,
+                nano_cpus=nano_cpus,
+                extra_hosts=extra_hosts,
+                network=network_name,
+                labels={
+                    SESSION_LABEL_MANAGED: "true",
+                    SESSION_LABEL_USER_ID: str(user_id),
+                    SESSION_LABEL_UUID: session_uuid,
+                },
             )
+        finally:
+            if create_semaphore is not None:
+                self.host_manager.release_semaphore(create_semaphore)
+
+        return result, vnc_password, initial_duration, max_extensions
+
+    def _wait_for_session_ready(
+        self,
+        user_id: int,
+        session_uuid: str,
+        worker_uuid: str,
+        fenced: bool,
+        display_hostname: str,
+        check_hostname: str | None,
+        novnc_port: int,
+    ) -> None:
+        with self.lock:
+            self.creation_status[user_id] = {
+                "status": "waiting_vnc",
+                "message": f"Waiting for {display_hostname} display server...",
+            }
+        if fenced and not self._update_operation(user_id, session_uuid, worker_uuid, OP_WAITING_READY):
+            raise RuntimeError("creation cancelled while waiting for readiness")
+        ready_heartbeat_at = time.monotonic()
+
+        def _vnc_progress(attempt: int, max_attempts: int) -> None:
+            nonlocal ready_heartbeat_at
+            if attempt % 5 == 0:
+                with self.lock:
+                    self.creation_status[user_id] = {
+                        "status": "waiting_vnc",
+                        "message": f"Waiting for {display_hostname} display server... ({attempt}/{max_attempts})",
+                    }
+            now = time.monotonic()
+            if fenced and now - ready_heartbeat_at >= _READY_HEARTBEAT_INTERVAL_SECONDS:
+                if not self._update_operation(user_id, session_uuid, worker_uuid, OP_WAITING_READY):
+                    raise RuntimeError("creation cancelled while waiting for readiness")
+                ready_heartbeat_at = now
+
+        vnc_ready = self.wait_for_vnc_ready(
+            check_hostname,  # type: ignore[arg-type]
+            novnc_port,
+            progress_callback=_vnc_progress,
+        )
+        if not vnc_ready:
+            raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
+
+    def _commit_created_session(
+        self,
+        user_id: int,
+        session_uuid: str,
+        worker_uuid: str,
+        fenced: bool,
+        row: DesktopContainerInfoModel,
+        context_name: str,
+        container_name: str,
+    ) -> None:
+        try:
+            if fenced:
+                db.session.rollback()
+                operation = self._locked_operation(user_id)
+                existing = self._locked_active_row(user_id)
+                if (
+                    operation is None
+                    or operation.session_uuid != session_uuid
+                    or operation.worker_lease_uuid != worker_uuid
+                    or operation.cancel_requested
+                    or existing is not None
+                ):
+                    db.session.rollback()
+                    raise RuntimeError("creation lease changed before finalization")
+                db.session.add(row)
+                operation.state = OP_ACTIVE
+                operation.updated_at = time.time()
+                operation.heartbeat_at = operation.updated_at
+                operation.docker_context = context_name
+                operation.container_name = container_name
+                db.session.commit()
+            else:
+                db.session.add(row)
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+
+    def _cleanup_failed_creation(
+        self,
+        e: Exception,
+        user_id: int,
+        username: str,
+        session_uuid: str,
+        worker_uuid: str,
+        fenced: bool,
+        container_name: str,
+        attempt: _CreateAttempt,
+    ) -> None:
+        context_name = attempt.context_name
+        if attempt.cookie_sid and attempt.cookie_app is not None:
+            _revoke_session_cookie(attempt.cookie_app, attempt.cookie_sid)
+
+        stopped_ok = False
+        if attempt.container_create_started and container_name and context_name:
+            try:
+                # auto_remove never fires for a container that was created but never started
+                self.host_manager.force_remove_container(context_name, container_name)
+                stopped_ok = True
+                logger.info(f"removed container {container_name} after creation failure")
+            except Exception as stop_error:
+                logger.error(f"failed to stop container during cleanup: {stop_error}")
+
+        # an unconfirmed removal keeps its reservation until the strict audit proves it is gone
+        cleanup_confirmed = not attempt.container_create_started or stopped_ok
+        if context_name and cleanup_confirmed and not fenced:
+            try:
+                self.orchestrator.release_slot(context_name)
+            except Exception as release_error:
+                logger.error(f"failed to release slot during cleanup: {release_error}")
+
+            try:
+                if not self.host_manager.ping(context_name):
+                    self.orchestrator.mark_unhealthy(context_name)
+                else:
+                    logger.info(f"context {context_name} still reachable, not marking unhealthy")
+            except Exception as health_error:
+                logger.error(f"failed to check context health during cleanup: {health_error}")
+
+        logger.error(f"error creating container for user {user_id}: {e}")
+        logger.error(traceback.format_exc())
+
+        if fenced:
+            terminal_state = OP_FAILED if cleanup_confirmed else OP_CLEANUP_PENDING
+            try:
+                self._update_operation(
+                    user_id,
+                    session_uuid,
+                    worker_uuid,
+                    terminal_state,
+                    release_capacity_from=context_name if context_name and cleanup_confirmed else None,
+                    error=str(e),
+                    docker_context=None if cleanup_confirmed else context_name,
+                    container_name=container_name if not cleanup_confirmed else None,
+                    capacity_reserved=bool(context_name and not cleanup_confirmed),
+                )
+            except Exception:
+                db.session.rollback()
+                logger.error("failed to persist creation cleanup state", exc_info=True)
+
+        with self.lock:
+            # do not escape, the frontend assigns these as text and escaping would show entities
+            self.creation_status[user_id] = {
+                "status": "failed",
+                "error": str(e),
+                "hostname": context_name or "",
+            }
+
+        event_logger.log_event(
+            "session_error",
+            f"failed to create session: {str(e)}",
+            user_id=user_id,
+            username=username,
+            level="error",
+            metadata={"error": str(e), "traceback": traceback.format_exc()},
+        )
 
     def create_container(
         self,
@@ -978,6 +1101,63 @@ class ContainerManager:
         with self.lock:
             return self.creation_status.get(user_id)
 
+    def _reload_session_rows(
+        self,
+        user_id: int,
+        snapshot_row: DesktopContainerInfoModel,
+        create: bool = True,
+    ) -> tuple[DesktopSessionOperationModel | None, DesktopContainerInfoModel | None]:
+        """reacquires the row locks after remote io, unit doubles fall back to the snapshot row"""
+        db.session.rollback()
+        operation = self._locked_operation(user_id, create=create)
+        current = (
+            self._locked_active_row(user_id)
+            if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
+            else snapshot_row
+        )
+        return operation, current
+
+    def _same_session(
+        self,
+        current: DesktopContainerInfoModel | None,
+        session_uuid: str,
+    ) -> TypeIs[DesktopContainerInfoModel]:
+        return current is not None and self._session_uuid(current) == session_uuid
+
+    def _mark_cleanup_pending(
+        self,
+        operation: DesktopSessionOperationModel | None,
+        current: DesktopContainerInfoModel | None,
+        session_uuid: str,
+        reason: str,
+        error: str,
+    ) -> None:
+        if self._same_session(current, session_uuid):
+            current.lifecycle_state = LIFECYCLE_CLEANUP_PENDING
+            current.lifecycle_reason = reason
+        if operation is not None and operation.session_uuid == session_uuid:
+            operation.state = OP_CLEANUP_PENDING
+            operation.error = error
+            operation.updated_at = time.time()
+        db.session.commit()
+
+    def _gate_destroy_state(self, lifecycle_state: str, admin_override: bool) -> ResultDict | None:
+        if lifecycle_state == LIFECYCLE_STOPPING:
+            db.session.rollback()
+            return {"success": True, "status": "stopping"}
+        if lifecycle_state in (LIFECYCLE_HELD, LIFECYCLE_UNPAUSING) and not admin_override:
+            db.session.rollback()
+            return {"success": False, "error": "Session suspended - contact your instructor"}
+        if lifecycle_state not in (
+            LIFECYCLE_ACTIVE,
+            LIFECYCLE_CLEANUP_PENDING,
+            LIFECYCLE_HELD,
+            LIFECYCLE_UNPAUSING,
+        ):
+            db.session.rollback()
+            return {"success": False, "error": "Session is not in a destroyable state"}
+        return None
+
     def destroy_container(
         self,
         user_id: int,
@@ -1026,25 +1206,9 @@ class ContainerManager:
                 db.session.commit()
                 return {"success": False, "error": "Session suspended - contact your instructor"}
 
-            lifecycle_state = self._row_lifecycle_state(row)
-            if lifecycle_state == LIFECYCLE_HELD and reason != END_REASON_ADMIN_KILLED:
-                db.session.rollback()
-                return {"success": False, "error": "Session suspended - contact your instructor"}
-            if lifecycle_state == LIFECYCLE_STOPPING:
-                db.session.rollback()
-                return {"success": True, "status": "stopping"}
-            if lifecycle_state == LIFECYCLE_UNPAUSING and reason != END_REASON_ADMIN_KILLED:
-                db.session.rollback()
-                return {"success": False, "error": "Session suspended - contact your instructor"}
-            if lifecycle_state not in (
-                LIFECYCLE_ACTIVE,
-                LIFECYCLE_STOPPING,
-                LIFECYCLE_CLEANUP_PENDING,
-                LIFECYCLE_HELD,
-                LIFECYCLE_UNPAUSING,
-            ):
-                db.session.rollback()
-                return {"success": False, "error": "Session is not in a destroyable state"}
+            gate = self._gate_destroy_state(self._row_lifecycle_state(row), reason == END_REASON_ADMIN_KILLED)
+            if gate is not None:
+                return gate
 
             context_name = str(row.docker_context)
             container_name = str(row.container_name)
@@ -1066,14 +1230,8 @@ class ContainerManager:
             return {"success": False, "error": "Container state is unknown; refusing destructive cleanup"}
 
         with self._get_destroy_lock(user_id):
-            db.session.rollback()
-            operation = self._locked_operation(user_id, create=True)
-            current = (
-                self._locked_active_row(user_id)
-                if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
-                else row
-            )
-            if current is None or self._session_uuid(current) != session_uuid:
+            operation, current = self._reload_session_rows(user_id, row)
+            if not self._same_session(current, session_uuid):
                 db.session.rollback()
                 return {"success": False, "error": "Session changed before teardown"}
             if not admin_override and (
@@ -1083,20 +1241,9 @@ class ContainerManager:
                 return {"success": False, "error": "Session suspended - contact your instructor"}
 
             lifecycle_state = self._row_lifecycle_state(current)
-            if lifecycle_state == LIFECYCLE_STOPPING:
-                db.session.rollback()
-                return {"success": True, "status": "stopping"}
-            if lifecycle_state == LIFECYCLE_UNPAUSING and not admin_override:
-                db.session.rollback()
-                return {"success": False, "error": "Session suspended - contact your instructor"}
-            if lifecycle_state not in (
-                LIFECYCLE_ACTIVE,
-                LIFECYCLE_CLEANUP_PENDING,
-                LIFECYCLE_HELD,
-                LIFECYCLE_UNPAUSING,
-            ):
-                db.session.rollback()
-                return {"success": False, "error": "Session is not in a destroyable state"}
+            gate = self._gate_destroy_state(lifecycle_state, admin_override)
+            if gate is not None:
+                return gate
 
             row = current
             raw_cookie_sid = getattr(current, "cookie_sid", None)
@@ -1146,21 +1293,8 @@ class ContainerManager:
             HostsUnavailableException,
         ) as e:
             # an unknown outcome keeps the row and its reservations, recovery retries the same container
-            db.session.rollback()
-            operation = self._locked_operation(user_id, create=True)
-            current = (
-                self._locked_active_row(user_id)
-                if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
-                else row
-            )
-            if current is not None and self._session_uuid(current) == session_uuid:
-                current.lifecycle_state = LIFECYCLE_CLEANUP_PENDING
-                current.lifecycle_reason = reason
-            if operation is not None and operation.session_uuid == session_uuid:
-                operation.state = OP_CLEANUP_PENDING
-                operation.error = str(e)
-                operation.updated_at = time.time()
-            db.session.commit()
+            operation, current = self._reload_session_rows(user_id, row)
+            self._mark_cleanup_pending(operation, current, session_uuid, reason, str(e))
             logger.warning(
                 f"stop outcome unknown for {container_name}: context unavailable; retaining the capacity reservation"
             )
@@ -1169,23 +1303,13 @@ class ContainerManager:
         if not cookie_revoked:
             # keep the row because cookie_sid is the only handle for retrying revocation
             with self._get_destroy_lock(user_id):
-                db.session.rollback()
-                operation = self._locked_operation(user_id, create=True)
-                current = (
-                    self._locked_active_row(user_id)
-                    if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
-                    else row
-                )
-                if current is None or self._session_uuid(current) != session_uuid:
+                operation, current = self._reload_session_rows(user_id, row)
+                if not self._same_session(current, session_uuid):
                     db.session.rollback()
                     return {"success": False, "error": "Session changed while credential revocation was pending"}
-                current.lifecycle_state = LIFECYCLE_CLEANUP_PENDING
-                current.lifecycle_reason = reason
-                if operation is not None and operation.session_uuid == session_uuid:
-                    operation.state = OP_CLEANUP_PENDING
-                    operation.error = "CTFd session credential revocation pending"
-                    operation.updated_at = time.time()
-                db.session.commit()
+                self._mark_cleanup_pending(
+                    operation, current, session_uuid, reason, "CTFd session credential revocation pending"
+                )
             return {
                 "success": False,
                 "error": "Container stopped; session credential revocation will be retried",
@@ -1195,7 +1319,7 @@ class ContainerManager:
         ended_at = time.time()
         with self._get_destroy_lock(user_id):
             db.session.rollback()
-            # decrement the context counter first to match the admission lock order
+            # context counter before row locks per the admission lock order, _reload_session_rows cannot run here
             self.orchestrator.release_active_slot_in_transaction(
                 context_name,
                 user_id,
@@ -1207,7 +1331,7 @@ class ContainerManager:
                 if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
                 else row
             )
-            if current is None or self._session_uuid(current) != session_uuid:
+            if not self._same_session(current, session_uuid):
                 db.session.rollback()
                 return {"success": False, "error": "Session changed during teardown"}
             history = history_from_row(current, username, ended_at, reason)
@@ -1518,9 +1642,6 @@ class ContainerManager:
             self._recover_stale_operations()
             self._reconcile_orphans()
 
-    RECONCILE_NAME_PREFIX = "rd-session-"
-    RECONCILE_SAFETY_AGE_SECONDS = 300
-
     def _recover_stale_operations(self) -> None:
         """the operation row is fenced and committed before any docker io so no live worker is raced
         paused containers become holds, unknown outcomes keep the reservation for a later retry
@@ -1534,114 +1655,110 @@ class ContainerManager:
             return
 
         for candidate in candidates:
-            user_id = int(candidate.user_id)
-            db.session.rollback()
-            operation = self._locked_operation(user_id)
-            active = self._locked_active_row(user_id)
-            if active is not None or operation is None:
-                db.session.rollback()
-                continue
-            state = self._operation_state(operation)
-            updated_at = float(operation.updated_at or 0)
-            if state not in CREATE_OPERATION_STATES | {OP_CLEANUP_PENDING}:
-                db.session.rollback()
-                continue
-            if updated_at > time.time() - self.RECONCILE_SAFETY_AGE_SECONDS:
-                db.session.rollback()
-                continue
+            self._recover_stale_operation(candidate)
 
-            takeover_uuid = str(uuid.uuid4())
-            session_uuid = str(operation.session_uuid or "")
-            context_name = str(operation.docker_context or "")
-            container_name = str(operation.container_name or "")
-            capacity_reserved = bool(operation.capacity_reserved)
-            operation.worker_lease_uuid = takeover_uuid
-            operation.cancel_requested = True
-            operation.state = OP_CLEANUP_PENDING
-            operation.error = "stale creation claimed by recovery"
-            operation.updated_at = time.time()
+    def _note_takeover_outcome(self, user_id: int, takeover_uuid: str, error: str, state: str | None = None) -> None:
+        db.session.rollback()
+        current = self._locked_operation(user_id)
+        if current is not None and current.worker_lease_uuid == takeover_uuid:
+            if state is not None:
+                current.state = state
+            current.error = error
+            current.updated_at = time.time()
             db.session.commit()
-
-            confirmed_absent = not context_name or not container_name
-            if context_name and container_name:
-                try:
-                    listing = self.host_manager.list_session_containers_strict(context_name, self.RECONCILE_NAME_PREFIX)
-                    if listing is None:
-                        continue
-                    exact = next((entry for entry in listing if str(entry.get("name", "")) == container_name), None)
-                    if exact is None:
-                        confirmed_absent = True
-                    elif normalize_container_state(exact.get("status")) == "paused":
-                        db.session.rollback()
-                        current = self._locked_operation(user_id)
-                        if current is not None and current.worker_lease_uuid == takeover_uuid:
-                            current.state = OP_HELD
-                            current.error = "paused container held for inspection"
-                            current.updated_at = time.time()
-                            db.session.commit()
-                        else:
-                            db.session.rollback()
-                        continue
-                    elif normalize_container_state(exact.get("status")) == "unknown":
-                        db.session.rollback()
-                        current = self._locked_operation(user_id)
-                        if current is not None and current.worker_lease_uuid == takeover_uuid:
-                            current.error = "container state unknown; destructive recovery deferred"
-                            current.updated_at = time.time()
-                            db.session.commit()
-                        else:
-                            db.session.rollback()
-                        continue
-                    else:
-                        self.host_manager.force_remove_container(context_name, container_name)
-                        confirmed_absent = True
-                except (
-                    docker.errors.DockerException,
-                    paramiko.ssh_exception.SSHException,
-                    EOFError,
-                    OSError,
-                    HostsUnavailableException,
-                ) as e:
-                    db.session.rollback()
-                    current = self._locked_operation(user_id)
-                    if current is not None and current.worker_lease_uuid == takeover_uuid:
-                        current.error = str(e)
-                        current.updated_at = time.time()
-                        db.session.commit()
-                    else:
-                        db.session.rollback()
-                    continue
-
-            if not confirmed_absent:
-                continue
-
-            # context lock first to match the admission lock order
+        else:
             db.session.rollback()
-            if context_name and capacity_reserved:
-                self.orchestrator.release_operation_slot_in_transaction(
-                    context_name,
-                    user_id,
-                    session_uuid,
-                    takeover_uuid,
-                )
-            current = self._locked_operation(user_id)
-            if (
-                current is not None
-                and current.worker_lease_uuid == takeover_uuid
-                and str(current.session_uuid or "") == session_uuid
-            ):
-                current.state = OP_FAILED
-                current.worker_lease_uuid = None
-                current.cancel_requested = False
-                current.capacity_reserved = False
-                current.docker_context = None
-                current.container_name = None
-                current.error = "abandoned creation cleaned up by recovery"
-                current.updated_at = time.time()
-                db.session.commit()
-            else:
-                db.session.rollback()
-                continue
+
+    def _recover_stale_operation(self, candidate: DesktopSessionOperationModel) -> None:
+        user_id = int(candidate.user_id)
+        db.session.rollback()
+        operation = self._locked_operation(user_id)
+        active = self._locked_active_row(user_id)
+        if active is not None or operation is None:
+            db.session.rollback()
+            return
+        state = self._operation_state(operation)
+        updated_at = float(operation.updated_at or 0)
+        if state not in CREATE_OPERATION_STATES | {OP_CLEANUP_PENDING}:
+            db.session.rollback()
+            return
+        if updated_at > time.time() - self.RECONCILE_SAFETY_AGE_SECONDS:
+            db.session.rollback()
+            return
+
+        takeover_uuid = str(uuid.uuid4())
+        session_uuid = str(operation.session_uuid or "")
+        context_name = str(operation.docker_context or "")
+        container_name = str(operation.container_name or "")
+        capacity_reserved = bool(operation.capacity_reserved)
+        operation.worker_lease_uuid = takeover_uuid
+        operation.cancel_requested = True
+        operation.state = OP_CLEANUP_PENDING
+        operation.error = "stale creation claimed by recovery"
+        operation.updated_at = time.time()
+        db.session.commit()
+
+        confirmed_absent = not context_name or not container_name
+        if context_name and container_name:
+            try:
+                listing = self.host_manager.list_session_containers_strict(context_name, self.RECONCILE_NAME_PREFIX)
+                if listing is None:
+                    return
+                exact = next((entry for entry in listing if str(entry.get("name", "")) == container_name), None)
+                if exact is None:
+                    confirmed_absent = True
+                elif normalize_container_state(exact.get("status")) == "paused":
+                    self._note_takeover_outcome(
+                        user_id, takeover_uuid, "paused container held for inspection", state=OP_HELD
+                    )
+                    return
+                elif normalize_container_state(exact.get("status")) == "unknown":
+                    self._note_takeover_outcome(
+                        user_id, takeover_uuid, "container state unknown; destructive recovery deferred"
+                    )
+                    return
+                else:
+                    self.host_manager.force_remove_container(context_name, container_name)
+                    confirmed_absent = True
+            except (
+                docker.errors.DockerException,
+                paramiko.ssh_exception.SSHException,
+                EOFError,
+                OSError,
+                HostsUnavailableException,
+            ) as e:
+                self._note_takeover_outcome(user_id, takeover_uuid, str(e))
+                return
+
+        if not confirmed_absent:
+            return
+
+        # context lock first to match the admission lock order
+        db.session.rollback()
+        if context_name and capacity_reserved:
+            self.orchestrator.release_operation_slot_in_transaction(
+                context_name,
+                user_id,
+                session_uuid,
+                takeover_uuid,
+            )
+        current = self._locked_operation(user_id)
+        if (
+            current is None
+            or current.worker_lease_uuid != takeover_uuid
+            or str(current.session_uuid or "") != session_uuid
+        ):
+            db.session.rollback()
+            return
+        current.state = OP_FAILED
+        current.worker_lease_uuid = None
+        current.cancel_requested = False
+        current.capacity_reserved = False
+        current.docker_context = None
+        current.container_name = None
+        current.error = "abandoned creation cleaned up by recovery"
+        current.updated_at = time.time()
+        db.session.commit()
 
     def _reconcile_orphans(self) -> None:
         db_names = {
@@ -1728,95 +1845,92 @@ class ContainerManager:
                 if containers is None:
                     continue
                 for entry in containers:
-                    identity = rows_by_name.get(str(entry.get("name", "")))
-                    if identity is None or identity[2] != ctx_name:
-                        continue
-                    status = str(entry.get("status", ""))
-                    user_id, session_uuid, _context, snapshot_row = identity
-                    _user, username = _display_name(user_id)
+                    self._pause_watch_entry(ctx_name, entry, rows_by_name)
 
-                    db.session.rollback()
-                    operation = self._locked_operation(user_id)
-                    row = (
-                        self._locked_active_row(user_id)
-                        if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
-                        else snapshot_row
-                    )
-                    if (
-                        row is None
-                        or self._session_uuid(row) != session_uuid
-                        or row.container_name != str(entry.get("name", ""))
-                    ):
-                        db.session.rollback()
-                        continue
+    def _pause_watch_entry(
+        self,
+        ctx_name: str,
+        entry: dict[str, object],
+        rows_by_name: dict[str, tuple],
+    ) -> None:
+        identity = rows_by_name.get(str(entry.get("name", "")))
+        if identity is None or identity[2] != ctx_name:
+            return
+        status = str(entry.get("status", ""))
+        user_id, session_uuid, _context, snapshot_row = identity
+        _user, username = _display_name(user_id)
 
-                    if (
-                        status == "paused"
-                        and row.paused_at is None
-                        and self._row_lifecycle_state(row) == LIFECYCLE_ACTIVE
-                    ):
-                        row.paused_at = time.time()
-                        row.lifecycle_state = LIFECYCLE_HELD
-                        if operation is not None and operation.session_uuid == session_uuid:
-                            operation.state = OP_HELD
-                            operation.updated_at = time.time()
-                        db.session.commit()
-                        event_logger.log_event(
-                            "session_paused",
-                            f"session paused on {ctx_name} (host tripwire or manual pause)",
-                            user_id=row.user_id,
-                            username=username,
-                            level="error",
-                            metadata={"context": ctx_name, "container_name": row.container_name, "source": "detected"},
-                        )
-                    elif (
-                        status == "running"
-                        and row.paused_at is not None
-                        and self._row_lifecycle_state(row)
-                        in (
-                            LIFECYCLE_HELD,
-                            LIFECYCLE_UNPAUSING,
-                        )
-                    ):
-                        # holds are sticky, only the audited admin path may release one
-                        container_name = str(row.container_name)
-                        lifecycle_state = self._row_lifecycle_state(row)
-                        unpause_lease_live = bool(
-                            lifecycle_state == LIFECYCLE_UNPAUSING
-                            and operation is not None
-                            and operation.session_uuid == session_uuid
-                            and self._operation_state(operation) == OP_UNPAUSING
-                            and float(operation.updated_at or 0) > time.time() - self.UNPAUSE_LEASE_SECONDS
-                        )
-                        if unpause_lease_live:
-                            db.session.rollback()
-                            continue
-                        if lifecycle_state == LIFECYCLE_UNPAUSING:
-                            row.lifecycle_state = LIFECYCLE_HELD
-                            if operation is not None and operation.session_uuid == session_uuid:
-                                operation.state = OP_HELD
-                                operation.updated_at = time.time()
-                            db.session.commit()
-                        else:
-                            db.session.rollback()
-                        try:
-                            self.host_manager.pause_container(ctx_name, container_name)
-                            event_logger.log_event(
-                                "session_paused",
-                                f"re-paused held session on {ctx_name} after out-of-band drift",
-                                user_id=user_id,
-                                username=username,
-                                level="warning",
-                                metadata={
-                                    "context": ctx_name,
-                                    "container_name": container_name,
-                                    "source": "drift_repaired",
-                                },
-                            )
-                        except Exception as e:
-                            logger.error(f"failed to re-pause held session {container_name} on {ctx_name}: {e}")
-                    else:
-                        db.session.rollback()
+        operation, row = self._reload_session_rows(user_id, snapshot_row, create=False)
+        if row is None or self._session_uuid(row) != session_uuid or row.container_name != str(entry.get("name", "")):
+            db.session.rollback()
+            return
+
+        if status == "paused" and row.paused_at is None and self._row_lifecycle_state(row) == LIFECYCLE_ACTIVE:
+            row.paused_at = time.time()
+            row.lifecycle_state = LIFECYCLE_HELD
+            if operation is not None and operation.session_uuid == session_uuid:
+                operation.state = OP_HELD
+                operation.updated_at = time.time()
+            db.session.commit()
+            event_logger.log_event(
+                "session_paused",
+                f"session paused on {ctx_name} (host tripwire or manual pause)",
+                user_id=row.user_id,
+                username=username,
+                level="error",
+                metadata={"context": ctx_name, "container_name": row.container_name, "source": "detected"},
+            )
+            return
+
+        if (
+            status == "running"
+            and row.paused_at is not None
+            and self._row_lifecycle_state(row)
+            in (
+                LIFECYCLE_HELD,
+                LIFECYCLE_UNPAUSING,
+            )
+        ):
+            # holds are sticky, only the audited admin path may release one
+            container_name = str(row.container_name)
+            lifecycle_state = self._row_lifecycle_state(row)
+            unpause_lease_live = bool(
+                lifecycle_state == LIFECYCLE_UNPAUSING
+                and operation is not None
+                and operation.session_uuid == session_uuid
+                and self._operation_state(operation) == OP_UNPAUSING
+                and float(operation.updated_at or 0) > time.time() - self.UNPAUSE_LEASE_SECONDS
+            )
+            if unpause_lease_live:
+                db.session.rollback()
+                return
+            if lifecycle_state == LIFECYCLE_UNPAUSING:
+                row.lifecycle_state = LIFECYCLE_HELD
+                if operation is not None and operation.session_uuid == session_uuid:
+                    operation.state = OP_HELD
+                    operation.updated_at = time.time()
+                db.session.commit()
+            else:
+                db.session.rollback()
+            try:
+                self.host_manager.pause_container(ctx_name, container_name)
+                event_logger.log_event(
+                    "session_paused",
+                    f"re-paused held session on {ctx_name} after out-of-band drift",
+                    user_id=user_id,
+                    username=username,
+                    level="warning",
+                    metadata={
+                        "context": ctx_name,
+                        "container_name": container_name,
+                        "source": "drift_repaired",
+                    },
+                )
+            except Exception as e:
+                logger.error(f"failed to re-pause held session {container_name} on {ctx_name}: {e}")
+            return
+
+        db.session.rollback()
 
     @staticmethod
     def _credit_pause_and_clear(row: DesktopContainerInfoModel) -> None:

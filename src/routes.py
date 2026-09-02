@@ -7,7 +7,7 @@ import logging
 import json
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import TypedDict
+from typing import TypedDict, TypeGuard
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 UserInfoDict = dict[str, str | bool]
 SessionDict = dict[str, float | str | TimerDict | None]
+
+_DEFAULT_MAX_EXTENSIONS = int(str(SETTING_DEFAULTS["max_extensions"]))
 
 
 class TopUserAccum(TypedDict):
@@ -113,36 +115,38 @@ def _json_integer(value: object, *, minimum: int, field: str) -> int:
     return value
 
 
-def _context_hostname(value: object) -> str | None:
-    if value is None:
-        return None
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 512
-        or value != value.strip()
-        or any(char.isspace() or ord(char) == 127 for char in value)
-    ):
-        raise ValueError("hostname must be a non-empty string of at most 512 characters without whitespace")
-    candidate = value if value.startswith("ssh://") else f"ssh://{'root@' if '@' not in value else ''}{value}"
+def _is_clean_hostname_string(value: object) -> TypeGuard[str]:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= 512
+        and value == value.strip()
+        and not any(char.isspace() or ord(char) == 127 for char in value)
+    )
+
+
+def _is_ssh_target(candidate: str) -> bool:
     try:
         parsed = urlparse(candidate)
         parsed_port = parsed.port
     except ValueError:
-        parsed = None
-    if (
-        parsed is None
-        or parsed.scheme != "ssh"
-        or not parsed.hostname
-        or parsed.password is not None
-        or parsed.netloc.endswith(":")
-        or parsed_port == 0
-        or (parsed.username is not None and (not parsed.username or "@" in parsed.username))
-        or parsed.path not in ("", "/")
-        or parsed.params
-        or parsed.query
-        or parsed.fragment
-    ):
+        return False
+    if parsed.scheme != "ssh" or not parsed.hostname or parsed.password is not None:
+        return False
+    if parsed.netloc.endswith(":") or parsed_port == 0:
+        return False
+    if parsed.username is not None and (not parsed.username or "@" in parsed.username):
+        return False
+    return parsed.path in ("", "/") and not parsed.params and not parsed.query and not parsed.fragment
+
+
+def _context_hostname(value: object) -> str | None:
+    if value is None:
+        return None
+    if not _is_clean_hostname_string(value):
+        raise ValueError("hostname must be a non-empty string of at most 512 characters without whitespace")
+    candidate = value if value.startswith("ssh://") else f"ssh://{'root@' if '@' not in value else ''}{value}"
+    if not _is_ssh_target(candidate):
         raise ValueError("hostname must be an SSH target such as root@runner.example or ssh://root@runner.example")
     return value
 
@@ -205,7 +209,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             "active": bool(timer_status.get("started", False)),
             "time_remaining": int(timer_status.get("time_remaining", 0)),
             "extensions_used": int(timer_status.get("extensions_used", 0)),
-            "max_extensions": int(timer_status.get("max_extensions", SETTING_DEFAULTS["max_extensions"])),  # type: ignore[arg-type]
+            "max_extensions": int(timer_status.get("max_extensions", _DEFAULT_MAX_EXTENSIONS)),
         }
 
     def _session_dict(container_info: ContainerInfoDict, timer_status: TimerStatusDict) -> SessionDict:
@@ -794,31 +798,32 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         def _info(ctx_name):
             return ctx_name, container_manager.host_manager.get_image_info(ctx_name, docker_image)
 
+        def _future_entry(future) -> dict[str, object]:
+            try:
+                _ctx_name, info = future.result()
+            except Exception:
+                return {"available": False}
+            entry: dict[str, object] = {"available": bool(info and info.get("contract_status") == "compatible")}
+            if info:
+                entry["info"] = info
+            return entry
+
         pool = ThreadPoolExecutor(max_workers=min(len(connected), 8))
         futures = {}
         try:
             futures = {pool.submit(_info, ctx): ctx for ctx in connected}
-            try:
-                for future in as_completed(futures, timeout=15):
-                    try:
-                        ctx_name, info = future.result()
-                        entry: dict[str, object] = {
-                            "available": bool(info and info.get("contract_status") == "compatible")
-                        }
-                        if info:
-                            entry["info"] = info
-                        matrix[display][ctx_name] = entry
-                    except Exception:
-                        matrix[display][futures[future]] = {"available": False}
-            except TimeoutError:
-                for future, ctx in futures.items():
-                    if ctx not in matrix[display]:
-                        matrix[display][ctx] = {"available": False}
+            for future in as_completed(futures, timeout=15):
+                matrix[display][futures[future]] = _future_entry(future)
+        except TimeoutError:
+            pass
         finally:
             for future in futures:
                 future.cancel()
             # no wait shutdown, a wedged ssh transport would stretch the 15s scan into an unbounded wait
             pool.shutdown(wait=False, cancel_futures=True)
+
+        for ctx in connected:
+            matrix[display].setdefault(ctx, {"available": False})
 
         set_setting(
             "image_cache",

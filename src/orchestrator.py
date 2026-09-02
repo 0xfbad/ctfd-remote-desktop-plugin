@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from threading import Lock
 
@@ -63,10 +64,9 @@ def plan_count_audit(
     rows: dict[str, int],
     *,
     suppress_down_heal: bool = False,
-) -> tuple[dict[str, int], list[tuple[str, int, int, str]], dict[str, int]]:
+) -> tuple[dict[str, int], list[tuple[str, int, int, str]]]:
     updates: dict[str, int] = {}
     events: list[tuple[str, int, int, str]] = []
-    new_streaks: dict[str, int] = {}
     for name, counter in counters.items():
         dbn = rows.get(name, 0)
         if counter < dbn:
@@ -77,7 +77,7 @@ def plan_count_audit(
             # every durable reservation and observed docker object is in dbn so an overcount is a leak
             updates[name] = dbn
             events.append((name, counter, dbn, "healed_down"))
-    return updates, events, new_streaks
+    return updates, events
 
 
 class Orchestrator:
@@ -110,6 +110,73 @@ class Orchestrator:
         with self._load_lock:
             self._load_from_db_serialized()
 
+    def _probe_context(
+        self,
+        ctx,
+        is_connected: bool,
+        docker_image: str,
+        storage_limit: str,
+    ) -> tuple[bool, int, bool, tuple[str, str, str, dict[str, str | int | ImageInfo | None]]]:
+        name = ctx.context_name
+        image_info = self.host_manager.get_image_info(name, docker_image) if is_connected else None
+        image_compatible = bool(
+            image_info
+            and image_info.get("contract") == IMAGE_CONTRACT_VERSION
+            and image_info.get("contract_status") == "compatible"
+        )
+        storage_compatible = bool(
+            is_connected and self.host_manager.check_storage_limit_compatibility(name, storage_limit)
+        )
+
+        # derive for every context so a later explicit to null cap edit has a value on every worker
+        auto_cap, stale = self._derive_auto_cap(name, is_connected)
+
+        auto_cap_ready = ctx.max_containers is not None or not stale
+        healthy = is_connected and image_compatible and storage_compatible and auto_cap_ready
+
+        if ctx.max_containers is not None:
+            cap_value, cap_source = ctx.max_containers, "explicit"
+        elif stale:
+            cap_value, cap_source = auto_cap, "fallback"
+        else:
+            cap_value, cap_source = auto_cap, "auto"
+
+        if healthy:
+            meta: dict[str, str | int | ImageInfo | None] = {
+                "context_name": name,
+                "max_containers": cap_value,
+                "cap_source": cap_source,
+            }
+            if image_info:
+                meta["image"] = image_info
+            event = ("host_healthy", f"context {name} is healthy", "info", meta)
+        else:
+            if not is_connected:
+                reason = "connection failed"
+            elif image_info is None:
+                reason = "image not found"
+            elif not storage_compatible:
+                reason = "configured storage limit is unsupported"
+            elif not auto_cap_ready:
+                reason = "host memory unavailable for automatic capacity"
+            else:
+                reason = "incompatible image contract"
+            meta = {
+                "context_name": name,
+                "reason": reason,
+                "docker_image": docker_image,
+            }
+            if image_info is not None:
+                meta["image"] = image_info
+                meta["expected_contract"] = IMAGE_CONTRACT_VERSION
+            event = (
+                "host_unhealthy",
+                f"context {name} marked unhealthy: {reason}",
+                "warning",
+                meta,
+            )
+        return healthy, auto_cap, stale, event
+
     def _load_from_db_serialized(self) -> None:
         from .models import DesktopDockerContextModel, get_setting
 
@@ -140,71 +207,12 @@ class Orchestrator:
         events: list[tuple[str, str, str, dict[str, str | int | ImageInfo | None]]] = []
         for ctx in contexts:
             name = ctx.context_name
-            is_connected = name in connected
-
-            image_info = self.host_manager.get_image_info(name, docker_image) if is_connected else None
-            image_compatible = bool(
-                image_info
-                and image_info.get("contract") == IMAGE_CONTRACT_VERSION
-                and image_info.get("contract_status") == "compatible"
-            )
-            storage_compatible = bool(
-                is_connected and self.host_manager.check_storage_limit_compatibility(name, storage_limit)
-            )
-
-            # derive for every context so a later explicit to null cap edit has a value on every worker
-            auto_cap, stale = self._derive_auto_cap(name, is_connected)
+            healthy, auto_cap, stale, event = self._probe_context(ctx, name in connected, docker_image, storage_limit)
+            new_health[name] = healthy
             new_auto_caps[name] = auto_cap
             if stale:
                 new_cap_stale.add(name)
-
-            auto_cap_ready = ctx.max_containers is not None or not stale
-            healthy = is_connected and image_compatible and storage_compatible and auto_cap_ready
-            new_health[name] = healthy
-
-            if ctx.max_containers is not None:
-                cap_value, cap_source = ctx.max_containers, "explicit"
-            elif stale:
-                cap_value, cap_source = auto_cap, "fallback"
-            else:
-                cap_value, cap_source = auto_cap, "auto"
-
-            if healthy:
-                meta: dict[str, str | int | ImageInfo | None] = {
-                    "context_name": name,
-                    "max_containers": cap_value,
-                    "cap_source": cap_source,
-                }
-                if image_info:
-                    meta["image"] = image_info
-                events.append(("host_healthy", f"context {name} is healthy", "info", meta))
-            else:
-                if not is_connected:
-                    reason = "connection failed"
-                elif image_info is None:
-                    reason = "image not found"
-                elif not storage_compatible:
-                    reason = "configured storage limit is unsupported"
-                elif not auto_cap_ready:
-                    reason = "host memory unavailable for automatic capacity"
-                else:
-                    reason = "incompatible image contract"
-                meta = {
-                    "context_name": name,
-                    "reason": reason,
-                    "docker_image": docker_image,
-                }
-                if image_info is not None:
-                    meta["image"] = image_info
-                    meta["expected_contract"] = IMAGE_CONTRACT_VERSION
-                events.append(
-                    (
-                        "host_unhealthy",
-                        f"context {name} marked unhealthy: {reason}",
-                        "warning",
-                        meta,
-                    )
-                )
+            events.append(event)
 
         with self.lock:
             self.health = new_health
@@ -499,9 +507,7 @@ class Orchestrator:
             logger.warning("Docker context catalog changed without a local reload; refreshing before admission")
             self._load_from_db_serialized()
 
-    def audit_counts(self) -> None:
-        # leader only, called from periodic_cleanup
-        from collections import Counter
+    def _count_committed_sessions(self) -> tuple[dict[str, int], Counter[str], dict[str, set[str]], bool]:
         from CTFd.models import db
         from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
 
@@ -547,7 +553,14 @@ class Orchestrator:
                 db_counts[context_name] += 1
 
         db.session.rollback()
+        return counters, db_counts, known_names, ambiguous_reservation
 
+    def _observe_host_counts(
+        self,
+        counters: dict[str, int],
+        db_counts: Counter[str],
+        known_names: dict[str, set[str]],
+    ) -> dict[str, int]:
         # count live docker objects too so an ambiguous stop or create is not healed down into over admission
         observed: dict[str, int] = {}
         for name, counter in counters.items():
@@ -565,13 +578,11 @@ class Orchestrator:
                     live_names.add(str(listed_name))
             untracked_live = live_names - known_names.get(name, set())
             observed[name] = db_counts.get(name, 0) + len(untracked_live)
+        return observed
 
-        # only a reservation missing its context is ambiguous enough to block down healing
-        updates, events, _unused_streaks = plan_count_audit(
-            counters,
-            observed,
-            suppress_down_heal=ambiguous_reservation,
-        )
+    def _apply_count_heals(self, counters: dict[str, int], updates: dict[str, int]) -> set[str]:
+        from CTFd.models import db
+        from .models import DesktopDockerContextModel
 
         applied_names: set[str] = set()
         for name, target in updates.items():
@@ -586,6 +597,21 @@ class Orchestrator:
             db.session.commit()
         elif updates:
             db.session.rollback()
+        return applied_names
+
+    def audit_counts(self) -> None:
+        # leader only, called from periodic_cleanup
+        counters, db_counts, known_names, ambiguous_reservation = self._count_committed_sessions()
+        observed = self._observe_host_counts(counters, db_counts, known_names)
+
+        # only a reservation missing its context is ambiguous enough to block down healing
+        updates, events = plan_count_audit(
+            counters,
+            observed,
+            suppress_down_heal=ambiguous_reservation,
+        )
+
+        applied_names = self._apply_count_heals(counters, updates)
 
         for name, counter, dbn, kind in events:
             if name not in applied_names:
