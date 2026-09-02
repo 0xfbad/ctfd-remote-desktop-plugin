@@ -74,9 +74,11 @@ def test_mariadb_bootstrap_timeout_fails_without_creating_tables():
     result.scalar.return_value = 0
     connection.execute.return_value = result
 
-    with patch.object(sys.modules["sqlalchemy"], "text", side_effect=lambda statement: statement, create=True):
-        with pytest.raises(RuntimeError, match="schema bootstrap lock"):
-            module.prepare_database(app)
+    with (
+        patch.object(sys.modules["sqlalchemy"], "text", side_effect=lambda statement: statement, create=True),
+        pytest.raises(RuntimeError, match="schema bootstrap lock"),
+    ):
+        module.prepare_database(app)
 
     app.db.create_all.assert_not_called()
     assert connection.execute.call_count == 1

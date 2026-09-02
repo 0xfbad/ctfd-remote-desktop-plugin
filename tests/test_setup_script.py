@@ -413,7 +413,7 @@ def test_setup_refuses_old_managed_nginx_version_without_mutation(tmp_path):
     _setup(env)
 
     http = root / "conf" / "nginx" / "http.conf"
-    # v10 contains the v1 text as a prefix; it must not be mistaken for v1.
+    # v10 starts with the v1 text so a prefix match would wrongly accept it
     http.write_text(http.read_text().replace("LOCATIONS v1", "LOCATIONS v10", 1))
     paths = [root / "docker-compose.yml", http, root / "conf" / "nginx" / "https.conf"]
     before = {path: path.read_bytes() for path in paths}
@@ -502,8 +502,7 @@ def test_setup_repairs_managed_docker_gid_and_scopes_named_volume_detection(tmp_
     assert f'- "{stale_gid}"' not in compose
     assert f'- "{unmanaged_gid}" # externally managed group' in compose
     assert compose.count("ctfd-remote-desktop docker socket") == 1
-    # Credential staging is off, so the unrelated colliding service remains
-    # untouched and no top-level ctfd-ssh volume is introduced.
+    # credential staging is off so the colliding ctfd-ssh service stays untouched and gains no volume entry
     assert sum(line == "  ctfd-ssh:" for line in compose.splitlines()) == 1
 
 

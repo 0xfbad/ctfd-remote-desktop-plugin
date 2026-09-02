@@ -681,13 +681,12 @@
 
     document.getElementById('rd-edit-ctx-submit').addEventListener('click', function() {
         var id = document.getElementById('rd-edit-ctx-id').value;
-        // no || here - 0 is a valid value (drain)
         var rawMax = document.getElementById('rd-edit-ctx-max-containers').value;
         var payload = {
             hostname: document.getElementById('rd-edit-ctx-hostname').value || null,
             pub_hostname: document.getElementById('rd-edit-ctx-pub-hostname').value,
             weight: parseInt(document.getElementById('rd-edit-ctx-weight').value) || 1,
-            max_containers: rawMax === '' ? null : parseInt(rawMax, 10),
+            max_containers: rawMax === '' ? null : parseInt(rawMax, 10), // 0 means drain, no falsy fallback
             enabled: document.getElementById('rd-edit-ctx-enabled').checked
         };
         if (!payload.pub_hostname) { CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }
@@ -802,7 +801,7 @@
 
                 var info = entry.info;
 
-                // compare by size instead of hash, locally built images have unique IDs per host
+                // compare by size not by hash, a locally built image gets a different id on every host
                 var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb;
                 var sizeDiff = ref ? Math.abs(info.size_mb - ref.size_mb) : 0;
                 var threshold = ref ? Math.max(ref.size_mb * 0.05, 1) : 0;

@@ -9,62 +9,55 @@ _SCHEMA_BOOTSTRAP_LOCK_PREFIX = "ctfd_rd_schema_"
 
 
 def _schema_bootstrap_lock_name(database_url: str) -> str:
-    """Return a bounded, database-specific MariaDB advisory-lock name."""
     identity = unquote(urlsplit(database_url).path.lstrip("/"))
     if not identity:
         raise RuntimeError("remote desktop MariaDB URL must select a database")
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]  # mariadb caps lock names at 64 chars
     return f"{_SCHEMA_BOOTSTRAP_LOCK_PREFIX}{digest}"
 
 
 def prepare_database(app: Any) -> None:
-    """Create and verify the current plugin schema for a fresh deployment.
-
-    Non-preloaded HTTP workers can initialize the Flask application at the same
-    time. MariaDB's connection-scoped advisory lock prevents those workers from
-    racing SQLAlchemy's check-then-create sequence on the first boot. This does
-    not mutate existing tables; a schema mismatch fails closed below.
-    """
+    """creates the schema for a fresh deployment, existing tables are never mutated
+    a mismatch fails closed in validate_database_schema"""
     database_url = app.config.get("SQLALCHEMY_DATABASE_URI")
     if not isinstance(database_url, str):
-        # Lightweight application doubles in the unit suite do not expose a
-        # concrete engine. Production CTFd always supplies the URI.
+        app.db.create_all()  # test app doubles set no SQLALCHEMY_DATABASE_URI, production always does
+        return
+
+    if not database_url.startswith(("mysql", "mariadb")):
         app.db.create_all()
+        validate_database_schema(app)
         return
 
-    if database_url.startswith(("mysql", "mariadb")):
-        from sqlalchemy import text
+    from sqlalchemy import text
 
-        lock_name = _schema_bootstrap_lock_name(database_url)
-        with app.db.engine.connect() as lock_connection:
-            acquired = lock_connection.execute(
-                text("SELECT GET_LOCK(:lock_name, 60)"),
-                {"lock_name": lock_name},
-            ).scalar()
-            if acquired != 1:
-                raise RuntimeError("timed out waiting for remote desktop schema bootstrap lock")
+    lock_name = _schema_bootstrap_lock_name(database_url)
+    with app.db.engine.connect() as lock_connection:
+        # workers without preload build the app at once, the lock keeps them off one check then create
+        acquired = lock_connection.execute(
+            text("SELECT GET_LOCK(:lock_name, 60)"),
+            {"lock_name": lock_name},
+        ).scalar()
+        if acquired != 1:
+            raise RuntimeError("timed out waiting for remote desktop schema bootstrap lock")
+
+        try:
+            app.db.create_all()
+            validate_database_schema(app)
+        finally:
             try:
-                app.db.create_all()
-                validate_database_schema(app)
-            finally:
-                try:
-                    released = lock_connection.execute(
-                        text("SELECT RELEASE_LOCK(:lock_name)"),
-                        {"lock_name": lock_name},
-                    ).scalar()
-                except BaseException:
-                    # A failed RELEASE_LOCK has an unknown outcome. Do not
-                    # return a possibly lock-owning DBAPI connection to the
-                    # pool; invalidation physically discards it.
-                    lock_connection.invalidate()
-                    raise
-                if released != 1:
-                    lock_connection.invalidate()
-                    raise RuntimeError("failed to release remote desktop schema bootstrap lock")
-        return
+                released = lock_connection.execute(
+                    text("SELECT RELEASE_LOCK(:lock_name)"),
+                    {"lock_name": lock_name},
+                ).scalar()
+            except BaseException:
+                # a failed RELEASE_LOCK may still hold the lock, invalidate discards the connection
+                lock_connection.invalidate()
+                raise
 
-    app.db.create_all()
-    validate_database_schema(app)
+            if released != 1:
+                lock_connection.invalidate()
+                raise RuntimeError("failed to release remote desktop schema bootstrap lock")
 
 
 def validate_database_schema(app: Any) -> None:
@@ -171,9 +164,7 @@ def validate_database_schema(app: Any) -> None:
         if unexpected:
             problems.append(f"{table} has unexpected columns {', '.join(unexpected)}")
 
-    # Fresh-only bootstrap has no repair path. Validate every model column so a
-    # same-named but incompatible pre-existing table fails before serving any
-    # request, rather than discovering the mismatch in a lifecycle operation.
+    # fresh install bootstrap has no repair path, a same named incompatible table must fail here not mid session
     column_contracts: dict[str, dict[str, tuple[bool, tuple[str, ...], int | None]]] = {
         "desktop_docker_contexts": {
             "id": (False, ("int",), None),

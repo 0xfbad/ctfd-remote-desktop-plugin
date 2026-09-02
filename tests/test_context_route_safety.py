@@ -1,5 +1,3 @@
-"""Context administration must not strand active or reserved sessions."""
-
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

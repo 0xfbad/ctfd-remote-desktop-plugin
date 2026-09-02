@@ -16,7 +16,7 @@ def loaded_plugin():
     sys.modules["_rd_plugin"] = mod
     spec.loader.exec_module(mod)
 
-    # stub heavyweight collaborators so load() reaches the blueprint registration
+    # stub the collaborators so load reaches blueprint registration
     mod._seed_defaults = MagicMock()
     mod._seed_local_context = MagicMock()
     mod._reconcile_containers = MagicMock()
@@ -51,14 +51,9 @@ def _captured_handler(bp, name):
     raise LookupError(name)
 
 
-class _Headers(dict):
-    def setdefault(self, key, value):
-        return super().setdefault(key, value)
-
-
 class _Response:
     def __init__(self):
-        self.headers = _Headers()
+        self.headers = {}
 
 
 def test_after_request_handler_registered_on_blueprint(loaded_plugin):
@@ -89,7 +84,6 @@ def test_frame_headers_respect_existing_values(loaded_plugin):
 
     out = fn(resp)
 
-    # setdefault preserves caller-provided values so a stricter policy isn't downgraded
     assert out.headers["X-Frame-Options"] == "DENY"
     assert out.headers["Content-Security-Policy"] == "default-src 'none'"
 

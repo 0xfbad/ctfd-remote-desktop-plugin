@@ -23,8 +23,6 @@ ContextFence = tuple[int, str | None, str, int | None, int | None, int]
 
 @dataclass(frozen=True)
 class ReservationClaim:
-    """Durable operation owner that receives a successful capacity claim."""
-
     user_id: int
     session_uuid: str
     worker_lease_uuid: str
@@ -32,11 +30,10 @@ class ReservationClaim:
 
 
 class ReservationOwnershipError(RuntimeError):
-    """The create operation changed owner or state before capacity was reserved."""
+    """raised when the create operation changed owner or state before capacity was reserved"""
 
 
-# used when a host's RAM can't be read (host down at derivation time); flagged
-# stale and re-derived on recovery so a small host is not over-admitted
+# host ram unreadable, marked stale and derived again on recovery so a small host is not over admitted
 DERIVED_CAP_FALLBACK = 5
 CAPACITY_EVENT_MIN_INTERVAL = 300
 
@@ -48,16 +45,15 @@ def derive_max_containers(mem_total: int | None, mem_limit: int, fraction: float
 
 
 def rank_candidates(healthy: list[str], snapshot: dict[str, tuple[int, int, int]]) -> list[str]:
-    """snapshot: {name: (active_sessions, effective_cap, weight)}. returns
-    under-cap candidates best-first (score = weight/(active+1), alpha tiebreak).
-    >= not ==: recovery or a lowered cap can leave active above cap -> excluded (drain)"""
     out = []
     for name in healthy:
         if name not in snapshot:
             continue
+
         active, cap, weight = snapshot[name]
-        if active >= cap:
+        if active >= cap:  # not equality, recovery or a lowered cap leaves active above cap and that host drains
             continue
+
         out.append((-(weight / (active + 1)), name))
     return [n for _, n in sorted(out)]
 
@@ -68,22 +64,19 @@ def plan_count_audit(
     *,
     suppress_down_heal: bool = False,
 ) -> tuple[dict[str, int], list[tuple[str, int, int, str]], dict[str, int]]:
-    """pure audit planner. returns (counter_updates, events[(name, counter, rows, kind)], new_streaks)"""
     updates: dict[str, int] = {}
     events: list[tuple[str, int, int, str]] = []
     new_streaks: dict[str, int] = {}
     for name, counter in counters.items():
         dbn = rows.get(name, 0)
         if counter < dbn:
-            # undercount = over-admission risk; rows are committed live sessions, heal up now
+            # an undercount risks over admission, rows are committed live sessions so heal up now
             updates[name] = dbn
             events.append((name, counter, dbn, "healed_up"))
-        elif counter > dbn:
-            if not suppress_down_heal:
-                # Every durable reservation and observed Docker object is in dbn,
-                # so a remaining overcount is a leak and can be healed exactly.
-                updates[name] = dbn
-                events.append((name, counter, dbn, "healed_down"))
+        elif counter > dbn and not suppress_down_heal:
+            # every durable reservation and observed docker object is in dbn so an overcount is a leak
+            updates[name] = dbn
+            events.append((name, counter, dbn, "healed_down"))
     return updates, events, new_streaks
 
 
@@ -91,20 +84,18 @@ class Orchestrator:
     def __init__(self, host_manager: DockerHostManager) -> None:
         self.host_manager = host_manager
         self.health: dict[str, bool] = {}
-        # per-worker derived caps for NULL-column contexts; explicit caps and the
-        # session counter live in the DB row (shared across gunicorn workers)
+        # per worker derived caps, explicit caps and the session counter live in the shared db row
         self.auto_caps: dict[str, int] = {}
         self._cap_stale: set[str] = set()
         self._capacity_refusals: int = 0
         self._last_capacity_event_ts: float = 0.0
         self.lock = Lock()
-        # Network-heavy reloads must finish in query order. Otherwise an old,
-        # slow reload can overwrite a newer Docker-host snapshot.
+        # serializes reloads so a slow old reload cannot overwrite a newer host snapshot
         self._load_lock = Lock()
         self.context_fences: dict[str, ContextFence] = {}
 
     def _derive_auto_cap(self, context_name: str, connected: bool) -> tuple[int, bool]:
-        """returns (cap, stale). stale means RAM was unreadable and the fallback was used"""
+        """stale means host ram was unreadable and the fallback cap was used"""
         from .models import get_setting
 
         mem_total = self.host_manager.get_host_memory(context_name) if connected else None
@@ -122,9 +113,7 @@ class Orchestrator:
     def _load_from_db_serialized(self) -> None:
         from .models import DesktopDockerContextModel, get_setting
 
-        # Read the runtime-profile revision first. A settings commit that races
-        # the remaining reads makes create-time admission fail closed until the
-        # next reload instead of pairing old settings with a new revision.
+        # read first so a racing settings commit fails admission closed, not pairing old settings with a new revision
         settings_revision = int(str(get_setting("_settings_revision")))
         contexts = DesktopDockerContextModel.query.filter_by(enabled=True).all()
         new_context_fences: dict[str, ContextFence] = {
@@ -144,7 +133,7 @@ class Orchestrator:
         docker_image = str(get_setting("docker_image"))
         storage_limit = str(get_setting("storage_limit") or "").strip()
 
-        # health-check each context outside the lock (network I/O)
+        # health check runs outside the lock, every probe below is a network call
         new_health: dict[str, bool] = {}
         new_auto_caps: dict[str, int] = {}
         new_cap_stale: set[str] = set()
@@ -163,8 +152,7 @@ class Orchestrator:
                 is_connected and self.host_manager.check_storage_limit_compatibility(name, storage_limit)
             )
 
-            # derive for EVERY context (not just NULL-cap ones) so a later
-            # explicit->NULL edit has a real value on every worker
+            # derive for every context so a later explicit to null cap edit has a value on every worker
             auto_cap, stale = self._derive_auto_cap(name, is_connected)
             new_auto_caps[name] = auto_cap
             if stale:
@@ -239,8 +227,6 @@ class Orchestrator:
             return column_value
         return self.auto_caps.get(name, DERIVED_CAP_FALLBACK)
 
-    # -- DB seams (unit tests override these three) --------------------------
-
     def _capacity_snapshot(self, names: list[str]) -> dict[str, tuple[int, int, int]]:
         from CTFd.models import db
         from .models import DesktopDockerContextModel
@@ -267,11 +253,6 @@ class Orchestrator:
         fence: ContextFence,
         claim: ReservationClaim | None = None,
     ) -> bool:
-        # The context WHERE clause IS the admission check, evaluated against
-        # committed state under the row lock. MariaDB rowcount counts changed
-        # rows and +1 always changes, so it is reliable. With a claim, the
-        # operation ownership transition below is committed in this same
-        # transaction; neither durable half can become visible by itself.
         from CTFd.models import db
         from .models import (
             OP_RESERVED,
@@ -288,6 +269,7 @@ class Orchestrator:
         ).exists()
 
         try:
+            # this where clause is the admission check, evaluated against committed state under the row lock
             n = DesktopDockerContextModel.query.filter(
                 DesktopDockerContextModel.id == context_id,
                 DesktopDockerContextModel.context_name == name,
@@ -302,12 +284,12 @@ class Orchestrator:
                 {DesktopDockerContextModel.active_sessions: DesktopDockerContextModel.active_sessions + 1},
                 synchronize_session=False,
             )
-            if n != 1:
-                # End the transaction (and release any locks/read snapshot)
-                # before the caller evaluates the next candidate.
+            if n != 1:  # mariadb rowcount counts changed rows and +1 always changes so this is reliable
+                # end the transaction and release locks before the caller tries the next candidate
                 db.session.rollback()
                 return False
 
+            # the ownership transition commits in this same transaction so neither durable half lands alone
             if claim is not None:
                 now = time.time()
                 claimed = DesktopSessionOperationModel.query.filter(
@@ -342,9 +324,7 @@ class Orchestrator:
             raise
 
     def release_slot(self, context_name: str) -> None:
-        # best-effort, never raises; a lost decrement heals via the leader audit.
-        # NOTE: commits the ambient scoped session - callers must not hold an
-        # uncommitted multi-statement transaction they care about
+        # never raises, a lost decrement heals in the leader audit
         from CTFd.models import db
         from .models import DesktopDockerContextModel
 
@@ -356,6 +336,7 @@ class Orchestrator:
                 {DesktopDockerContextModel.active_sessions: DesktopDockerContextModel.active_sessions - 1},
                 synchronize_session=False,
             )
+            # commits the ambient scoped session, callers must not hold an uncommitted transaction
             db.session.commit()
         except Exception:
             db.session.rollback()
@@ -368,17 +349,11 @@ class Orchestrator:
         session_uuid: str,
         worker_lease_uuid: str,
     ) -> bool:
-        """Decrement one exact create reservation without committing.
-
-        The context UPDATE is deliberately the first locking statement in the
-        caller's transaction. Admission takes the same context -> operation
-        order, so cleanup cannot deadlock with a concurrent reservation. The
-        EXISTS predicate prevents a stale cleanup generation from borrowing a
-        newer operation's counter; the caller must subsequently lock/recheck
-        the operation and commit its ownership clear in this same transaction.
-        """
+        """decrements one create reservation without committing
+        the caller must then lock the operation and commit the ownership clear in this same transaction"""
         from .models import DesktopDockerContextModel, DesktopSessionOperationModel
 
+        # exists stops a stale cleanup generation from borrowing a newer operation counter
         owner_exists = DesktopSessionOperationModel.query.filter(
             DesktopSessionOperationModel.user_id == user_id,
             DesktopSessionOperationModel.session_uuid == session_uuid,
@@ -386,6 +361,8 @@ class Orchestrator:
             DesktopSessionOperationModel.docker_context == context_name,
             DesktopSessionOperationModel.capacity_reserved.is_(True),
         ).exists()
+
+        # lock the context row before the operation row, admission takes the same order so this cannot deadlock
         changed = DesktopDockerContextModel.query.filter(
             DesktopDockerContextModel.context_name == context_name,
             DesktopDockerContextModel.active_sessions > 0,
@@ -402,13 +379,8 @@ class Orchestrator:
         user_id: int,
         session_uuid: str,
     ) -> bool:
-        """Decrement the counter owned by one exact active row, without commit.
-
-        As above, the context row is locked before the caller locks the active
-        lifecycle/operation rows. A zero counter is tolerated by callers as
-        pre-existing drift: deleting the durable owner is still correct, and
-        the audit will converge any remaining count without an ABA decrement.
-        """
+        """decrements the counter owned by one active row without committing
+        a zero counter is tolerated as drift, the audit converges it without an aba decrement"""
         from .models import DesktopContainerInfoModel, DesktopDockerContextModel
 
         owner_exists = DesktopContainerInfoModel.query.filter(
@@ -416,6 +388,8 @@ class Orchestrator:
             DesktopContainerInfoModel.session_uuid == session_uuid,
             DesktopContainerInfoModel.docker_context == context_name,
         ).exists()
+
+        # context row locks before the caller locks the lifecycle rows, same order as admission
         changed = DesktopDockerContextModel.query.filter(
             DesktopDockerContextModel.context_name == context_name,
             DesktopDockerContextModel.active_sessions > 0,
@@ -425,8 +399,6 @@ class Orchestrator:
             synchronize_session=False,
         )
         return changed == 1
-
-    # ------------------------------------------------------------------------
 
     def _note_capacity_refusal_locked(self, snapshot: dict[str, tuple[int, int, int]]) -> dict | None:
         self._capacity_refusals += 1
@@ -470,22 +442,17 @@ class Orchestrator:
                     logger.debug(f"select_and_reserve: {name}")
                     return name
 
-            # A config commit can land after the pre-admission freshness check.
-            # The complete fence makes every UPDATE fail safely. Refresh and
-            # rerun once only when that exact race is now observable; an empty
-            # candidate list is genuine capacity/drain and never retries.
+            # a config commit after the freshness check fails every fenced update, retry once for that race only
             if attempt == 0 and candidates and not self._catalog_is_current():
                 logger.info("admission fence changed during reservation; retrying once")
                 continue
 
-            # every healthy context is at/over cap, or lost every UPDATE race
             logger.info("select_and_reserve refused: all healthy hosts at capacity")
             self._refuse_at_capacity(snapshot)
         raise AssertionError("unreachable")
 
     def admission_check(self) -> None:
-        # fast-path probe, no reservation. raises HostsUnavailableException /
-        # HostsAtCapacityException when no session could be admitted right now
+        # probe only, no capacity is reserved
         self._refresh_catalog_if_stale()
         with self.lock:
             healthy = [n for n, h in self.health.items() if h]
@@ -498,7 +465,6 @@ class Orchestrator:
         self._refuse_at_capacity(snapshot)
 
     def _catalog_is_current(self) -> bool:
-        """Compare the loaded admission catalog with committed DB config."""
         from CTFd.models import db
         from .models import DesktopDockerContextModel, get_setting
 
@@ -522,15 +488,11 @@ class Orchestrator:
             return current == self.context_fences
 
     def _refresh_catalog_if_stale(self) -> None:
-        # Redis provides low-latency fan-out, not durable delivery. A worker
-        # that missed an admin reload refreshes synchronously before admission;
-        # the fenced UPDATE below still closes the race after this comparison.
+        # redis fan out is not durable so a worker that missed an admin reload reloads here before admission
         if self._catalog_is_current():
             return
 
-        # Several requests can notice one missed event together. Serialize the
-        # expensive Docker probes and recheck after winning the lock so only
-        # one request reloads; the rest reuse its completed snapshot.
+        # recheck after winning the lock so concurrent requests reuse one reload instead of probing docker again
         with self._load_lock:
             if self._catalog_is_current():
                 return
@@ -538,8 +500,7 @@ class Orchestrator:
             self._load_from_db_serialized()
 
     def audit_counts(self) -> None:
-        # leader-only (called from periodic_cleanup). heals counter drift against
-        # the committed session rows
+        # leader only, called from periodic_cleanup
         from collections import Counter
         from CTFd.models import db
         from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
@@ -582,31 +543,30 @@ class Orchestrator:
             if container_name:
                 known_names.setdefault(context_name, set()).add(container_name)
             if not already_counted:
-                # Count every durable reservation, even in the corrupt/partial
-                # case where no container name was persisted. Set-based name
-                # counting would otherwise silently heal capacity downward.
+                # count reservations with no container name too, name based counting heals capacity down
                 db_counts[context_name] += 1
+
         db.session.rollback()
-        # Count live Docker objects as well so an ambiguous stop/create cannot
-        # be healed down into an over-admission. None means the host did not
-        # answer; suppress down-healing until a later successful strict list.
+
+        # count live docker objects too so an ambiguous stop or create is not healed down into over admission
         observed: dict[str, int] = {}
         for name, counter in counters.items():
             listing = self.host_manager.list_session_containers_strict(name, "rd-session-")
             if listing is None:
+                # the host did not answer, hold the higher count until a later strict list
                 observed[name] = max(db_counts.get(name, 0), counter)
-            else:
-                live_names: set[str] = set()
-                for entry in listing:
-                    listed_name = entry.get("name")
-                    labels = entry.get("labels")
-                    if listed_name and isinstance(labels, dict) and labels.get(SESSION_LABEL_MANAGED) == "true":
-                        live_names.add(str(listed_name))
-                untracked_live = live_names - known_names.get(name, set())
-                observed[name] = db_counts.get(name, 0) + len(untracked_live)
-        # Claimed reservations commit the counter and operation owner in one
-        # transaction. Only a corrupt reservation that lacks its context is
-        # ambiguous enough to prevent safe downward healing.
+                continue
+
+            live_names: set[str] = set()
+            for entry in listing:
+                listed_name = entry.get("name")
+                labels = entry.get("labels")
+                if listed_name and isinstance(labels, dict) and labels.get(SESSION_LABEL_MANAGED) == "true":
+                    live_names.add(str(listed_name))
+            untracked_live = live_names - known_names.get(name, set())
+            observed[name] = db_counts.get(name, 0) + len(untracked_live)
+
+        # only a reservation missing its context is ambiguous enough to block down healing
         updates, events, _unused_streaks = plan_count_audit(
             counters,
             observed,
@@ -615,10 +575,7 @@ class Orchestrator:
 
         applied_names: set[str] = set()
         for name, target in updates.items():
-            # The strict Docker scan above is intentionally outside a database
-            # transaction. Compare-and-set the counter snapshot so a request
-            # that reserves or releases capacity during that scan cannot be
-            # overwritten by stale audit data.
+            # the scan ran outside a transaction, match the counter snapshot so a concurrent reserve survives
             changed = DesktopDockerContextModel.query.filter(
                 DesktopDockerContextModel.context_name == name,
                 DesktopDockerContextModel.active_sessions == counters[name],
@@ -712,9 +669,7 @@ class Orchestrator:
             fence = fences.get(name)
             auto_cap_required = bool(fence is not None and fence[4] is None)
             if eligible and auto_cap_required and name in cap_stale:
-                # Never publish recovery using the fallback cap. Derive the
-                # host's real auto-cap first and install cap + health under one
-                # lock so concurrent admission cannot observe an unsafe window.
+                # derive the real cap before publishing recovery, admission must never see the fallback cap
                 cap, stale = self._derive_auto_cap(name, connected=True)
                 if stale:
                     eligible = False
@@ -725,10 +680,10 @@ class Orchestrator:
             changed_to_healthy = False
             changed_to_unhealthy = False
             with self.lock:
-                # An admin reload may replace/remove a context while its remote
-                # probes are in flight. Do not publish results for the old fence.
+                # an admin reload can replace the context mid probe, do not publish results for the old fence
                 if self.context_fences.get(name) != fence:
                     continue
+
                 current_health = bool(self.health.get(name))
                 if eligible:
                     if derived_cap is not None:

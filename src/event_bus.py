@@ -13,9 +13,7 @@ logger = logging.getLogger(__name__)
 CHANNEL = "ctfd_remote_desktop:events"
 _BUS_DELIVERY_MARKER = "_rd_bus_delivery"
 
-# Gunicorn preload is rejected before plugin initialization. Normal Gunicorn
-# startup imports the application independently in each worker, so this module-
-# level identity is process-unique without fork-repair state.
+# preload is rejected at load so every worker imports this module itself, no fork repair needed
 WORKER_ID = f"{os.getpid()}-{secrets.token_hex(16)}"
 
 _app = None
@@ -26,7 +24,6 @@ _subscriber_lock = threading.Lock()
 
 
 def get_worker_id() -> str:
-    """Return the identity created when this worker imported the plugin."""
     return WORKER_ID
 
 
@@ -56,7 +53,7 @@ def _get_publish_client():
         try:
             import redis
 
-            # short socket_timeout so a hung redis can't park the request greenlet
+            # short socket_timeout so a hung redis cannot park the request greenlet
             client = redis.from_url(url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
             client.ping()
             _pub_client = client
@@ -73,7 +70,7 @@ def _new_subscribe_client():
     try:
         import redis
 
-        # no socket_timeout: pubsub.listen() must block forever waiting for messages
+        # no socket_timeout, pubsub.listen must block forever waiting for messages
         client = redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True)
         client.ping()
         return client
@@ -116,12 +113,10 @@ def start_subscriber(on_message: Callable[[dict], None]) -> None:
 
 
 def _deliver_bus_event(on_message: Callable[[dict], None], event: dict) -> bool:
-    """deliver one remote event as non-persistent live fan-out"""
     if event.get("_origin") == get_worker_id():
         return False
     event.pop("_origin", None)
-    # The callback currently has a one-argument public contract, so
-    # EventLogger consumes this private marker as persist=False.
+    # the callback takes one argument, so the marker is how the receiver learns not to persist
     event[_BUS_DELIVERY_MARKER] = True
     on_message(event)
     return True

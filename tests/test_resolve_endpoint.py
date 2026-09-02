@@ -81,7 +81,6 @@ def test_no_meta_no_hostname_no_socket():
 
 def test_local_socket_fallback():
     def exists_side_effect(path):
-        # meta file doesn't exist, but the docker socket does
         return path == "/var/run/docker.sock"
 
     with patch("docker_host_manager.os.path.exists", side_effect=exists_side_effect):
@@ -90,9 +89,11 @@ def test_local_socket_fallback():
 
 
 def test_nonlocal_context_never_falls_back_to_local_socket():
-    with patch("docker_host_manager._scan_context_meta", return_value=None):
-        with patch("docker_host_manager.os.path.exists", return_value=True):
-            assert _resolve_endpoint("missing-remote", hostname=None) is None
+    with (
+        patch("docker_host_manager._scan_context_meta", return_value=None),
+        patch("docker_host_manager.os.path.exists", return_value=True),
+    ):
+        assert _resolve_endpoint("missing-remote", hostname=None) is None
 
 
 def test_unsupported_meta_file_falls_through_to_valid_hostname():
@@ -154,9 +155,11 @@ def test_discovery_ignores_malformed_metadata_shapes():
 
 
 def test_corrupt_meta_falls_through_to_hostname():
-    with patch("docker_host_manager.os.path.expanduser", return_value="/fake/meta.json"):
-        with patch("docker_host_manager.os.path.exists", return_value=True):
-            with patch("builtins.open", mock_open(read_data="not json")):
-                result = _resolve_endpoint("ctx", hostname="fallback-host")
+    with (
+        patch("docker_host_manager.os.path.expanduser", return_value="/fake/meta.json"),
+        patch("docker_host_manager.os.path.exists", return_value=True),
+        patch("builtins.open", mock_open(read_data="not json")),
+    ):
+        result = _resolve_endpoint("ctx", hostname="fallback-host")
 
     assert result == "ssh://root@fallback-host"

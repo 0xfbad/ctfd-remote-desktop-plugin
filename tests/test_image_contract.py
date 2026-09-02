@@ -1,5 +1,3 @@
-"""The scheduler must reject images that predate the plugin/image contract."""
-
 import json
 import logging
 from pathlib import Path

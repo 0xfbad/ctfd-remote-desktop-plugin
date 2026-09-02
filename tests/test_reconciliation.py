@@ -8,7 +8,6 @@ from orchestrator import Orchestrator
 
 
 def test_reconcile_removes_stale_records():
-    """Stale DB records (container no longer running) should be deleted."""
     hm = MagicMock(spec=DockerHostManager)
     hm.is_container_running.return_value = False
 
@@ -24,7 +23,7 @@ def test_reconcile_removes_stale_records():
     mock_db = MagicMock()
 
     with patch.dict("sys.modules", {}):
-        # simulate the reconciliation logic from __init__.py
+        # the reconciliation loop lives inline in __init__.py so it is mirrored here
         rows = [row]
         removed = 0
         for r in rows:
@@ -41,8 +40,6 @@ def test_reconcile_removes_stale_records():
 
 
 def test_reconcile_keeps_running_containers_and_syncs_counter():
-    """running containers are kept; the shared active_sessions counter is
-    absolute-synced to the surviving rows (per-worker seeding is gone)"""
     from collections import Counter
 
     hm = MagicMock(spec=DockerHostManager)
@@ -69,7 +66,6 @@ def test_reconcile_keeps_running_containers_and_syncs_counter():
 
 
 def test_reconcile_handles_exception_as_stale():
-    """If is_container_running raises, treat the record as stale."""
     hm = MagicMock(spec=DockerHostManager)
     hm.is_container_running.side_effect = Exception("connection refused")
 
@@ -95,7 +91,6 @@ def test_reconcile_handles_exception_as_stale():
 
 
 def test_reconcile_mixed():
-    """Mix of running and stale containers; counter syncs to survivors."""
     from collections import Counter
 
     hm = MagicMock(spec=DockerHostManager)
@@ -129,7 +124,6 @@ def test_reconcile_mixed():
 
 
 def test_verify_or_reap_running_keeps_row(container_manager):
-    """live container, helper returns True without touching the DB"""
     cm = container_manager
     cm.host_manager.is_container_running.return_value = True
 
@@ -146,7 +140,6 @@ def test_verify_or_reap_running_keeps_row(container_manager):
 
 
 def test_verify_or_reap_vanished_reaps_row(container_manager):
-    """missing container, helper writes history, releases slot, deletes row"""
     cm = container_manager
     cm.host_manager.inspect_container_state.return_value = "not_found"
 
@@ -162,7 +155,7 @@ def test_verify_or_reap_vanished_reaps_row(container_manager):
     mock_users = MagicMock()
     mock_users.query.filter_by.return_value.first.return_value = SimpleNamespace(name="alice", id=1)
     mock_history = MagicMock()
-    # T10: reap now re-queries inside the destroy lock to avoid double-history
+    # reap re-queries inside the destroy lock so history is never written twice
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = row
 
@@ -177,8 +170,7 @@ def test_verify_or_reap_vanished_reaps_row(container_manager):
 
     assert result is False
     mock_db.session.delete.assert_called_once_with(row)
-    # The first transaction releases locks before strict state inspection, a
-    # second fences teardown, and a third finalizes after exact removal.
+    # three commits, release locks before state inspection, fence teardown, finalize after removal
     assert mock_db.session.commit.call_count == 3
     cm.orchestrator.release_active_slot_in_transaction.assert_called_once_with(
         "ctx1",
@@ -191,8 +183,6 @@ def test_verify_or_reap_vanished_reaps_row(container_manager):
 
 
 def test_verify_or_reap_row_already_gone_returns_false(container_manager):
-    """T10: if a concurrent destroy already reaped the row, re-query inside
-    the lock returns None and we bail out without double-inserting history"""
     cm = container_manager
     cm.host_manager.inspect_container_state.return_value = "not_found"
 
@@ -206,7 +196,7 @@ def test_verify_or_reap_row_already_gone_returns_false(container_manager):
 
     mock_db = MagicMock()
     mock_history = MagicMock()
-    # the re-query inside the lock returns None (someone else already reaped)
+    # the re-query inside the lock finds nothing when a concurrent destroy already reaped the row
     mock_model = MagicMock()
     mock_model.query.filter_by.return_value.first.return_value = None
 
@@ -225,7 +215,6 @@ def test_verify_or_reap_row_already_gone_returns_false(container_manager):
 
 
 def test_verify_or_reap_docker_exception_keeps_row(container_manager):
-    """transient docker error, helper returns True and leaves the row alone"""
     cm = container_manager
     cm.host_manager.is_container_running.side_effect = docker.errors.DockerException("boom")
 
@@ -241,7 +230,6 @@ def test_verify_or_reap_docker_exception_keeps_row(container_manager):
 
 
 def test_verify_or_reap_ssh_exception_keeps_row(container_manager):
-    """transient ssh error, helper returns True and leaves the row alone"""
     cm = container_manager
     cm.host_manager.is_container_running.side_effect = paramiko.ssh_exception.SSHException("boom")
 
@@ -257,17 +245,13 @@ def test_verify_or_reap_ssh_exception_keeps_row(container_manager):
 
 
 def test_concurrent_reap_and_destroy_only_one_history(container_manager):
-    """T10 regression: a concurrent admin destroy + verify_or_reap on the
-    same vanished container must produce exactly one history insert, never
-    two. without the destroy lock inside _verify_or_reap, both code paths
-    can pass their respective row checks and both call session.add(history)."""
+    """without the destroy lock inside _verify_or_reap both racing paths pass their row check and add history"""
     import threading
 
     cm = container_manager
     cm.host_manager.is_container_running.return_value = False
 
-    # shared row object both call paths see at the start. the destroy lock
-    # winner deletes it, the loser's re-query returns None and bails out
+    # both paths start from this row, the destroy lock winner deletes it and the loser re-query finds nothing
     row_state = {
         "row": MagicMock(
             docker_context="ctx1",
@@ -280,8 +264,6 @@ def test_concurrent_reap_and_destroy_only_one_history(container_manager):
     }
 
     def _first_then_none():
-        # mimic mariadb: the first query inside the lock sees the row, after
-        # the winner's delete+commit subsequent queries return None
         if row_state["row"] is None:
             return None
         return row_state["row"]
@@ -331,8 +313,7 @@ def test_concurrent_reap_and_destroy_only_one_history(container_manager):
         except Exception as e:
             errors.append(("destroy", e))
 
-    # patch once in the main thread: patch() swaps module globals, so
-    # per-thread enter/exit races the restore against the other thread
+    # patch in the main thread, patch swaps module globals so a per-thread exit races the restore
     with (
         patch("container_manager.db", mock_db),
         patch("container_manager.DesktopContainerInfoModel", mock_model),
@@ -348,13 +329,10 @@ def test_concurrent_reap_and_destroy_only_one_history(container_manager):
         t2.join()
 
     assert not errors, f"unexpected errors: {errors}"
-    # exactly one history row must have been added across both paths
     assert len(history_adds) == 1, f"expected 1 history insert, got {len(history_adds)}"
 
 
 def test_repeated_concurrent_reap_and_destroy(container_manager):
-    """T10: run the race many times under aggressive thread switching.
-    every iteration must produce exactly one history row, never two."""
     import threading
 
     cm = container_manager
@@ -406,10 +384,7 @@ def test_repeated_concurrent_reap_and_destroy(container_manager):
         mock_history = MagicMock(side_effect=lambda **kw: MagicMock())
 
         barrier = threading.Barrier(2)
-        # get_container_info passes the row object it already queried into the
-        # verifier. Capture that object before racing; reading the mutable test
-        # store after the destroy thread sets it to None tests an impossible
-        # call shape and hides the thread exception as only a pytest warning.
+        # capture the row before racing, reading row_state after the destroy nulls it is an impossible call shape
         reap_row = row_state["row"]
 
         def reap_worker():
@@ -437,7 +412,6 @@ def test_repeated_concurrent_reap_and_destroy(container_manager):
 
 
 def _orphan_sweep(cm, listing, db_names=()):
-    """Run one orphan sweep on a single connected context."""
     mock_model = MagicMock()
     mock_model.query.with_entities.return_value.all.return_value = [SimpleNamespace(container_name=n) for n in db_names]
 
@@ -456,7 +430,7 @@ def _orphan_sweep(cm, listing, db_names=()):
 
 
 def test_reconcile_orphans_strict_none_skips_removal(container_manager):
-    """A failed strict listing cannot prove that an orphan is removable."""
+    """a failed strict listing cannot prove that an orphan is removable"""
     cm = container_manager
 
     _orphan_sweep(cm, listing=None, db_names=("rd-session-live",))
@@ -494,8 +468,7 @@ def test_reconcile_orphans_removes_old_running_orphan(container_manager):
 
 
 def test_reconcile_orphans_paused_orphan_held_not_removed(container_manager):
-    """a paused orphan is an evidence hold: never force-removed, surfaced
-    via an orphan_paused event instead"""
+    """a paused orphan is an evidence hold, it is never force removed"""
     import time
 
     from docker_host_manager import SESSION_LABEL_MANAGED, SESSION_LABEL_USER_ID, SESSION_LABEL_UUID

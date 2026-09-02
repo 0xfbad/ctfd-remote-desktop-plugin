@@ -246,8 +246,7 @@ def test_initialize_settings_migrates_only_exact_contract_one_defaults():
     assert readiness_row.value == str(settings.SETTING_DEFAULTS["vnc_ready_attempts"])
     assert revision.value == "2"
     assert any(
-        call.kwargs == {"key": "settings_schema_version", "value": "2"}
-        for call in metadata_model.call_args_list
+        call.kwargs == {"key": "settings_schema_version", "value": "2"} for call in metadata_model.call_args_list
     )
     assert add.called
 

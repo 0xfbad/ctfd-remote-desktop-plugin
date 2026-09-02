@@ -16,18 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 def _esc_passthrough(val: Any) -> Any:
-    """html-escape strings, pass through everything else.
-
-    distinct from models._esc, which coerces to str and returns "" for falsy.
-    that differing falsy/passthrough behavior is load-bearing, do not merge them
-    """
+    """models._esc coerces to str and returns empty for falsy, that difference is load bearing"""
     if isinstance(val, str):
         return str(_markup_escape(val))
     return val
 
 
 def _esc_deep(obj: Any) -> Any:
-    """recursively html-escape all string values (and dict keys) in a structure"""
     if isinstance(obj, dict):
         return {_esc_passthrough(k): _esc_deep(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -39,7 +34,6 @@ EventDict = dict[str, int | float | str | bool | None | dict[str, int | float | 
 EventListener = Callable[[EventDict], None]
 
 
-# Process-local and bounded: each serving worker must run its own drainer.
 _PERSIST_QUEUE_MAXSIZE = 10000
 _PERSIST_MAX_RETRIES = 3
 _PERSIST_BACKOFF_MAX_SECONDS = 30.0
@@ -62,7 +56,7 @@ _persistence_stats: dict[str, int] = {
 
 
 def _reset_after_fork() -> None:
-    """discard inherited in-memory queue state and replace inherited locks"""
+    """a lock held at fork time stays held in the child, replace every inherited one"""
     global _persist_queue, _persist_queue_lock, _drainer_stop, _drainer_app, _drainer_handle
     global _persistence_stats_lock, _persistence_stats
     _persist_queue = None
@@ -86,7 +80,6 @@ def _increment_persistence_stat(name: str, amount: int = 1) -> int:
 
 
 def get_persistence_stats() -> dict[str, int]:
-    """return process-local best-effort persistence counters for monitoring"""
     with _persistence_stats_lock:
         stats = dict(_persistence_stats)
     try:
@@ -97,14 +90,12 @@ def get_persistence_stats() -> dict[str, int]:
 
 
 def _reset_persistence_stats() -> None:
-    """reset process-local counters; intended for deterministic tests"""
     with _persistence_stats_lock:
         for name in _persistence_stats:
             _persistence_stats[name] = 0
 
 
 def _get_persist_queue() -> Any:
-    """lazy-init the persistence queue, prefers gevent.queue.Queue when available"""
     global _persist_queue
     if _persist_queue is not None:
         return _persist_queue
@@ -116,14 +107,11 @@ def _get_persist_queue() -> Any:
 
             _persist_queue = gevent.queue.Queue(maxsize=_PERSIST_QUEUE_MAXSIZE)
         except Exception:
-            # fall back to a plain deque in environments without gevent (unit tests)
             _persist_queue = _DequeQueue(maxsize=_PERSIST_QUEUE_MAXSIZE)
     return _persist_queue
 
 
 class _DequeQueue:
-    """minimal queue shim with put_nowait/get_nowait/qsize, used when gevent is unavailable"""
-
     def __init__(self, maxsize: int) -> None:
         self._dq: deque = deque()
         self._maxsize = maxsize
@@ -151,13 +139,12 @@ class _DequeQueue:
 
 
 def _event_to_row(event: EventDict) -> dict[str, Any]:
-    """flatten an EventDict to the columns of DesktopEventLogModel"""
     metadata = event.get("metadata") or {}
     try:
         meta_json = json.dumps(metadata, default=str) if metadata else None
     except Exception:
         meta_json = None
-    # timestamp is always a float at the source; narrow the EventDict union for mypy
+    # the source always writes a float, this narrows the value union for mypy
     ts = event.get("timestamp") or time.time()
     timestamp = float(ts) if isinstance(ts, (int, float, str)) else time.time()
     return {
@@ -178,8 +165,7 @@ def _enqueue_persist_row(row: dict[str, Any], *, retry: bool = False, queue: Any
         target_queue.put_nowait(row)
     except Exception:
         total = _increment_persistence_stat("dropped_overflow")
-        # Log the first and power-of-two totals so sustained overload remains
-        # visible without turning the warning itself into another event flood.
+        # first and power of two totals only, so sustained overload does not flood the log itself
         if total == 1 or total & (total - 1) == 0:
             logger.error("event persistence queue overflow; dropped rows total=%d", total)
         return False
@@ -239,8 +225,6 @@ class EventLogger:
         self._deliver_local(event, persist=persist)
 
         try:
-            from . import event_bus
-
             event_bus.publish(event)
         except Exception:
             logger.warning("event bus publish failed", exc_info=True)
@@ -268,13 +252,7 @@ class EventLogger:
         metadata: dict[str, int | float | str | bool | None] | None = None,
         user_flags: dict[str, bool] | None = None,
     ) -> EventDict:
-        """Publish an event and commit its audit row before returning.
-
-        Most events deliberately use the bounded asynchronous persistence
-        queue. Irreversible administrative evidence disposal uses this method so
-        the durable intent record exists before Docker is asked to delete the
-        object.
-        """
+        """commits the audit row before returning, for callers about to destroy the evidence"""
         from CTFd.models import db
         from .models import DesktopEventLogModel
 
@@ -297,8 +275,7 @@ class EventLogger:
         return event
 
     def _deliver_local(self, event: EventDict, persist: bool = True) -> None:
-        # Redis fan-out is live-only; the originating worker owns persistence.
-        # Explicit persist=False remains available to local callers.
+        # a bus delivered event was already persisted by the worker that originated it
         if event.pop(_BUS_DELIVERY_MARKER, False):
             persist = False
 
@@ -307,8 +284,6 @@ class EventLogger:
             listeners = self.listeners[:]
 
         if persist:
-            # Persistence is owned by the process that originated the event.
-            # Redis only mirrors the live feed to other workers.
             _enqueue_persist_row(_event_to_row(event))
 
         failed: list[EventListener] = []
@@ -354,14 +329,13 @@ def _drain_batch(q: Any, max_batch: int = 100) -> list[dict[str, Any]]:
 
 
 def _row_for_insert(row: dict[str, Any]) -> dict[str, Any]:
-    """strip queue-only retry metadata before handing a mapping to SQLAlchemy"""
+    """the retry counter is queue only, bulk_insert_mappings rejects keys without a column"""
     if _PERSIST_RETRY_FIELD not in row:
         return row
     return {key: value for key, value in row.items() if key != _PERSIST_RETRY_FIELD}
 
 
 def _write_persist_batch(app: Any, batch: list[dict[str, Any]]) -> bool:
-    """attempt one database transaction for a batch, returning success"""
     try:
         with app.app_context():
             from CTFd.models import db
@@ -390,7 +364,6 @@ def _write_persist_batch(app: Any, batch: list[dict[str, Any]]) -> bool:
 
 
 def _requeue_failed_batch(q: Any, batch: list[dict[str, Any]]) -> None:
-    """retry a failed batch a bounded number of times, then make the loss visible"""
     exhausted = 0
     for row in batch:
         attempts = int(row.get(_PERSIST_RETRY_FIELD, 0)) + 1
@@ -411,15 +384,12 @@ def _requeue_failed_batch(q: Any, batch: list[dict[str, Any]]) -> None:
 
 
 def _process_persist_batch(app: Any, q: Any, batch: list[dict[str, Any]]) -> bool:
-    """write or boundedly requeue a batch; returns whether the write committed"""
     if _write_persist_batch(app, batch):
         _increment_persistence_stat("persisted", len(batch))
         return True
 
     _increment_persistence_stat("write_failures")
-    # The model's unique event_id makes an ambiguous post-commit retry collide
-    # instead of creating a duplicate. Batch retry remains best effort: a
-    # uniqueness collision is observed as a failed batch, not a confirmed write.
+    # the unique event_id makes a retry after an ambiguous commit collide instead of duplicating
     _requeue_failed_batch(q, batch)
     return False
 
@@ -431,11 +401,7 @@ def _retry_backoff(interval: float, failure_streak: int) -> float:
 
 
 def start_persistence_drainer(app: Any, interval: float = 1.0, batch_size: int = 100) -> Any:
-    """spawn a greenlet that bulk-inserts queued events every `interval` seconds.
-
-    each serving worker must call this once because its origin queue is process-local.
-    returns the greenlet handle for tests.
-    """
+    """every serving worker must call this once, the queue it drains is process local"""
     global _drainer_stop, _drainer_app, _drainer_handle
     _drainer_stop = False
     _drainer_app = app
@@ -472,12 +438,7 @@ def start_persistence_drainer(app: Any, interval: float = 1.0, batch_size: int =
 
 
 def stop_persistence_drainer(deadline_seconds: float = 3.0, batch_size: int = 100) -> int:
-    """Stop and deadline-flush this worker's process-local persistence queue.
-
-    The queue is still best effort under hard kills or a prolonged database
-    outage, but normal Gunicorn TERM/worker retirement no longer discards rows
-    merely because the periodic greenlet was sleeping.
-    """
+    """flushes the process local queue within the deadline, a hard kill still loses rows"""
     global _drainer_stop
     _drainer_stop = True
     deadline = time.monotonic() + max(float(deadline_seconds), 0.0)
@@ -505,7 +466,6 @@ def stop_persistence_drainer(deadline_seconds: float = 3.0, batch_size: int = 10
 
 
 def prune_event_log(retention_days: int) -> int:
-    """delete event log rows older than `retention_days`, returns number deleted"""
     from CTFd.models import db
     from .models import DesktopEventLogModel
 
@@ -515,12 +475,11 @@ def prune_event_log(retention_days: int) -> int:
         db.session.commit()
         return deleted
     finally:
-        # explicit remove so scheduled job doesn't leak its connection
+        # explicit remove so the scheduled job does not leak its connection
         db.session.remove()
 
 
 def get_persisted_events(limit: int = 100) -> list[EventDict]:
-    """Read the durable cross-worker event tail in chronological order."""
     from .models import DesktopEventLogModel, DISPLAY_DATETIME_FORMAT
 
     bounded_limit = max(0, min(int(limit), 2000))

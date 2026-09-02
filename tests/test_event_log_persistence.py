@@ -32,7 +32,6 @@ def _find_class(name):
 
 
 def _column_calls(class_node):
-    """returns {column_name: ast.Call node for db.Column(...)}"""
     out = {}
     for item in class_node.body:
         if not isinstance(item, ast.Assign):
@@ -66,7 +65,6 @@ def test_desktop_event_log_model_has_expected_columns():
         "message",
         "metadata_json",
     }.issubset(cols.keys())
-    # __tablename__ assignment present and correct
     for item in cls.body:
         if (
             isinstance(item, ast.Assign)
@@ -93,7 +91,6 @@ def test_user_id_is_not_a_foreign_key():
     cls = _find_class("DesktopEventLogModel")
     cols = _column_calls(cls)
     user_id = cols["user_id"]
-    # walk args looking for db.ForeignKey calls
     for arg in user_id.args:
         if isinstance(arg, ast.Call):
             fn = arg.func
@@ -106,12 +103,10 @@ def test_retention_days_in_setting_defaults():
 
 
 def test_persist_queue_receives_event_when_log_event_called():
-    # reset module-level queue so the test starts clean
     event_logger._persist_queue = None
     el = event_logger.EventLogger()
     el.log_event("test_type", "hello world", user_id=42, username="alice")
     q = event_logger._get_persist_queue()
-    # at least one row enqueued
     assert q.qsize() >= 1
     row = q.get_nowait()
     assert row["event_id"] == el.get_recent_events()[0]["id"]
@@ -195,7 +190,6 @@ def test_retry_mapping_preserves_event_id_and_strips_queue_metadata():
 
 
 def test_drainer_exits_cleanly_on_stop():
-    # don't actually spawn a real greenlet, just verify the stop flag flips
     event_logger._drainer_stop = False
     event_logger.stop_persistence_drainer()
     assert event_logger._drainer_stop is True
@@ -244,7 +238,7 @@ def test_prune_event_log_builds_delete_query():
     fake_filter_result = MagicMock()
     fake_model.query.filter.return_value = fake_filter_result
     fake_filter_result.delete.return_value = 5
-    # comparing MagicMock < float would raise, so make timestamp a real-valued attr
+    # comparing a mock against a float would raise, so timestamp needs a real comparison
     fake_model.timestamp = type("FakeCol", (), {"__lt__": lambda self, other: True})()
 
     models_mod = sys.modules["models"]
@@ -271,14 +265,13 @@ def test_drain_batch_pulls_up_to_max():
         q.put_nowait({"event_type": f"t{i}", "timestamp": float(i), "level": "info", "message": "m"})
     batch = event_logger._drain_batch(q, max_batch=100)
     assert len(batch) == 100
-    # remaining queue should still hold the leftover items
     assert q.qsize() == 50
 
 
 def test_persist_queue_is_bounded():
     event_logger._persist_queue = None
     q = event_logger._get_persist_queue()
-    # deque shim caps at _PERSIST_QUEUE_MAXSIZE, so overflow gets dropped, not raised
+    # deque shim raises at _PERSIST_QUEUE_MAXSIZE, the swallow below models callers dropping overflow
     for i in range(event_logger._PERSIST_QUEUE_MAXSIZE + 100):
         try:
             q.put_nowait({"event_type": "t", "timestamp": float(i), "level": "info", "message": "m"})

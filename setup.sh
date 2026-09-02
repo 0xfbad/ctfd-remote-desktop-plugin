@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# setup script for ctfd-remote-desktop plugin
-# adds required docker-compose volumes, group_add, permissions init service,
-# and nginx websocket config
-
 PLUGIN_DIR="$(cd "$(dirname "$0")" && pwd)"
 CTFD_ROOT="${CTFD_ROOT_OVERRIDE:-$(cd "$PLUGIN_DIR/../../.." && pwd)}"
 COMPOSE_FILE="$CTFD_ROOT/docker-compose.yml"
 NGINX_CONF="$CTFD_ROOT/conf/nginx/http.conf"
 NGINX_HTTPS_CONF="${NGINX_CONF%/*}/https.conf"
 
-# Serialize setup against the CTFd workspace directory itself.  Holding an
-# open directory descriptor avoids leaving a lock artifact in the checkout,
-# while flock -n makes a concurrent invocation fail before either process
-# snapshots or changes shared configuration.
 if ! command -v flock >/dev/null 2>&1; then
     echo "error: flock is required to run setup safely" >&2
     exit 1
 fi
+# locking the directory descriptor keeps a lock artifact out of the checkout
 if ! exec 9<"$CTFD_ROOT"; then
     echo "error: could not open CTFd root for setup locking: $CTFD_ROOT" >&2
     exit 1
 fi
+# fail instead of waiting, a concurrent run would snapshot half changed config
 if ! flock -n 9; then
     echo "error: another remote desktop setup is already running for $CTFD_ROOT" >&2
     exit 1
@@ -62,7 +56,6 @@ err()  { echo -e "  ${RED}error${NC} $1"; }
 echo "remote desktop plugin setup"
 echo ""
 
-# check files exist
 if [ ! -f "$COMPOSE_FILE" ]; then
     err "docker-compose.yml not found at $COMPOSE_FILE"
     exit 1
@@ -81,9 +74,7 @@ ctfd_service_block() {
     ' "$COMPOSE_FILE"
 }
 
-# Local Docker uses only the daemon socket. Remote context material is copied
-# only after an explicit opt-in, and each requested source must already exist;
-# this avoids Compose creating empty root-owned credential directories.
+# staging is opt in, a local docker daemon needs only the socket
 STAGE_SSH="${CTFD_RD_STAGE_SSH:-0}"
 STAGE_DOCKER_CONFIG="${CTFD_RD_STAGE_DOCKER_CONFIG:-0}"
 for credential_flag in "$STAGE_SSH" "$STAGE_DOCKER_CONFIG"; do
@@ -100,6 +91,7 @@ if [ "$STAGE_DOCKER_CONFIG" -eq 0 ] && ctfd_service_block | grep -Eq '/home/ctfd
     err "existing Docker credential staging requires CTFD_RD_STAGE_DOCKER_CONFIG=1 on every setup run"
     exit 1
 fi
+# require the source now, compose would create it later as an empty root owned directory
 if [ "$STAGE_SSH" -eq 1 ] && { [ ! -d "$HOME/.ssh" ] || [ ! -r "$HOME/.ssh" ] || [ ! -x "$HOME/.ssh" ]; }; then
     err "CTFD_RD_STAGE_SSH=1 requires a readable $HOME/.ssh directory"
     exit 1
@@ -115,7 +107,6 @@ if [ -f "$NGINX_HTTPS_CONF" ]; then
     cp -p "$NGINX_HTTPS_CONF" "$SETUP_TMP_DIR/https.conf"
 fi
 
-# docker socket gid
 DOCKER_SOCK="${DOCKER_SOCK_OVERRIDE:-/var/run/docker.sock}"
 case "$DOCKER_SOCK" in
     /*) ;;
@@ -131,7 +122,6 @@ fi
 DOCKER_GID=$(stat -c '%g' "$DOCKER_SOCK")
 ok "docker socket gid: $DOCKER_GID"
 
-# docker-compose.yml modifications
 echo ""
 echo "docker-compose.yml"
 
@@ -166,9 +156,7 @@ ensure_ctfd_dependency() {
         return
     fi
     if ctfd_service_block | grep -q '^    depends_on:'; then
-        # The upstream CTFd file uses the mapping form because it already has
-        # service-completion conditions. Refuse a list instead of producing a
-        # subtly invalid mixture of sequence and mapping entries.
+        # appending a mapping entry to a list yields invalid compose, refuse instead
         first_dependency_line=$(ctfd_service_block | awk '/^    depends_on:/{found=1; next} found && NF {print; exit}')
         case "$first_dependency_line" in
             "      - "*) err "ctfd depends_on uses list form; convert it to mapping form before setup"; exit 1 ;;
@@ -210,8 +198,7 @@ ensure_ctfd_dependency() {
     added "ctfd depends_on $dependency"
 }
 
-# These names are owned by this plugin. Replace the complete service block on
-# every run so a current installation is deterministic and idempotent.
+# the plugin owns these service names, every run clobbers an existing block
 install_owned_service() {
     service_name=$1
     service_block_file=$2
@@ -244,7 +231,6 @@ install_owned_service() {
     mv -f -- "$SETUP_TMP_DIR/docker-compose.next.yml" "$COMPOSE_FILE"
 }
 
-# group_add
 if [ -n "$DOCKER_GID" ]; then
     docker_group_marker='ctfd-remote-desktop docker socket'
     marker_count=$(ctfd_group_add_block | grep -c "$docker_group_marker" || true)
@@ -317,7 +303,6 @@ if [ -n "$DOCKER_GID" ]; then
     fi
 fi
 
-# Runtime mounts go after the CTFd source mount.
 if ctfd_service_block | grep -q ':/var/run/docker.sock'; then
     skip "docker socket volume"
 else
@@ -355,8 +340,7 @@ if [ "$STAGE_SSH" -eq 1 ] || [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
 fi
 
 if [ "$STAGE_SSH" -eq 1 ]; then
-    # Do not reuse CTFd's generic `permissions` service: upstream owns it for
-    # uploads/logs. Copy without weakening the host credential modes.
+    # upstream owns the generic permissions service for uploads and logs, do not reuse it
     cat >"$SETUP_TMP_DIR/ssh-permissions.yml" <<'COMPOSESERVICE'
   ssh-permissions:
     image: alpine:3.23
@@ -386,9 +370,7 @@ COMPOSESERVICE
     ensure_ctfd_dependency ssh-permissions
 fi
 
-# Docker context metadata, TLS material, and registry config can contain 0600
-# files. Copy the complete directory as root, then transfer ownership inside a
-# dedicated named volume; never loosen traversal or file modes on the host.
+# tls material and registry config can be mode 0600, copy as root then chown inside the volume
 if [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
     cat >"$SETUP_TMP_DIR/docker-permissions.yml" <<'COMPOSESERVICE'
   docker-permissions:
@@ -454,7 +436,6 @@ if [ "$STAGE_SSH" -eq 1 ] || [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
     fi
 fi
 
-# nginx config
 echo ""
 echo "nginx config"
 
@@ -464,7 +445,6 @@ NGINX_MANAGED_END="# END CTFD-REMOTE-DESKTOP MANAGED LOCATIONS"
 
 cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
     # BEGIN CTFD-REMOTE-DESKTOP MANAGED LOCATIONS v1
-    # VNC proxy with auth_request
     location ~ ^/remote-desktop/vnc/(?<vnc_user_id>\d+)/(?<vnc_path>.+)$ {
       resolver 127.0.0.11 valid=30s;
       auth_request /remote-desktop/vnc/auth;
@@ -476,9 +456,7 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host $host;
-      # Never expose the CTFd browser session or client credentials to the
-      # per-session noVNC backend, whose static files are container-controlled.
-      proxy_set_header Cookie "";
+      proxy_set_header Cookie ""; # novnc backend files are container controlled, never hand it the ctfd session
       proxy_set_header Authorization "";
       proxy_set_header Proxy-Authorization "";
       proxy_set_header X-Real-IP $remote_addr;
@@ -492,7 +470,6 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       add_header Cache-Control "no-store";
     }
 
-    # internal auth subrequest for VNC proxy
     location = /remote-desktop/vnc/auth {
       internal;
       proxy_pass http://app_servers;
@@ -504,7 +481,6 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_set_header Cookie $http_cookie;
     }
 
-    # web terminal proxy with auth_request (ttyd)
     location ~ ^/remote-desktop/terminal/(?<terminal_user_id>\d+)/(?<terminal_path>.*)$ {
       resolver 127.0.0.11 valid=30s;
       auth_request /remote-desktop/terminal/auth;
@@ -516,9 +492,7 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      # Preserve an explicit public port so ttyd's Origin check sees the same
-      # authority the browser sent (for example https://ctfd.example:8443).
-      proxy_set_header Host $http_host;
+      proxy_set_header Host $http_host; # ttyd checks origin, $host would drop an explicit public port
       proxy_set_header X-Real-IP $remote_addr;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
@@ -540,7 +514,6 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       add_header Cache-Control "no-store";
     }
 
-    # internal auth subrequest for terminal proxy
     location = /remote-desktop/terminal/auth {
       internal;
       proxy_pass http://app_servers;
@@ -552,7 +525,6 @@ cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
       proxy_set_header Cookie $http_cookie;
     }
 
-    # serve nerd font with correct mime type
     location /remote-desktop/static/fonts/ {
       proxy_pass http://app_servers;
       proxy_hide_header Content-Type;
@@ -658,9 +630,7 @@ prepare_nginx_config() {
         err "generated nginx configuration failed managed-region validation: $label"
         return 1
     fi
-    # Preserve the bind-mounted inode and its SELinux/xattr metadata so a
-    # running Nginx container validates the candidate we just generated.
-    cat "$candidate" >"$conf"
+    cat "$candidate" >"$conf" # write in place, mv would break the bind mounted inode the nginx container holds
     added "canonical managed nginx region in $label"
 }
 

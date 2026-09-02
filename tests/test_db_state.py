@@ -205,10 +205,8 @@ def test_periodic_cleanup_destroys_expired(container_manager):
     row.extensions_used = 0
 
     mock_model = MagicMock()
-    # first call: periodic_cleanup queries timer_started=True
-    mock_model.query.filter_by.return_value.all.return_value = [row]
-    # subsequent calls from destroy_container query by user_id
-    mock_model.query.filter_by.return_value.first.return_value = row
+    mock_model.query.filter_by.return_value.all.return_value = [row]  # periodic_cleanup queries by timer_started
+    mock_model.query.filter_by.return_value.first.return_value = row  # destroy_container then queries by user_id
 
     mock_db = MagicMock()
     mock_users = MagicMock()

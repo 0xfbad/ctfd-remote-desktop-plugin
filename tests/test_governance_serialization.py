@@ -1,11 +1,4 @@
-"""Feature 3: fair-share governance kwargs in run_container.
-
-Five knobs, all validated before any docker call: memswap_limit is
-unconditional whenever memory is set (memory.swap.max=0), the rest are
-settings-gated where ""/0 must OMIT the kwarg entirely (not pass None -
-docker-py serializes an explicit None differently from absent for some
-HostConfig fields, and absence is the documented rollback contract).
-"""
+"""unset governance settings must omit the kwarg, docker-py treats an explicit null differently from absent"""
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -26,7 +19,6 @@ def _make_manager():
     return mgr
 
 
-# full plugin defaults for the governance keys (mirrors SETTING_DEFAULTS)
 DEFAULT_SETTINGS = {
     "pids_limit": 4096,
     "cap_drop": "ALL",
@@ -44,8 +36,6 @@ DEFAULT_SETTINGS = {
 
 
 def _run_with_settings(mgr, settings_overrides=None, **call_overrides):
-    """invoke run_container with a mocked docker client; return the kwargs
-    that client.containers.run was called with"""
     mock_client = MagicMock()
     mock_container = MagicMock()
     mock_container.id = "container-id-xyz"
@@ -71,24 +61,25 @@ def _run_with_settings(mgr, settings_overrides=None, **call_overrides):
     settings.update(DEFAULT_SETTINGS)
     settings.update(settings_overrides or {})
 
-    with patch.object(mgr, "_get_client", return_value=mock_client):
-        with patch("models.get_all_settings", return_value=settings):
-            kwargs = dict(
-                context_name="alpha",
-                image="img:latest",
-                name="rd-session-1-1700000000",
-                env={"VNC_PASSWORD": "secret"},
-                ports=["5900/tcp", "6080/tcp"],
-            )
-            kwargs.update(call_overrides)
-            mgr.run_container(**kwargs)
+    with (
+        patch.object(mgr, "_get_client", return_value=mock_client),
+        patch("models.get_all_settings", return_value=settings),
+    ):
+        kwargs = dict(
+            context_name="alpha",
+            image="img:latest",
+            name="rd-session-1-1700000000",
+            env={"VNC_PASSWORD": "secret"},
+            ports=["5900/tcp", "6080/tcp"],
+        )
+        kwargs.update(call_overrides)
+        mgr.run_container(**kwargs)
 
     assert mock_client.containers.run.called
     return mock_client.containers.run.call_args.kwargs
 
 
 def _run_expect_valueerror(mgr, settings_overrides, **call_overrides):
-    """run_container must raise ValueError before touching the client"""
     mock_client = MagicMock()
     from settings import SETTING_DEFAULTS
 
@@ -96,18 +87,20 @@ def _run_expect_valueerror(mgr, settings_overrides, **call_overrides):
     settings.update(DEFAULT_SETTINGS)
     settings.update(settings_overrides)
 
-    with patch.object(mgr, "_get_client", return_value=mock_client):
-        with patch("models.get_all_settings", return_value=settings):
-            kwargs = dict(
-                context_name="alpha",
-                image="img:latest",
-                name="rd-session-1-1700000000",
-                env={},
-                ports=["5900/tcp", "6080/tcp"],
-            )
-            kwargs.update(call_overrides)
-            with pytest.raises(ValueError):
-                mgr.run_container(**kwargs)
+    with (
+        patch.object(mgr, "_get_client", return_value=mock_client),
+        patch("models.get_all_settings", return_value=settings),
+    ):
+        kwargs = dict(
+            context_name="alpha",
+            image="img:latest",
+            name="rd-session-1-1700000000",
+            env={},
+            ports=["5900/tcp", "6080/tcp"],
+        )
+        kwargs.update(call_overrides)
+        with pytest.raises(ValueError):
+            mgr.run_container(**kwargs)
 
     mock_client.containers.run.assert_not_called()
 
@@ -117,8 +110,7 @@ def test_full_defaults_serialize_all_governance_kwargs():
     memory = parse_size("4g")
     kwargs = _run_with_settings(mgr, memory=memory)
 
-    # default swap cushion equal to the RAM limit: memswap_limit = 2 * memory
-    assert kwargs["memswap_limit"] == 2 * memory
+    assert kwargs["memswap_limit"] == 2 * memory  # memswap counts ram plus swap so 2x is an equal swap cushion
     assert kwargs["mem_reservation"] == 1073741824  # 1g
     assert kwargs["oom_score_adj"] == 500
     assert kwargs["cgroup_parent"] == "rd.slice"
@@ -151,8 +143,7 @@ def test_nofile_soft_zero_omits_ulimits():
 
 
 def test_cgroup_parent_without_slice_suffix_raises_before_client():
-    """systemd cgroup driver rejects non-.slice parents at create; validate
-    plugin-side so the error is loud and precedes any docker call"""
+    """systemd cgroup driver rejects a cgroup_parent without the slice suffix"""
     mgr = _make_manager()
     _run_expect_valueerror(mgr, {"cgroup_parent": "rd"}, memory=parse_size("4g"))
 
@@ -194,8 +185,7 @@ def test_swap_limit_explicit_size_adds_to_memory():
 
 
 def test_memory_none_omits_memswap_limit():
-    # memory_reservation cleared too: the reservation-vs-memory guard is
-    # skipped when memory is None, keep this test about memswap only
     mgr = _make_manager()
+    # memory_reservation cleared to keep this test about memswap only
     kwargs = _run_with_settings(mgr, {"memory_reservation": ""}, memory=None)
     assert "memswap_limit" not in kwargs

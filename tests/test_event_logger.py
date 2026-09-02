@@ -45,8 +45,7 @@ def test_failing_listener_removed():
     el.add_listener(bad_listener)
     el.log_event("t", "first")
     assert bad_listener not in el.listeners
-    # second event shouldn't raise
-    el.log_event("t", "second")
+    el.log_event("t", "second")  # must not raise now that the listener is gone
 
 
 def test_remove_listener():

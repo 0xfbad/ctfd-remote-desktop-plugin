@@ -1,13 +1,5 @@
-"""Feature 1/4: pause = evidence hold, enforced plugin-side.
-
-docker stop/kill/rm -f all SUCCEED against paused containers (verified on
-29.7.2), so nothing daemon-side protects a held writable layer. The plugin
-must therefore: count paused as alive, refuse user destroy on paused rows,
-    skip expiry-destroy at every sweep site, preserve holds across restarts,
-    and credit frozen time back to the timer on explicit admin unpause (expiry
-is skipped while paused - without the credit the next sweep re-creates the
-exact evidence loss the hold exists to prevent).
-"""
+"""docker stop, kill, and rm -f all succeed against paused containers on 29.7.2, the daemon protects no hold
+the plugin counts paused as alive, refuses user destroy, skips expiry sweeps, and credits frozen time on unpause"""
 
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -50,11 +42,6 @@ def _make_host_manager():
     mgr._context_configs = {"ctx1": "unix:///fake.sock"}
     mgr._config_generation = 1
     return mgr
-
-
-# ---------------------------------------------------------------------------
-# docker_host_manager.is_container_running: paused counts as alive
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -114,11 +101,6 @@ def test_pause_controls_propagate_not_found(method_name):
             getattr(mgr, method_name)("ctx1", "rd-session-7")
 
 
-# ---------------------------------------------------------------------------
-# destroy_container: refusal for the user, force_remove for the admin
-# ---------------------------------------------------------------------------
-
-
 def test_destroy_paused_row_refused_for_user(container_manager):
     cm = container_manager
     row = _row(paused_at=123.0)
@@ -135,7 +117,7 @@ def test_destroy_paused_row_refused_for_user(container_manager):
         patch("container_manager.db", mock_db),
         patch("container_manager.Users", mock_users),
     ):
-        result = cm.destroy_container(7)  # default reason = END_REASON_USER_DESTROYED
+        result = cm.destroy_container(7)  # the default reason is END_REASON_USER_DESTROYED
 
     assert result["success"] is False
     assert "suspended" in result["error"]
@@ -147,7 +129,7 @@ def test_destroy_paused_row_refused_for_user(container_manager):
 def test_destroy_paused_row_admin_kill_uses_force_remove(container_manager):
     cm = container_manager
     row = _row(paused_at=123.0)
-    # Explicit admin override is allowed even when the fresh state probe fails.
+    # an explicit admin override is allowed even when the fresh state probe fails
     cm.host_manager.inspect_container_state.return_value = "unknown"
 
     mock_model = MagicMock()
@@ -168,8 +150,7 @@ def test_destroy_paused_row_admin_kill_uses_force_remove(container_manager):
         result = cm.destroy_container(7, reason=END_REASON_ADMIN_KILLED)
 
     assert result["success"] is True
-    # frozen container: stop would block the full timeout before SIGKILL,
-    # force_remove is immediate
+    # stop blocks for the full timeout before SIGKILL on a frozen container, force_remove is immediate
     cm.host_manager.force_remove_container.assert_called_once_with("ctx1", str(row.container_id))
     cm.host_manager.stop_container.assert_not_called()
     mock_db.session.delete.assert_called_once_with(row)
@@ -231,11 +212,6 @@ def test_destroy_unknown_state_fails_closed_before_logs_or_stop(container_manage
     cm.host_manager.force_remove_container.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# expiry sweeps must skip paused rows (all three sites)
-# ---------------------------------------------------------------------------
-
-
 def test_get_container_info_expired_paused_row_not_destroyed(container_manager):
     cm = container_manager
     row = _row(
@@ -262,12 +238,11 @@ def test_get_container_info_expired_paused_row_not_destroyed(container_manager):
         patch.object(cm, "destroy_container") as mock_destroy,
         patch.object(cm, "_verify_or_reap", return_value=True),
     ):
-        mock_time.time.return_value = 1700.0  # 700s elapsed > 600s duration
+        mock_time.time.return_value = 1700.0  # 700s elapsed past the 600s duration
         info = cm.get_container_info(7)
 
     mock_destroy.assert_not_called()
-    # Evidence holds remain retained but are not exposed through user read or
-    # proxy paths until an administrator explicitly resumes them.
+    # a hold stays in the db but is hidden from user read and proxy paths until an admin resumes it
     assert info is None
 
 
@@ -290,7 +265,7 @@ def test_periodic_cleanup_skips_expired_paused_row(container_manager):
         patch.object(cm, "destroy_container") as mock_destroy,
         patch.object(cm, "_reconcile_orphans") as mock_reconcile,
     ):
-        mock_time.time.return_value = 1700.0  # expired if it weren't paused
+        mock_time.time.return_value = 1700.0  # expired if it were not paused
         cm.periodic_cleanup()
 
     mock_destroy.assert_not_called()
@@ -333,11 +308,6 @@ def test_get_all_containers_expired_paused_row_kept_and_flagged(container_manage
     assert "vnc_password" not in containers[0]
     assert "vnc_url" not in containers[0]
     assert "vnc_port" not in containers[0]
-
-
-# ---------------------------------------------------------------------------
-# pause_watch: mirror out-of-band pause/unpause into paused_at + events
-# ---------------------------------------------------------------------------
 
 
 def test_pause_watch_detects_out_of_band_pause(container_manager):
@@ -402,7 +372,7 @@ def test_pause_watch_repairs_out_of_band_unpause_without_releasing_hold(containe
         patch("container_manager.event_logger") as mock_events,
         patch("container_manager.time") as mock_time,
     ):
-        mock_time.time.return_value = 1600.0  # paused for 600s
+        mock_time.time.return_value = 1600.0  # 600s of frozen time
         cm.pause_watch()
 
     assert row.paused_at == 1000.0
@@ -413,11 +383,6 @@ def test_pause_watch_repairs_out_of_band_unpause_without_releasing_hold(containe
     assert args[0] == "session_paused"
     assert kwargs["level"] == "warning"
     assert kwargs["metadata"]["source"] == "drift_repaired"
-
-
-# ---------------------------------------------------------------------------
-# pause_session / unpause_session (admin endpoints)
-# ---------------------------------------------------------------------------
 
 
 def test_pause_session_sets_paused_at_and_pauses_container(container_manager):
@@ -477,7 +442,7 @@ def test_unpause_session_credits_timer_and_clears(container_manager):
 
     assert result["success"] is True
     cm.host_manager.unpause_container.assert_called_once_with("ctx1", row.container_name)
-    assert row.timer_start_time == 1100.0  # increased by the 600s pause
+    assert row.timer_start_time == 1100.0  # credited the 600s pause
     assert row.paused_at is None
 
 
@@ -574,11 +539,6 @@ def test_unpause_session_not_paused_errors(container_manager):
     cm.host_manager.unpause_container.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# _credit_pause_and_clear
-# ---------------------------------------------------------------------------
-
-
 def test_credit_pause_and_clear_shifts_start_time(container_manager):
     cm = container_manager
     row = _row(
@@ -594,7 +554,7 @@ def test_credit_pause_and_clear_shifts_start_time(container_manager):
         mock_time.time.return_value = 1600.0
         cm._credit_pause_and_clear(row)
 
-    assert row.timer_start_time == 1100.0  # +600s of frozen time
+    assert row.timer_start_time == 1100.0  # credited 600s of frozen time
     assert row.paused_at is None
     mock_db.session.commit.assert_called_once()
 

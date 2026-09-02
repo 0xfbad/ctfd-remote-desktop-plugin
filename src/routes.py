@@ -74,8 +74,6 @@ def _log_admin_target_action(
     *,
     level: str,
 ) -> None:
-    # shared audit tail for the per-user admin actions (kill/peek/extend); each
-    # handler keeps its own user lookup and pre-checks, only this log call is common
     event_logger.log_event(
         "admin_action",
         message,
@@ -95,8 +93,7 @@ _INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "
 
 
 def _infra_status(error: str | None) -> int:
-    # 503 when the failure is infrastructure (no host, unreachable context), 500 otherwise.
-    # signals to clients (and probes) that retry is worthwhile vs a hard server bug
+    # 503 marks the failure as infrastructure so clients and probes know a retry is worthwhile
     if not error:
         return 500
     lowered = error.lower()
@@ -104,7 +101,7 @@ def _infra_status(error: str | None) -> int:
 
 
 def _json_integer(value: object, *, minimum: int, field: str) -> int:
-    """Parse an integer JSON scalar without bool/float truncation."""
+    """exact int check, bool and float are rejected rather than truncated"""
     if type(value) is not int:
         if field == "weight":
             raise ValueError("weight must be an integer")
@@ -117,7 +114,6 @@ def _json_integer(value: object, *, minimum: int, field: str) -> int:
 
 
 def _context_hostname(value: object) -> str | None:
-    """Validate the optional SSH target before it reaches the database."""
     if value is None:
         return None
     if (
@@ -152,7 +148,6 @@ def _context_hostname(value: object) -> str | None:
 
 
 def _request_tz() -> datetime.tzinfo:
-    """viewer's IANA timezone for localizing heatmap buckets; falls back to UTC"""
     name = request.args.get("tz", "")
     if name:
         try:
@@ -163,7 +158,7 @@ def _request_tz() -> datetime.tzinfo:
 
 
 def _require_confirm():
-    # guard against stray POSTs (admin xss, hijacked session, fat finger) wiping audit data
+    # confirm token keeps a stray post from admin xss or a hijacked session from wiping audit data
     payload = request.get_json(silent=True) or {}
     if payload.get("confirm") != "DELETE":
         return jsonify({"error": 'confirmation required: post body must contain {"confirm": "DELETE"}'}), 400
@@ -186,13 +181,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         event_bus.publish({"_control": "reload_contexts"})
 
     def _lock_context_for_administration(model, context_id: int):
-        """Start a clean transaction and lock a fresh context row.
-
-        Admission reserves update the same row, so this lock makes a drain/edit
-        or delete decision atomic with the predicates in Orchestrator._try_reserve.
-        populate_existing avoids consulting a stale identity-map value after the
-        rollback.
-        """
+        """the lock makes a drain, edit, or delete decision atomic with Orchestrator._try_reserve
+        populate_existing avoids a stale identity map value left by the rollback"""
         db.session.rollback()
         return model.query.filter_by(id=context_id).populate_existing().with_for_update().first()
 
@@ -207,8 +197,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         )
         return int(context.active_sessions or 0) > 0 or has_rows or has_reservations
 
-    # builds the frontend TimerDict shape; keep in sync with
-    # container_manager._timer_from_row which builds the same shape
+    # keep in sync with container_manager._timer_from_row which builds the same shape
     def _timer_dict(timer_status: TimerStatusDict) -> TimerDict | None:
         if not timer_status.get("success"):
             return None
@@ -250,13 +239,12 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         creation_status = container_manager.get_creation_status(user.id)
 
         vnc_url = ""
-        if container_info:
-            vnc_url = str(container_info.get("vnc_url", ""))
-
+        terminal_url = ""
         template_container_info = None
         ssh_info = None
-        terminal_url = ""
+
         if container_info:
+            vnc_url = str(container_info.get("vnc_url", ""))
             template_container_info = {
                 "container_id": container_info["container_id"],
                 "container_name": container_info["container_name"],
@@ -269,7 +257,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             if container_info.get("ttyd_port"):
                 terminal_url = f"/remote-desktop/terminal/{user.id}/"
 
-            # ssh is a direct connection to the container host, not proxied through CTFd
+            # ssh connects straight to the container host, it is not proxied through ctfd
             if container_info.get("ssh_port"):
                 ssh_host = str(container_info["pub_hostname"])
                 if ssh_host.startswith("[") and ssh_host.endswith("]"):
@@ -348,8 +336,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             )
             return jsonify({"error": "Session creation already in progress"}), 400
 
-        # localhost in a container is the container itself, swap to
-        # host.docker.internal + extra_hosts so firefox can reach the host
+        # localhost inside the container is the container itself, so firefox needs host.docker.internal
         parsed = urlparse(request.url_root)
         if parsed.hostname in ("localhost", "127.0.0.1"):
             container_host = "host.docker.internal"
@@ -361,8 +348,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         container_url = f"{parsed.scheme}://{container_host}{port_part}/"
 
         try:
-            # get_ip walks TRUSTED_PROXIES right-to-left: matches the IPs CTFd
-            # itself records, unlike a hand parse of X-Forwarded-For hop 1
+            # get_ip walks TRUSTED_PROXIES so the recorded ip matches ctfd, unlike a hand parse of forwarded headers
             result = container_manager.create_container(user.id, container_url, extra_hosts, client_ip=get_ip())
         except HostsUnavailableException as err:
             return jsonify({"error": str(err)}), 503
@@ -399,9 +385,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         if status.get("status") == "ready":
             container_info = container_manager.get_container_info(user.id)
-            # status can say ready while the container has since expired or been
-            # reaped (get_container_info returns None), in which case there is no
-            # session to describe
+            # status can still say ready after the container expired or was reaped, leaving no session
             if not container_info:
                 return jsonify({"status": "none"})
             timer_status = container_manager.get_session_timer_status(user.id)
@@ -465,7 +449,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not content:
             return jsonify({"error": "Report cannot be empty"}), 400
 
-        # cap length so a single user can't dump megabytes via repeated posts under the rate limit
+        # cap length so one user cannot dump megabytes through repeated posts under the rate limit
         if len(content) > 5000:
             return jsonify({"error": "Report is too long (5000 char max)"}), 400
 
@@ -512,9 +496,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans", methods=["GET"])
     @admins_only
     def admin_get_paused_orphans():
-        # Keep exact Docker identity values raw in JSON. The dashboard escapes
-        # them only while rendering so a later removal request is byte-for-byte
-        # identical even when a context contains characters such as ``&``.
+        # docker identity values stay raw, the dashboard escapes at render so removal requests match byte for byte
         return jsonify({"orphans": container_manager.list_paused_orphans()})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans/remove", methods=["POST"])
@@ -586,10 +568,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
     @admins_only
     def admin_peek_session():
-        # Same-origin admin monitoring would forward the administrator's CTFd
-        # cookie to student-controlled noVNC assets. Keep the legacy endpoint
-        # fail-closed for cached dashboards until monitoring has a separate,
-        # trusted origin/client boundary.
+        # fail closed, same origin monitoring would forward the admin ctfd cookie to student controlled assets
         return jsonify({"error": "Cross-user session monitoring is disabled"}), 403
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/extend", methods=["POST"])
@@ -838,8 +817,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         finally:
             for future in futures:
                 future.cancel()
-            # Do not let a wedged SSH transport turn the advertised 15-second
-            # admin scan timeout into an unbounded wait in Executor.__exit__.
+            # no wait shutdown, a wedged ssh transport would stretch the 15s scan into an unbounded wait
             pool.shutdown(wait=False, cancel_futures=True)
 
         set_setting(
@@ -910,7 +888,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         durations = [r.duration for r in rows if r.duration and r.duration > 0]
         avg_duration = sum(durations) / len(durations) if durations else 0
 
-        # sweep-line algorithm for peak concurrent sessions
         events = []
         now = time.time()
         for r in rows:
@@ -960,15 +937,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except (ValueError, TypeError):
             return "", 400
         current_user = get_current_user()
-        # Administrators may connect to their own desktop, but cross-user
-        # access is deliberately disabled until it can use a separate origin
-        # and a trusted viewer rather than student-controlled web content.
+        # admins reach their own desktop only, cross user access needs a separate origin and a trusted viewer
         if current_user.id != user_id:
             return "", 403
 
-        # auth_request fires on every static asset. Liveness reap happens via
-        # /api/status; this path only reads the session row and the host
-        # manager's in-memory context snapshot.
+        # auth_request fires per static asset, liveness reap stays in /api/status so this path only reads
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         port = getattr(row, port_attr, None) if row else None
         lifecycle_state = getattr(row, "lifecycle_state", LIFECYCLE_ACTIVE) if row else None
@@ -977,11 +950,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         if not row or lifecycle_state != LIFECYCLE_ACTIVE or port is None:
             return "", 404
 
-        # The public address stored on the session is for the user's browser.
-        # CTFd itself reaches published ports through the Docker bridge gateway
-        # for a local unix-socket context, and through the configured runner for
-        # a remote context. Context endpoint edits are fenced while work exists,
-        # so this in-memory lookup cannot redirect an active session.
+        # pub_hostname is the browser address, ctfd reaches ports through the endpoint, fenced while work exists
         try:
             docker_context = getattr(row, "docker_context", None)
             if not isinstance(docker_context, str) or not docker_context:
@@ -1083,7 +1052,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             m = int((s % 3600) // 60)
             return f"{h}h{m}m" if m else f"{h}h"
 
-        # 3 base buckets, then one per extension level
         edges = [0, 300, initial / 2, initial]
         labels = ["<5m", f"5m-{_fmt(initial / 2)}", f"{_fmt(initial / 2)}-{_fmt(initial)}"]
         hints = [
@@ -1162,7 +1130,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                     "pub_hostname": _esc(ctx.pub_hostname),
                     "weight": ctx.weight,
                     "enabled": ctx.enabled,
-                    # raw column: null = auto-derived cap, 0 = drain, N = explicit
+                    # raw column, null means auto derived cap, 0 means drain, any other value is an explicit cap
                     "max_containers": ctx.max_containers,
                     "active_sessions": int(ctx.active_sessions or 0),
                     "connected": ctx.context_name in connected,
@@ -1339,11 +1307,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         )
         disabling = "enabled" in payload and not payload["enabled"] and bool(context.enabled)
 
-        # A row lock alone cannot stop a new reservation immediately after this
-        # transaction commits. Endpoint mutation therefore requires the context
-        # to remain fenced after commit. A request cannot edit an endpoint and
-        # simultaneously re-enable/raise the cap: another process may still
-        # hold the previous in-memory endpoint until the reload event arrives.
+        # the row lock cannot stop a reservation made after commit, so an endpoint edit must stay fenced afterwards
         final_enabled = payload["enabled"] if "enabled" in payload else bool(context.enabled)
         final_max_containers = parsed_max_containers if "max_containers" in payload else context.max_containers
         remains_fenced = not final_enabled or final_max_containers == 0
@@ -1467,8 +1431,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         try:
             updates = parse_api_updates(request.json)
-            # Friendly preflight; set_settings repeats this under the singleton
-            # revision row lock so concurrent disjoint writes cannot bypass it.
+            # preflight only, set_settings repeats it under the revision lock so concurrent writes cannot bypass
             effective = get_all_settings()
             effective.update(updates)
             validate_effective_settings(effective)
@@ -1476,9 +1439,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except SettingsValidationError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        # Image, resource, network, and connection settings affect host
-        # eligibility or new-container kwargs. Reload this
-        # worker immediately and notify the other workers over the shared bus.
+        # image, resource, network, and connection settings change host eligibility and new container kwargs
         _reload_contexts_everywhere()
         restart_required = sorted(RESTART_REQUIRED_SETTINGS.intersection(updates))
         response: dict[str, object] = {"success": True}

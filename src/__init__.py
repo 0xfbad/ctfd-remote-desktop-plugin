@@ -25,18 +25,14 @@ from . import event_bus
 from .database import prepare_database
 from .database import validate_database_schema
 
-# import the submodule FIRST, before pulling `event_logger` (the instance) into this
-# namespace. otherwise line 22 overwrites the package's `event_logger` attribute with the
-# instance, and `from . import event_logger as event_logger_module` resolves to the
-# instance, not the submodule. then event_logger_module.start_persistence_drainer crashes
+# must precede the instance import below, that import rebinds the package attribute event_logger
 from . import event_logger as event_logger_module
 from .event_logger import event_logger
 
-# MariaDB named locks and local file locks are connection/descriptor scoped.
-# Keeping the owner alive here makes leadership durable for the worker lifetime;
-# every contender re-checks automatically on each scheduled tick so failover
-# requires no replica-specific configuration.
+logger = logging.getLogger(__name__)
+
 _scheduler_state_lock = threading.Lock()
+# named locks and file locks are connection scoped, the owner must stay alive for the worker life
 _scheduler_lock_connection = None
 _scheduler_lock_fd = None
 _scheduler_lock_name: str | None = None
@@ -44,13 +40,8 @@ _scheduler_release_registered = False
 
 
 def _invalidate_scheduler_connection(connection, error: BaseException) -> None:
-    """Physically discard a named-lock connection after an uncertain result."""
     try:
-        # Connection.close() normally returns the DBAPI connection to
-        # SQLAlchemy's pool. MariaDB named locks survive that pool reset, so an
-        # errored ownership/acquisition check must invalidate the underlying
-        # connection instead of potentially stranding leadership in the pool.
-        connection.invalidate(error)
+        connection.invalidate(error)  # close only returns it to the pool, named locks survive that
     except Exception:
         logger.warning("scheduler database lock connection invalidation failed", exc_info=True)
     finally:
@@ -137,8 +128,7 @@ def _claim_mariadb_scheduler_leader(app: Flask) -> bool:
         _register_scheduler_release()
         return True
     except Exception as exc:
-        # The server may have granted GET_LOCK before the client observed an
-        # error. A normal pooled close would not release that session lock.
+        # the server may have granted GET_LOCK before the error surfaced, a pooled close keeps it
         _invalidate_scheduler_connection(connection, exc)
         raise
 
@@ -194,9 +184,6 @@ def _claim_scheduler_leader(app: Flask) -> bool:
         raise RuntimeError("scheduler leadership supports MariaDB/MySQL or SQLite databases")
 
 
-logger = logging.getLogger(__name__)
-
-
 def _prepare_database(app: Flask) -> None:
     prepare_database(app)
 
@@ -206,13 +193,7 @@ def _validate_database_schema(app: Flask) -> None:
 
 
 def _gunicorn_master_preload_active(frame=None) -> bool:
-    """Detect Gunicorn's master-side application load from the live stack.
-
-    Gunicorn resolves Python configuration before calling ``Arbiter.setup``;
-    when ``preload_app`` is true, that method calls ``app.wsgi()`` directly.
-    Detecting the actual load path covers default, file, and module configs
-    without executing or attempting to parse configuration a second time.
-    """
+    """stack inspection covers default file and module gunicorn configs without parsing them again"""
     current = frame if frame is not None else sys._getframe(1)
     while current is not None:
         if current.f_globals.get("__name__") == "gunicorn.arbiter" and current.f_code.co_name == "setup":
@@ -223,7 +204,6 @@ def _gunicorn_master_preload_active(frame=None) -> bool:
 
 
 def _reject_gunicorn_preload() -> None:
-    """Fail for any resolved Gunicorn preload before spawning worker state."""
     try:
         environment_args = shlex.split(os.environ.get("GUNICORN_CMD_ARGS", ""))
     except ValueError as exc:
@@ -240,14 +220,9 @@ def _make_bus_callback(orchestrator: Orchestrator) -> Callable[[dict], None]:
             if message.get("_control") == "reload_contexts":
                 orchestrator.load_from_db()
                 return
-            # Redis is live fan-out only. The originating worker owns durable
-            # persistence, so a bus delivery must never enqueue a duplicate.
-            event_logger._deliver_local(message, persist=False)
+            event_logger._deliver_local(message, persist=False)  # the sender already persisted it
         finally:
-            # The subscriber's app context lives for the pubsub thread's
-            # lifetime. End the scoped session after each message so reloads
-            # observe committed rows and do not retain a connection forever.
-            db.session.remove()
+            db.session.remove()  # the pubsub app context is long lived so end the session per message
 
     return _on_bus_message
 
@@ -255,9 +230,7 @@ def _make_bus_callback(orchestrator: Orchestrator) -> Callable[[dict], None]:
 def _seed_defaults(app: Flask) -> None:
     from .models import initialize_settings
 
-    # This also locks the singleton revision row and fails plugin startup on
-    # any corrupted or unsafe effective profile.
-    initialize_settings()
+    initialize_settings()  # locks the revision row and fails startup on an unsafe stored profile
 
 
 def _seed_local_context(app: Flask) -> None:
@@ -291,8 +264,7 @@ def _seed_local_context(app: Flask) -> None:
         db.session.commit()
         logger.info("seeded local docker context")
     except IntegrityError:
-        # Another first-boot worker can pass the empty-table check before this
-        # one commits. The unique context name makes that race safe.
+        # another first boot worker can pass the empty table check before this one commits
         db.session.rollback()
         if DesktopDockerContextModel.query.filter_by(context_name=LOCAL_CONTEXT_NAME).first() is None:
             raise
@@ -304,8 +276,7 @@ def _reconcile_containers(
     orchestrator: Orchestrator,
     container_manager: ContainerManager | None = None,
 ) -> None:
-    # leader-only: concurrent reconciles from every gunicorn worker would race
-    # row deletes and corrupt the shared active_sessions counters
+    """leader only, concurrent reconciles would race row deletes and corrupt active_sessions"""
     from CTFd.models import db
     from .models import (
         DesktopContainerInfoModel,
@@ -338,8 +309,7 @@ def _reconcile_containers(
             kept += 1
             continue
 
-        # A worker may have died after persisting a teardown transition. Retry
-        # that exact retained row even if the remote object is still running.
+        # a worker may have died after persisting the teardown, retry even if the object still runs
         if lifecycle_state in (LIFECYCLE_STOPPING, LIFECYCLE_CLEANUP_PENDING):
             result = container_manager.destroy_container(
                 user_id,
@@ -359,39 +329,32 @@ def _reconcile_containers(
             paramiko.ssh_exception.SSHException,
             EOFError,
             OSError,
-            # a context that failed its startup connection check raises this for
-            # every call; deleting those rows would orphan live sessions on a
-            # merely-slow host (then force-remove them 300s later). transient.
+            # a slow host raises this for every call, deleting rows orphans live sessions
             HostsUnavailableException,
         ):
             kept += 1
             continue
         except Exception:
-            # Unknown failures are not proof the container is absent.  Keeping
-            # the row and reservation may under-admit temporarily; deleting it
-            # can orphan a live desktop and over-admit after reboot.
+            # an unknown failure is not proof the container is gone, deleting the row orphans it
             logger.warning(f"reconcile: could not verify {container_id}; retaining row", exc_info=True)
             kept += 1
             continue
 
         if running:
             kept += 1
-        else:
-            result = container_manager.destroy_container(
-                user_id,
-                reason=END_REASON_RECONCILIATION,
-                log_destruction=True,
-            )
-            if result.get("success"):
-                removed += 1
-            else:
-                kept += 1
+            continue
 
-    # Use the same exact counter audit as periodic cleanup. In addition to
-    # active rows and observed Docker objects, it includes durable operation
-    # reservations and suppresses down-healing across the reserve/operation-row
-    # commit gap. A row-only startup sync could otherwise over-admit during a
-    # rolling worker restart while another worker is creating a session.
+        result = container_manager.destroy_container(
+            user_id,
+            reason=END_REASON_RECONCILIATION,
+            log_destruction=True,
+        )
+        if result.get("success"):
+            removed += 1
+        else:
+            kept += 1
+
+    # counts in flight reservations too, a row only sync would over admit mid restart
     orchestrator.audit_counts()
 
     if removed or kept:
@@ -399,10 +362,7 @@ def _reconcile_containers(
 
 
 def load(app: Flask) -> None:
-    # Gunicorn preload imports the application in the master before forking
-    # workers. Reject it before schema creation, event subscribers, or any other
-    # process-local/stateful plugin initialization.
-    _reject_gunicorn_preload()
+    _reject_gunicorn_preload()  # must run before any process local state is created
 
     _prepare_database(app)
 
@@ -429,8 +389,7 @@ def load(app: Flask) -> None:
     app.register_blueprint(remote_desktop_bp)
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
 
-    # register config template in the DictLoader so {% include %} on
-    # /admin/config can find it without hardcoding the plugin folder name
+    # registered in overridden_templates so admin config can include it without the folder name
     config_tpl = os.path.join(os.path.dirname(__file__), "templates", "remote_desktop_config.html")
     with open(config_tpl) as f:
         app.overridden_templates["remote_desktop_config.html"] = f.read()
@@ -443,14 +402,11 @@ def load(app: Flask) -> None:
         logger.info("remote desktop plugin loaded (scheduler skipped, CLI mode)")
         return
 
-    # Persistence queues are process-local, so every HTTP worker drains only
-    # its own originated events. Redis-delivered fan-out is never persisted.
+    # queues are process local so each worker drains only the events it originated
     event_logger_module.start_persistence_drainer(app)
     atexit.register(event_logger_module.stop_persistence_drainer)
 
-    # Reconciliation is leader-only. Every HTTP worker continues below as a
-    # scheduler contender; a follower automatically acquires MariaDB leadership
-    # on a later tick if the owning connection/process disappears.
+    # followers continue below as contenders and take leadership on a later tick if the owner dies
     if _claim_scheduler_leader(app):
         with app.app_context():
             _reconcile_containers(app, host_manager, orchestrator, container_manager)
@@ -462,9 +418,6 @@ def load(app: Flask) -> None:
 
     def _with_app_ctx(fn: Callable[[], None]) -> Callable[[], None]:
         def wrapper() -> None:
-            # Flask-SQLAlchemy auto-teardown fires reliably only on REQUEST contexts; manually-opened
-            # app contexts leak the scoped session's connection on exit. explicit remove() in finally
-            # covers every scheduled job (periodic cleanup, pause watch, and event pruning)
             with app.app_context():
                 from CTFd.models import db
 
@@ -473,7 +426,7 @@ def load(app: Flask) -> None:
                         return
                     fn()
                 finally:
-                    db.session.remove()
+                    db.session.remove()  # flask sqlalchemy teardown fires only for request contexts
 
         return wrapper
 
@@ -497,9 +450,6 @@ def load(app: Flask) -> None:
         id="health_check",
     )
 
-    # mirrors out-of-band docker pause/unpause (host io tripwire) into
-    # paused_at + the admin event feed. interval read at registration like
-    # cleanup_interval - restart to change
     scheduler.add_job(
         func=_with_app_ctx(container_manager.pause_watch),
         trigger="interval",
@@ -528,18 +478,15 @@ def load(app: Flask) -> None:
 
     scheduler.start()
 
-    # GeventScheduler.shutdown raises BlockingSwitchOutError from atexit
-    # (no active greenlet). process is exiting either way, so just swallow it
     def _safe_shutdown_scheduler() -> None:
         if not scheduler.running:
             return
         try:
             scheduler.shutdown(wait=False)
         except Exception:
-            pass
+            pass  # shutdown raises gevent.exceptions.BlockingSwitchOutError with no active greenlet
 
+    # only the scheduler stops at exit, a routine worker restart must preserve student sessions
     atexit.register(_safe_shutdown_scheduler)
 
-    # Gunicorn owns TERM/INT/HUP. A routine worker restart must preserve every
-    # student session; fleet teardown remains an explicit audited admin action.
     logger.info("remote desktop plugin loaded (automatic scheduler contender)")

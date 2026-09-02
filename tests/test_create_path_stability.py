@@ -1,5 +1,3 @@
-"""Regressions for create admission ownership and post-commit behavior."""
-
 from types import SimpleNamespace
 import urllib.error
 from unittest.mock import MagicMock, patch
@@ -47,8 +45,7 @@ def test_release_targets_acquired_object_after_limit_reload():
     assert first_new_token is not None
     assert first_new_token is not old_token
 
-    # Releasing an in-flight acquisition from the old generation must not add
-    # capacity to the new semaphore selected by context name.
+    # releasing an in flight token from the old generation must not add capacity to the new semaphore
     manager.release_semaphore(old_token)
     second_new_token = manager.acquire_semaphore("alpha", timeout=0)
     assert second_new_token is first_new_token
@@ -105,8 +102,7 @@ def test_cancelled_reserved_fence_releases_slot_before_semaphore_acquire():
             container_name="rd-session-7-01234567-89a",
         )
     )
-    # Fenced cleanup decrements the exact reservation inside the terminal
-    # operation update; a post-commit name-only release would be ABA-prone.
+    # the terminal operation update decrements the exact reservation, a post commit release by name would be aba prone
     orchestrator.release_slot.assert_not_called()
 
 
@@ -174,8 +170,7 @@ def test_session_created_telemetry_failure_does_not_cleanup_committed_session():
         "container_id": "container-id",
         "ports": {"5900/tcp": 40001, "6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004},
     }
-    # Docker context names are UI/admin identifiers, not valid container
-    # hostnames. In particular, escaping this value produces ``&amp;``.
+    # context names are admin labels not valid hostnames, so the escaped form must never reach the container hostname
     orchestrator.select_and_reserve.return_value = "alpha & west_context.example"
     settings = {
         "docker_image": "desktop:latest",
@@ -232,9 +227,7 @@ def test_default_readiness_budget_covers_delayed_image_startup():
     response = MagicMock()
     response.__enter__.return_value.status = 200
 
-    # Simulate three minutes of connection refusals at the production 0.5s
-    # interval. This covers all serial image startup gates plus loaded-host
-    # overhead without making the unit test wait in real time.
+    # 360 refusals at the production 0.5s interval is three minutes, the budget for serial image startup gates
     delayed_start = [urllib.error.URLError("not listening yet") for _ in range(360)]
     with (
         patch.object(manager, "_get_setting", side_effect=lambda key: settings[key]),
@@ -250,13 +243,7 @@ def test_default_readiness_budget_covers_delayed_image_startup():
 
 
 def test_destroy_acquires_local_status_lock_before_database_row_locks():
-    """Keep local->DB ordering consistent with create_container.
-
-    The previous destroy path locked the operation row and then acquired
-    ``self.lock`` while create held ``self.lock`` and waited for that row. This
-    guard makes the ordering invariant deterministic without relying on a DB
-    lock timeout in a timing-sensitive two-thread test.
-    """
+    """destroy takes the local lock before the row lock, the reverse order deadlocks against create"""
     host_manager = MagicMock()
     orchestrator = MagicMock()
     manager = ContainerManager(host_manager, orchestrator)

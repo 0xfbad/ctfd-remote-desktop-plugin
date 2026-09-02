@@ -521,10 +521,6 @@
 	integrity="sha384-F07Cpw5v8spSU0H113F33m2NQQ/o6GqPTnTjf45ssG4Q6q58ZwhxBiQtIaqvnSpR"
 	crossorigin="anonymous"></script>
 <script>
-	// Most dashboard API display values are pre-escaped server-side. Paused-orphan
-	// identity values intentionally remain raw so exact values can be posted back;
-	// escape those values at their innerHTML insertion points below.
-
 	let autoRefreshInterval = null;
 	let eventSource = null;
 	let maxEvents = 500;
@@ -640,8 +636,7 @@
 			case 'session_extended':
 				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
 			case 'session_error':
-				// inv: event.message for session_error is _esc'd in event_logger.log_event();
-				// all call sites pass static text or str(e). new call sites must preserve this.
+				// event.message is escaped in event_logger.log_event, new call sites must keep that
 				return event.message;
 			case 'admin_action': {
 					if (m.target_id && (m.target_is_admin || m.target_is_hidden || m.target_is_banned)) {
@@ -779,6 +774,7 @@
 	}
 
 	function updatePausedOrphansTable(orphans) {
+		// orphan identity fields arrive unescaped so they post back exact, escape at each insertion
 		pausedOrphans = orphans;
 		const section = document.getElementById('paused-orphans-section');
 		const tbody = document.getElementById('paused-orphans-table');

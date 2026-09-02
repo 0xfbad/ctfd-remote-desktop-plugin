@@ -14,7 +14,6 @@ _DNS_NAME_RE = re.compile(
 
 
 def normalize_public_hostname(value: object) -> str:
-    """Validate a URL host without accepting a scheme, path, or port."""
     if not isinstance(value, str) or not value or len(value) > 253:
         raise ValueError("pub_hostname must be a valid hostname or IP address without a port")
     if value != value.strip() or any(ord(char) <= 32 or ord(char) == 127 for char in value):
@@ -44,8 +43,6 @@ def _response_status(response):
 
 
 def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_user", count_4xx=True):
-    # keyed on user_id (not ip) so shared-egress students aren't throttled together.
-    # count_4xx=False post-counts so cheap 4xx rejections don't burn the user's budget
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
@@ -57,6 +54,7 @@ def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_use
 
             user = get_current_user()
             if user is not None:
+                # keyed on user_id not ip so students behind one egress ip are not throttled together
                 bucket = f"u{user.id}"
             else:
                 bucket = f"ip{get_ip()}"
@@ -86,7 +84,7 @@ def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_use
 
             response = f(*args, **kwargs)
             status = _response_status(response)
-            # post-count: skip client-error 4xx, count everything else
+            # skip 4xx so cheap rejections do not burn the user budget
             if status < 400 or status >= 500:
                 _bump()
             return response

@@ -53,11 +53,9 @@ for mod_name in _stub_modules:
 
 sys.modules["CTFd.models"] = _ctfd_models
 
-# markupsafe stub with a real escape implementation
 _markupsafe = sys.modules["markupsafe"]
 _markupsafe.escape = lambda s: _html.escape(str(s), quote=True)
 
-# flask stubs
 _flask = sys.modules["flask"]
 for attr in (
     "Flask",
@@ -71,7 +69,6 @@ for attr in (
 ):
     setattr(_flask, attr, MagicMock())
 
-# CTFd decorator stubs
 _decorators = sys.modules["CTFd.utils.decorators"]
 _decorators.authed_only = lambda f: f
 _decorators.admins_only = lambda f: f
@@ -87,7 +84,6 @@ _plugins = sys.modules["CTFd.plugins"]
 _plugins.register_user_page_menu_bar = MagicMock()
 _plugins.register_admin_plugin_menu_bar = MagicMock()
 
-# docker stubs
 _docker = sys.modules["docker"]
 _docker.from_env = MagicMock()
 _docker.DockerClient = MagicMock()
@@ -133,7 +129,6 @@ class _StubMount(dict):
 _docker_types.Mount = _StubMount
 _docker.types = _docker_types
 
-# sqlalchemy stubs
 _sqlalchemy_orm_exc = sys.modules["sqlalchemy.orm.exc"]
 _sqlalchemy_orm_exc.ObjectDeletedError = type("ObjectDeletedError", (Exception,), {})
 sys.modules["sqlalchemy.orm"].exc = _sqlalchemy_orm_exc
@@ -144,24 +139,19 @@ _sqlalchemy_exc.OperationalError = type("OperationalError", (Exception,), {})
 sys.modules["sqlalchemy"].exc = _sqlalchemy_exc
 sys.modules["sqlalchemy"].text = lambda statement: statement
 
-# paramiko stubs
 _paramiko = sys.modules["paramiko"]
 _paramiko_ssh = sys.modules["paramiko.ssh_exception"]
 _paramiko_ssh.SSHException = type("SSHException", (Exception,), {})
 _paramiko.ssh_exception = _paramiko_ssh
 
-# apscheduler stubs
 _apscheduler_sched = sys.modules["apscheduler.schedulers"]
 _apscheduler_sched.SchedulerNotRunningError = type("SchedulerNotRunningError", (Exception,), {})
 _apscheduler_gevent = sys.modules["apscheduler.schedulers.gevent"]
 _apscheduler_gevent.GeventScheduler = MagicMock()
 
-# gevent stubs
 sys.modules["gevent.monkey"].get_original = lambda mod, attr: __import__(mod).__dict__[attr]
 sys.modules["gevent"].spawn = MagicMock()
 
-# gevent threadpool stub: ThreadPool.apply runs the callable synchronously so tests
-# exercise the wrapped code paths without needing a real hub
 _gevent = sys.modules["gevent"]
 _gevent_threadpool = sys.modules["gevent.threadpool"]
 _gevent_monkey = sys.modules["gevent.monkey"]
@@ -171,6 +161,7 @@ class _StubThreadPool:
     def __init__(self, maxsize=None):
         pass
 
+    # runs the callable synchronously so tests exercise the wrapped paths without a real hub
     def apply(self, fn, args=None, kwds=None):
         return fn(*(args or ()), **(kwds or {}))
 
@@ -180,15 +171,9 @@ _gevent_monkey.is_module_patched = lambda name: True
 _gevent.threadpool = _gevent_threadpool
 _gevent.monkey = _gevent_monkey
 
-# register repo root as a package named "plugin" so relative imports resolve
 repo_root = Path(__file__).resolve().parent.parent
-repo_root_str = str(repo_root)
 
-# DO NOT add repo_root to sys.path, the root __init__.py has relative imports
-# that confuse pytest's collector, so load modules explicitly via importlib
-
-# the plugin uses relative imports (from .event_logger import ...) which need
-# a parent package, create one and load modules in dependency order
+# plugin modules use relative imports so they need a parent package to load under
 PKG = "_rd_plugin"
 
 pkg = types.ModuleType(PKG)
@@ -198,6 +183,7 @@ pkg.__file__ = str(repo_root / "__init__.py")
 sys.modules[PKG] = pkg
 
 
+# never add repo_root to sys.path, relative imports in the root __init__.py break the pytest collector
 def _load_module(name):
     full = f"{PKG}.{name}"
     filepath = repo_root / "src" / f"{name}.py"
@@ -211,7 +197,7 @@ def _load_module(name):
     return mod
 
 
-# load in dependency order (leaf modules first)
+# load order matters, leaf modules first
 _load_module("settings")
 _load_module("models")
 _load_module("event_logger")
@@ -222,9 +208,7 @@ _load_module("orchestrator")
 _load_module("container_manager")
 _load_module("routes")
 
-# pytest tries to import __init__.py from the rootdir as a module named
-# "__init__", pre-register a stub so it doesn't execute the real one
-# (which has relative imports that fail outside CTFd)
+# pytest imports the rootdir __init__.py as a module named __init__, stub it so the real one never runs
 sys.modules["__init__"] = types.ModuleType("__init__")
 
 
@@ -233,8 +217,6 @@ def container_manager():
     from container_manager import ContainerManager
 
     host_manager = MagicMock()
-    # Destructive paths now require an explicit strict state result. Most
-    # focused tests exercise behavior after a healthy preflight; pause/unknown
-    # tests override this default adversarially.
+    # destructive paths need a strict state result, pause and unknown tests override this default
     host_manager.inspect_container_state.return_value = "running"
     return ContainerManager(host_manager, MagicMock(), MagicMock())

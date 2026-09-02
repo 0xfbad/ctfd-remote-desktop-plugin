@@ -1,13 +1,4 @@
-"""T12 regression: minted CTFd session cookies must be revoked when the
-container is destroyed. Without revocation the cookie stays live in the
-server-side session cache until PERMANENT_SESSION_LIFETIME (~31 days), so a
-leaked cookie is replayable far beyond the container's lifetime.
-
-Coverage:
-- _mint_session_cookie returns (cookie_name, signed_value, raw_sid)
-- destroy_container revokes the cache entry using the stored sid
-- destroy_container with no stored sid silently skips the delete
-"""
+"""without revocation a minted cookie stays replayable in the session cache for PERMANENT_SESSION_LIFETIME"""
 
 from types import SimpleNamespace
 import sys
@@ -18,13 +9,10 @@ import pytest
 
 
 def test_mint_session_cookie_returns_3_tuple():
-    """_mint_session_cookie must return the raw sid alongside the signed cookie
-    so destroy_container can revoke the corresponding cache entry."""
+    """the raw sid comes back with the signed cookie or destroy_container cannot revoke the cache entry"""
     from container_manager import _mint_session_cookie
 
-    # the function imports CTFd.utils.security.auth.login_user at call time and
-    # works against flask.session. We pre-stub both so the test doesn't need
-    # the real CTFd app context
+    # login_user is imported at call time and runs against flask.session, stub both so no real app context is needed
     fake_session = MagicMock()
     fake_session.sid = "test-sid-1234"
 
@@ -51,7 +39,6 @@ def test_mint_session_cookie_returns_3_tuple():
     mock_app = MagicMock()
     mock_app.session_cookie_name = "session"
 
-    # test_request_context returns a context manager
     ctx = MagicMock()
     ctx.__enter__ = MagicMock(return_value=ctx)
     ctx.__exit__ = MagicMock(return_value=False)
@@ -71,7 +58,6 @@ def test_mint_session_cookie_returns_3_tuple():
 
 
 def test_mint_session_cookie_revokes_sid_when_save_raises():
-    """A partially successful server-side save must not strand its SID."""
     from container_manager import _mint_session_cookie
 
     fake_session = MagicMock()
@@ -119,8 +105,6 @@ def _make_row_with_sid(user_id=1, cookie_sid="abc-sid"):
 
 
 def test_destroy_revokes_cookie_via_cache_delete(container_manager):
-    """destroy_container must call cache.delete with `key_prefix + sid` so
-    the server-side session entry is purged."""
     cm = container_manager
     row = _make_row_with_sid(user_id=42, cookie_sid="raw-sid-42")
 
@@ -162,7 +146,7 @@ def test_destroy_revokes_cookie_via_cache_delete(container_manager):
 
 
 def test_destroy_skips_revoke_when_cookie_sid_missing(container_manager):
-    """A failed cookie mint leaves cookie_sid=None; teardown still succeeds."""
+    """a failed mint leaves cookie_sid null, teardown must still succeed"""
     cm = container_manager
     row = _make_row_with_sid(user_id=7, cookie_sid=None)
 
@@ -193,7 +177,6 @@ def test_destroy_skips_revoke_when_cookie_sid_missing(container_manager):
 
 
 def test_destroy_retains_revocation_handle_when_cache_errors(container_manager):
-    """A Redis outage must not erase the only handle for revoking a live SID."""
     cm = container_manager
     row = _make_row_with_sid(user_id=99, cookie_sid="sid-99")
 
@@ -231,8 +214,7 @@ def test_destroy_retains_revocation_handle_when_cache_errors(container_manager):
             if original_current_app is not None:
                 flask_stub.current_app = original_current_app
 
-    # Docker teardown proceeds, but the active row and cookie_sid remain for a
-    # periodic cleanup retry once the cache backend recovers.
+    # the active row and cookie_sid stay behind for a later cleanup retry once the cache backend recovers
     assert not result["success"]
     assert "revocation" in result["error"]
     assert row.lifecycle_state == "cleanup_pending"

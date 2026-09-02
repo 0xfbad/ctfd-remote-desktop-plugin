@@ -1,10 +1,4 @@
-"""Connection toggles (ssh_enabled / web_terminal_enabled).
-
-Ports published and ENABLE_* env must be built from the same one-shot settings
-read so a mid-create toggle flip can never make them disagree; disabled ports
-must land as NULL ssh_port/ttyd_port on the row; the settings, routes and
-template surfaces must all know about both keys.
-"""
+"""ports and ENABLE_SSH env come from one settings read so a toggle flip mid create cannot make them disagree"""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,9 +9,6 @@ from container_manager import ContainerManager, _connection_ports
 from docker_host_manager import SESSION_LABEL_MANAGED, SESSION_LABEL_USER_ID, SESSION_LABEL_UUID
 
 TEMPLATES = Path(__file__).resolve().parent.parent / "src" / "templates"
-
-
-# -- 1. pure helper matrix ---------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -31,9 +22,6 @@ TEMPLATES = Path(__file__).resolve().parent.parent / "src" / "templates"
 )
 def test_connection_ports_matrix(ssh, ttyd, expected):
     assert _connection_ports(ssh, ttyd) == expected
-
-
-# -- 2. create-call serialization through _create_container_background -------
 
 
 def _base_settings(**overrides):
@@ -64,8 +52,6 @@ def _run_background_create(
     resolved_error=None,
     minted_cookie=None,
 ):
-    """drive the real _create_container_background with a mocked host_manager;
-    returns (run_container kwargs, patched DesktopContainerInfoModel mock)"""
     cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
 
     cm.host_manager.run_container.return_value = {
@@ -109,8 +95,8 @@ def _run_background_create(
 @pytest.mark.parametrize("ssh,ttyd", [(True, True), (False, True), (True, False), (False, False)])
 def test_create_call_ports_env_and_row_agree(ssh, ttyd):
     expected_ports = _connection_ports(ssh, ttyd)
-    # the daemon only maps the ports we asked to publish
     port_numbers = {"5900/tcp": 40001, "6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004}
+    # the daemon only maps the ports we asked to publish
     ports_return = {p: port_numbers[p] for p in expected_ports}
 
     settings = _base_settings(ssh_enabled=ssh, web_terminal_enabled=ttyd)
@@ -143,8 +129,7 @@ def test_create_row_uses_image_resolved_username():
     ports = {"5900/tcp": 40001, "6080/tcp": 40002, "22/tcp": 40003, "7682/tcp": 40004}
     _cm, kwargs, model = _run_background_create(_base_settings(), ports, resolved_username="student_tcpdump")
 
-    # The requested display-name slug is still what the image receives, but
-    # SSH/UI instructions use the collision-safe account selected by startup.
+    # the image still receives the requested slug, the row keeps the collision safe account chosen at startup
     assert kwargs["env"]["CTFD_USERNAME"] == "alice"
     assert model.call_args.kwargs["container_username"] == "student_tcpdump"
     assert "SHELL_LOGGING" not in kwargs["env"]
@@ -183,9 +168,6 @@ def test_create_failure_revokes_minted_ctfd_session():
     assert revoke.call_args.args[1] == "raw-session-sid"
 
 
-# -- 3. settings -------------------------------------------------------------
-
-
 def test_setting_defaults_have_both_toggles_on():
     from models import SETTING_DEFAULTS
 
@@ -193,13 +175,8 @@ def test_setting_defaults_have_both_toggles_on():
     assert SETTING_DEFAULTS["web_terminal_enabled"] is True
 
 
-# -- 4. routes ---------------------------------------------------------------
-
-
 def _get_handler(bp, name):
-    # the flask Blueprint stub is a shared MagicMock: bp.route accumulates
-    # registrations from every create_routes call in the whole session, so take
-    # the LAST match - that is the closure bound to the mocks we just passed in
+    # the blueprint stub is one shared mock for the session, so the last match is the handler just registered
     for c in reversed(bp.route.return_value.call_args_list):
         fn = c.args[0]
         if getattr(fn, "__name__", None) == name:
@@ -247,7 +224,7 @@ def test_terminal_auth_404_when_ttyd_port_null():
         result = handler()
 
     assert result == ("", 404)
-    # the 404 must fire before any host lookup: db-only auth path
+    # the 404 must fire before any host lookup, this auth path is db only
     cm.host_manager.get_check_hostname.assert_not_called()
 
 
@@ -449,9 +426,6 @@ def test_page_formats_bracketed_ipv6_for_openssh():
     assert render.call_args.kwargs["ssh_info"]["host"] == "2001:db8::1"
 
 
-# -- 5. template plain-text guards -------------------------------------------
-
-
 def test_session_page_hardcoded_modes_line_removed():
     text = (TEMPLATES / "remote_desktop.html").read_text()
     assert "Desktop, Terminal, and SSH modes available" not in text
@@ -462,7 +436,7 @@ def test_config_page_has_toggle_checkboxes_and_setting_keys():
     assert "rd-setting-ssh_enabled" in text
     assert "rd-setting-web_terminal_enabled" in text
 
-    # the keys must also be in rdSettingKeys or the checkboxes render but never persist
+    # the checkboxes render but never persist unless the keys are in the js settings list too
     start = text.index("rdSettingKeys = [")
     end = text.index("]", start)
     keys_src = text[start:end]

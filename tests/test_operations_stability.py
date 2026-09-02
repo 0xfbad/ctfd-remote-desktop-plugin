@@ -1,5 +1,3 @@
-"""Focused regressions for cross-worker/session operations stability."""
-
 from __future__ import annotations
 
 import io
@@ -59,8 +57,7 @@ def test_paused_deadline_extension_is_verified_and_retry_idempotent():
             "rd-session-7-0123456789ab",
             paused_at=1500.0,
         )
-        # A crash/retry at the same instant uses the updated file mtime and
-        # therefore does not credit the same 500 seconds twice.
+        # a retry at the same instant reads the updated mtime and does not credit the same 500 seconds twice
         retried = manager.extend_paused_lifetime_deadline(
             "runner-a",
             "rd-session-7-0123456789ab",

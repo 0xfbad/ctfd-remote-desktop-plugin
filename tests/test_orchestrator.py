@@ -29,12 +29,10 @@ class FakeHostManager:
 
 
 class FakeCapacityStore:
-    """in-memory stand-in for the desktop_docker_contexts capacity columns.
-    the real _try_reserve is an atomic conditional UPDATE; the fake reproduces
-    its semantics under a lock"""
+    """the real _try_reserve is an atomic conditional update, this fake reproduces it under a lock"""
 
     def __init__(self, entries):
-        # entries: {name: (active, cap, weight)}
+        # entries maps a context name to active, cap, weight
         self.entries = dict(entries)
         self.lock = threading.Lock()
         self.reserve_fences = []
@@ -62,7 +60,7 @@ class FakeCapacityStore:
 
 
 def make_orchestrator(contexts, counts=None, caps=None):
-    """contexts: list of (name, weight, healthy) tuples"""
+    """contexts is a list of name, weight, healthy tuples"""
     o = Orchestrator(FakeHostManager())
     entries = {}
     for context_id, (name, weight, healthy) in enumerate(contexts, start=1):
@@ -77,9 +75,6 @@ def make_orchestrator(contexts, counts=None, caps=None):
     o._catalog_is_current = lambda: True
     o._store = store
     return o
-
-
-# -- pure functions ----------------------------------------------------------
 
 
 def test_rank_candidates_ordering_and_exclusions():
@@ -112,7 +107,6 @@ def test_derive_max_containers():
     assert derive_max_containers(16 * gib, 4 * gib, 0.7) == 2
     # clamp to 1
     assert derive_max_containers(2 * gib, 4 * gib, 0.7) == 1
-    # unreadable RAM -> fallback
     assert derive_max_containers(None, 4 * gib, 0.7) == DERIVED_CAP_FALLBACK
     assert derive_max_containers(31 * gib, 0, 0.7) == DERIVED_CAP_FALLBACK
 
@@ -200,9 +194,6 @@ def test_load_health_uses_one_image_probe_and_reports_contract_reason(image_info
         if image_info is not None:
             assert metadata["image"] == image_info
             assert metadata["expected_contract"] == IMAGE_CONTRACT_VERSION
-
-
-# -- select_and_reserve / admission_check -----------------------------------
 
 
 def test_atomic_reserve_rechecks_complete_loaded_fence():
@@ -550,7 +541,7 @@ def test_at_capacity_raises_typed():
         o = make_orchestrator([("a", 1, True)], counts={"a": 2}, caps={"a": 2})
         with pytest.raises(HostsAtCapacityException):
             o.select_and_reserve()
-        # is-a HostsUnavailableException so existing routes map to 503
+        # capacity refusal subclasses the unavailable error so routes still map it to 503
         with pytest.raises(HostsUnavailableException):
             o.admission_check()
 
@@ -569,7 +560,7 @@ def test_cap_boundary_and_release():
         assert o.select_and_reserve() == "a"
         with pytest.raises(HostsAtCapacityException):
             o.select_and_reserve()
-        assert o._store.entries["a"][0] == 2  # never 3
+        assert o._store.entries["a"][0] == 2
         o.release_slot("a")
         assert o.select_and_reserve() == "a"
 
@@ -635,7 +626,7 @@ def test_get_status_carries_capacity_fields():
     assert status["a"]["active_containers"] == 3
     assert status["a"]["max_containers"] == 3
     assert status["a"]["at_capacity"] is True
-    # unhealthy hosts are never "at capacity" (they're just down)
+    # unhealthy hosts are never at capacity, they are just down
     assert status["b"]["at_capacity"] is False
     assert status["b"]["weight"] == 2
 
@@ -711,8 +702,7 @@ def test_audit_counts_does_not_overwrite_a_counter_changed_during_host_scan():
     info_row = MagicMock(docker_context="a")
     mock_ctx_model = MagicMock()
     mock_ctx_model.query.all.return_value = [ctx_row]
-    # A zero rowcount represents a concurrent reservation/release changing the
-    # counter after the audit snapshot and before its compare-and-set.
+    # zero rowcount stands for a concurrent reservation changing the counter after the audit snapshot
     mock_ctx_model.query.filter.return_value.update.return_value = 0
     mock_info_model = MagicMock()
     mock_info_model.query.with_entities.return_value.all.return_value = [info_row, info_row]
@@ -922,8 +912,7 @@ def test_audit_counts_does_not_treat_selecting_row_as_a_reservation():
     ):
         o.audit_counts()
 
-    # The claimed counter increment and OP_RESERVED transition are atomic now;
-    # a selecting row cannot explain an otherwise leaked counter.
+    # the counter increment and the reserved transition are atomic, a selecting row cannot leak one
     mock_ctx_model.query.filter.return_value.update.assert_called_once()
 
 

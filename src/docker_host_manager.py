@@ -33,10 +33,8 @@ LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
 
-# docker SDK HTTP read timeout for control plane ops
-DEFAULT_CLIENT_TIMEOUT = 10
-# per-context pool size, caps concurrent in-flight blocking calls per host
-THREADPOOL_SIZE = 4
+DEFAULT_CLIENT_TIMEOUT = 10  # seconds of docker sdk http read time, the ssh connect phase is bounded separately
+THREADPOOL_SIZE = 4  # caps concurrent in flight blocking calls per host
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
 ContainerResult = dict[str, str | dict[str, int]]
@@ -50,18 +48,15 @@ _SSH_ADAPTER_PATCHED = False
 
 
 def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
-    """Bound Paramiko's TCP, banner, and authentication phases.
-
-    Docker SDK's ``timeout=`` covers HTTP/channel I/O but is not forwarded to
-    ``SSHClient.connect``. Without these explicit values a blackholed runner
-    can occupy a context worker forever.
+    """the docker sdk timeout is not forwarded to SSHClient.connect
+    without these a blackholed runner occupies a context worker forever
     """
     bounded = max(1.0, float(timeout))
     params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded)
 
 
 def _install_bounded_ssh_adapter() -> None:
-    """Install a process-wide, API-compatible timeout fix for docker-py 7.x."""
+    """process wide timeout fix for docker-py 7.x"""
     global _SSH_ADAPTER_PATCHED
     if _SSH_ADAPTER_PATCHED:
         return
@@ -71,17 +66,13 @@ def _install_bounded_ssh_adapter() -> None:
         try:
             from docker.api import client as api_client
         except (ImportError, AttributeError):
-            # Unit tests use a deliberately tiny docker stub. Production's
-            # pinned docker-py dependency always exposes this module.
-            return
+            return  # unit tests stub docker without this module, the pinned dependency always has it
         original_adapter = api_client.SSHHTTPAdapter
         if getattr(original_adapter, "_ctfd_bounded_connect", False):
             _SSH_ADAPTER_PATCHED = True
             return
 
-        # docker-py keeps the adapter on api_client so it can be replaced by
-        # tests and by alternate transports. The runtime base is a real class,
-        # but mypy cannot prove that through this dynamic compatibility seam.
+        # the base is resolved at runtime so mypy cannot prove it is a class
         class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
             _ctfd_bounded_connect = True
 
@@ -109,7 +100,6 @@ def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT):
 
 
 def _image_contract(image: object) -> str | None:
-    """Return the image/plugin compatibility label without trusting SDK shapes."""
     attrs = getattr(image, "attrs", None)
     if not isinstance(attrs, Mapping):
         return None
@@ -124,7 +114,6 @@ def _image_contract(image: object) -> str | None:
 
 
 def normalize_container_state(value: object) -> ContainerState:
-    """Map Docker's open-ended status strings to the plugin's closed state set."""
     if value == "running":
         return "running"
     if value == "paused":
@@ -170,7 +159,6 @@ def _scan_context_meta(context_name: str | None = None) -> ContextMeta | list[Co
 
 
 def _metadata_name_and_endpoint(meta: object) -> tuple[str | None, str | None]:
-    """Extract only the typed fields used from Docker's untrusted JSON shape."""
     if not isinstance(meta, Mapping):
         return None, None
     name = meta.get("Name")
@@ -188,12 +176,8 @@ def _metadata_name_and_endpoint(meta: object) -> tuple[str | None, str | None]:
 
 
 def _validate_endpoint(candidate: str, context_name: str) -> str | None:
-    """Allow only the one local socket or a well-formed SSH transport.
-
-    Docker context metadata is operator-controlled state mounted into CTFd, but
-    it must not silently widen the control plane to unauthenticated TCP daemons
-    or arbitrary Unix sockets. Keep metadata and manually-entered endpoints on
-    the same allowlist.
+    """allow only the one local socket or a well formed ssh transport
+    context metadata is operator controlled but must not widen the control plane to unauthenticated tcp daemons
     """
     if not candidate or candidate != candidate.strip() or any(c.isspace() for c in candidate):
         return None
@@ -203,7 +187,7 @@ def _validate_endpoint(candidate: str, context_name: str) -> str | None:
         return None
     try:
         parsed = urlsplit(candidate)
-        parsed_port = parsed.port  # force validation of malformed/out-of-range ports
+        parsed_port = parsed.port  # reading the port is what rejects a malformed or out of range value
         parsed_hostname = parsed.hostname
         parsed_username = parsed.username
         parsed_password = parsed.password
@@ -236,9 +220,7 @@ def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
                 return validated
 
     if hostname:
-        # The admin API also accepts an explicit Docker endpoint for manually
-        # configured contexts. Do not corrupt ssh://host into
-        # ssh://root@ssh://host when context metadata is unavailable.
+        # a manually configured hostname may already carry a scheme, never build ssh://root@ssh://host
         candidate = hostname if "://" in hostname else f"ssh://{hostname if '@' in hostname else f'root@{hostname}'}"
         validated = _validate_endpoint(candidate, context_name)
         if validated is not None:
@@ -260,22 +242,21 @@ def discover_contexts() -> list[DiscoveredContext]:
             if validated is not None:
                 discovered.append({"name": name, "endpoint": validated})
 
-    if not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered):
-        if os.path.exists(LOCAL_SOCKET_PATH):
-            discovered.append({"name": LOCAL_CONTEXT_NAME, "endpoint": f"unix://{LOCAL_SOCKET_PATH}"})
+    local_missing = not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered)
+    if local_missing and os.path.exists(LOCAL_SOCKET_PATH):
+        discovered.append({"name": LOCAL_CONTEXT_NAME, "endpoint": f"unix://{LOCAL_SOCKET_PATH}"})
 
     return discovered
 
 
 def _get_host_gateway() -> str:
-    # default route gateway from /proc, needed for reaching container ports on the host
     try:
         import struct
 
         with open("/proc/net/route") as f:
             for line in f:
                 parts = line.strip().split()
-                if parts[1] == "00000000":
+                if parts[1] == "00000000":  # destination 0 is the default route
                     gw = struct.pack("<I", int(parts[2], 16))
                     return ".".join(str(b) for b in gw)
     except Exception:
@@ -303,29 +284,24 @@ class DockerHostManager:
     def __init__(self) -> None:
         self._context_configs: dict[str, str] = {}
         self._pub_hostnames: dict[str, str] = {}
-        # Resolved configuration must survive a transient startup/reload probe
-        # failure so periodic ping can recover it. Keep reachability separate
-        # from the endpoint catalog used to create clients and proxy active
-        # rows.
+        # reachability is separate from the endpoint catalog so a startup probe failure does not drop the host
         self._connected_contexts: set[str] = set()
-        # keyed by (context_name, thread_ident) because paramiko Channels bind
-        # gevent.Event to the Hub of the creating thread
+
+        # keyed per thread because paramiko channels bind gevent events to the hub of the creating thread
         self._clients: dict[ClientKey, docker.DockerClient] = {}
         self._client_generations: dict[ClientKey, int] = {}
-        # A transport failure invalidates every cached client for that context,
-        # but peers may still be in flight.  Increment the context epoch and
-        # let each worker replace its own client on its next call instead of
-        # closing a Paramiko transport from the wrong thread.
+
+        # an epoch bump lets each worker replace its own client instead of closing a peer paramiko transport
         self._client_epochs: dict[ClientKey, int] = {}
         self._context_client_epochs: dict[str, int] = {}
         self._client_threads: dict[ClientKey, threading.Thread] = {}
+
         self._config_generation: int = 0
-        # reentrant so wrapped ops can re-enter lock-protected helpers
-        self._lock: threading.RLock = threading.RLock()
+        self._lock: threading.RLock = threading.RLock()  # reentrant so wrapped ops re-enter locked helpers
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         self._semaphore_limits: dict[str, int] = {}
-        # per-context pool isolates blocking paramiko calls so one hung host
-        # doesn't starve the others
+
+        # per context pool isolates blocking paramiko calls so one hung host cannot starve the others
         self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
 
     def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
@@ -337,8 +313,7 @@ class DockerHostManager:
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
-        # pool.apply needs the gevent hub. CLI paths have no
-        # hub and apply() hangs in futex, so fall back to inline there
+        # cli paths have no gevent hub and pool.apply hangs in futex there, so run inline
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
         pool = self._get_threadpool(context_name)
@@ -353,9 +328,7 @@ class DockerHostManager:
         with self._lock:
             key = (context_name, tid)
 
-            # Thread identifiers can be reused after a worker exits. Track the
-            # owning Thread object as well as its ident so a replacement never
-            # inherits a paramiko transport bound to the old worker's Hub.
+            # idents are reused after a worker exits, so the owner object decides who inherits a transport
             dead_keys = [
                 cached_key
                 for cached_key in self._clients
@@ -367,12 +340,7 @@ class DockerHostManager:
                 self._client_epochs.pop(dead_key, None)
                 self._client_threads.pop(dead_key, None)
 
-            # A reload can retire a context that this worker never requests
-            # again. Sweep every stale entry owned by the calling thread, not
-            # just the requested key, so repeated context removal cannot leave
-            # one SSH transport behind per retired context. Peer workers remain
-            # untouched because closing their Paramiko transports here could
-            # abort an in-flight Docker operation on another gevent Hub.
+            # sweep every stale key this thread owns, otherwise each retired context leaks one ssh transport
             owned_stale_keys = [
                 cached_key
                 for cached_key in self._clients
@@ -397,8 +365,7 @@ class DockerHostManager:
             if client is not None and (
                 owner is not current_thread or generation != self._config_generation or client_epoch != context_epoch
             ):
-                # Reloads are lazy: roll only this worker's cache entry. Closing
-                # another thread's in-flight SSH transport can abort a create.
+                # roll only this worker entry, closing another thread transport can abort its create
                 to_close.append(self._clients.pop(key))
                 self._client_generations.pop(key, None)
                 self._client_epochs.pop(key, None)
@@ -411,9 +378,7 @@ class DockerHostManager:
                     try:
                         client = _new_docker_client(url, timeout=DEFAULT_CLIENT_TIMEOUT)
                     except Exception as exc:
-                        # Finish closing entries already retired by this sweep
-                        # before surfacing an invalid endpoint/client failure.
-                        client_error = exc
+                        client_error = exc  # defer the raise so entries retired above still get closed
                     else:
                         self._clients[key] = client
                         self._client_generations[key] = self._config_generation
@@ -422,7 +387,7 @@ class DockerHostManager:
                 else:
                     missing_context = True
 
-        # close outside the lock, paramiko teardown can block on SSH for seconds
+        # close outside the lock, paramiko teardown can block on ssh for seconds
         for old in to_close:
             try:
                 old.close()
@@ -431,16 +396,13 @@ class DockerHostManager:
         if client_error is not None:
             raise client_error
         if missing_context:
-            # typed so callers can map a stale-row miss to a 503 instead of a 500
+            # typed so callers map a stale row miss to 503 instead of 500
             raise HostsUnavailableException(f"no client for context '{context_name}'")
         assert client is not None
         return client
 
     def _clear_client(self, context_name: str) -> None:
-        # Mark every peer stale without closing another worker's potentially
-        # in-flight SSH transport. Each worker observes the epoch lazily and
-        # replaces its own client on its next operation. This also lets a fresh
-        # out-of-pool ping invalidate the actual thread-pool clients.
+        # mark peers stale by epoch instead of closing a transport another worker may still be using
         key = (context_name, threading.get_ident())
         with self._lock:
             self._context_client_epochs[context_name] = self._context_client_epochs.get(context_name, 0) + 1
@@ -455,12 +417,8 @@ class DockerHostManager:
                 pass
 
     def _init_semaphores(self, limit: int) -> None:
-        """Configure the per-process create limit for each current context.
-
-        This deliberately does not pretend to be a distributed semaphore:
-        every CTFd process enforces its own limit. Preserve matching objects
-        across settings reloads so in-flight acquisitions remain in the same
-        semaphore generation.
+        """not distributed, every ctfd process enforces this create limit on its own
+        matching semaphore objects survive a reload so in flight acquisitions stay in one generation
         """
         with self._lock:
             old_semaphores = self._semaphores
@@ -477,7 +435,7 @@ class DockerHostManager:
             self._semaphore_limits = dict.fromkeys(new_semaphores, limit)
 
     def acquire_semaphore(self, context_name: str, timeout: int = 10) -> threading.BoundedSemaphore | None:
-        """Acquire and return the exact semaphore object that must be released."""
+        """returns the exact object the caller must release"""
         with self._lock:
             sem = self._semaphores.get(context_name)
         if sem is None:
@@ -489,11 +447,8 @@ class DockerHostManager:
         return sem
 
     def release_semaphore(self, semaphore: threading.BoundedSemaphore | str | None) -> None:
-        """Release an acquisition token.
-
-        A context name remains accepted for compatibility, but new callers
-        must pass the object returned by :meth:`acquire_semaphore`. Looking up
-        by name cannot provide generation-safe ownership across a reload.
+        """a context name is still accepted for compatibility
+        new callers pass the object from acquire_semaphore, name lookup is not generation safe across a reload
         """
         if isinstance(semaphore, str):
             with self._lock:
@@ -528,10 +483,7 @@ class DockerHostManager:
                 logger.error(f"invalid public hostname for context '{ctx.context_name}': {exc}")
                 continue
 
-            # Retain every syntactically resolved configuration regardless of
-            # this one probe's result. Otherwise a runner that is briefly down
-            # during startup disappears from the endpoint catalog, and the
-            # periodic health check has no URL with which to recover it.
+            # keep the resolved endpoint even if the probe below fails, the health check needs a url to recover it
             new_configs[ctx.context_name] = endpoint
             new_pub_hostnames[ctx.context_name] = public_hostname
 
@@ -551,8 +503,7 @@ class DockerHostManager:
                         except Exception as e:
                             logger.warning(f"context {ctx_name} network check failed for '{rd_network}': {e}")
                     if storage_limit:
-                        # storage_opt is a silent brick on non-xfs data-roots: the
-                        # daemon refuses every create. surface it at load instead
+                        # storage_opt on a non xfs data root makes the daemon refuse every create, warn at load
                         try:
                             backing = dict(client.info().get("DriverStatus") or []).get("Backing Filesystem", "")
                             if backing and backing != "xfs":
@@ -602,17 +553,15 @@ class DockerHostManager:
         return self.get_connection_hostnames(context_name)[1]
 
     def get_connection_hostnames(self, context_name: str) -> tuple[str | None, str | None]:
-        """Snapshot the user-facing and readiness addresses atomically."""
+        """returns the user facing address and the readiness address"""
         with self._lock:
             configured = self._pub_hostnames.get(context_name)
             endpoint = self._context_configs.get(context_name, "")
-        # A local Docker daemon publishes ports on the host. CTFd itself runs
-        # in a container, so readiness/proxy traffic must use the bridge
-        # gateway even when users need a different public DNS name for SSH.
+
+        # ctfd runs in a container so readiness traffic to a local daemon has to go through the bridge gateway
         if endpoint.startswith("unix://"):
             return configured or None, _get_host_gateway()
-        # Remote runners expose their published ports at the configured runner
-        # address; a local bridge-gateway fallback is not meaningful for them.
+
         if configured:
             return configured, configured
         return None, None
@@ -622,16 +571,15 @@ class DockerHostManager:
             return [name for name in self._context_configs if name in self._connected_contexts]
 
     def ping(self, context_name: str) -> bool:
-        # use a fresh ephemeral client. cached clients share paramiko transports
-        # that wedge on dead-but-unreaped TCP sockets after idle periods, blocking
-        # the 30s health_check past its interval for the full kernel retransmit cycle
         with self._lock:
             url = self._context_configs.get(context_name)
         if not url:
             return False
+
+        # fresh client, a cached paramiko transport wedges on dead tcp sockets past the health check interval
         reachable = ping_endpoint(url, timeout=3)
-        # Do not let a probe of a retired/replaced endpoint overwrite the new
-        # catalog's reachability state when it completes after a reload.
+
+        # a probe that finishes after a reload must not overwrite the new catalog reachability
         with self._lock:
             endpoint_is_current = self._context_configs.get(context_name) == url
             if endpoint_is_current:
@@ -668,9 +616,7 @@ class DockerHostManager:
         cap_drop = [c.strip() for c in str(effective_profile["cap_drop"]).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(effective_profile["cap_add"]).split(",") if c.strip()]
 
-        # settings-gated hardening kwargs, validated here so a bad value fails
-        # loudly before any docker call. "" / 0 omits the kwarg entirely, which
-        # is load-bearing on the ext4 dev box (storage_opt is xfs-only)
+        # an empty or zero setting omits the kwarg entirely, storage_opt is xfs only and breaks the ext4 dev box
         extra_kwargs: dict = {}
 
         storage_limit = str(effective_profile["storage_limit"] or "").strip()
@@ -680,7 +626,7 @@ class DockerHostManager:
 
         log_max_size = str(effective_profile["log_max_size"] or "").strip()
         if log_max_size:
-            # max-file must be a string: daemon log-opts are map[string]string
+            # max-file must be a string, the daemon rejects integer log opts
             extra_kwargs["log_config"] = {
                 "type": "json-file",
                 "config": {"max-size": log_max_size, "max-file": str(int(effective_profile["log_max_file"] or 3))},
@@ -694,12 +640,7 @@ class DockerHostManager:
             extra_kwargs["mem_reservation"] = mem_reservation
 
         if memory is not None:
-            # swap headroom above the RAM limit. a desktop's memory drifts up
-            # over a long session (browser tabs, RE tools); with zero swap a
-            # transient spike past mem_limit OOM-kills a live app (firefox).
-            # default gives a swap cushion equal to the RAM limit so spikes
-            # spill to swap instead of dying. "0" = strict no-swap isolation,
-            # "-1" = unlimited, "<size>" = explicit swap amount
+            # the default cushion equals the memory limit so a spike spills to swap instead of oom killing an app
             swap_raw = str(effective_profile["swap_limit"] or "").strip()
             if swap_raw == "-1":
                 extra_kwargs["memswap_limit"] = -1
@@ -811,9 +752,7 @@ class DockerHostManager:
                     if attempt < 4:
                         time.sleep(0.3)
             except Exception:
-                # A reload/attrs failure commonly means this thread's SSH or
-                # Docker transport is no longer usable. Invalidate all peers
-                # lazily, drop this exact client now, and let cleanup reconnect.
+                # a reload failure usually means the transport is dead, drop the client and let cleanup reconnect
                 self._clear_client(context_name)
                 raise
 
@@ -842,16 +781,13 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             except Exception:
-                # see is_container_running for context on the broad catch
                 self._clear_client(context_name)
                 raise HostsUnavailableException(f"transient client failure on {context_name}")
 
         return self._call(context_name, _do)
 
     def force_remove_container(self, context_name: str, container_name: str) -> None:
-        # stop() is a no-op against Created-state containers (never started, so nothing to stop) and they don't
-        # auto_remove from a no-op stop, so reconciler-style cleanup needs remove(force=True) instead.
-        # also covers Running and Exited in one call without the stop->auto_remove timing dance
+        # a created container never auto_remove from a no-op stop, forced removal covers every state in one call
         def _do():
             client = self._get_client(context_name)
             try:
@@ -863,7 +799,6 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             except Exception:
-                # see is_container_running for context on the broad catch
                 self._clear_client(context_name)
                 raise HostsUnavailableException(f"transient client failure on {context_name}")
 
@@ -876,11 +811,7 @@ class DockerHostManager:
         container_name: str,
         expected_labels: dict[str, str],
     ) -> dict[str, str]:
-        """Remove one exact paused plugin container and return its labels.
-
-        Re-resolving by immutable ID and comparing the full ID/name prevents a
-        stale dashboard request from deleting a replacement container.
-        """
+        """compares immutable id and name so a stale dashboard request cannot delete a replacement container"""
 
         def _do() -> dict[str, str]:
             client = self._get_client(context_name)
@@ -927,7 +858,7 @@ class DockerHostManager:
             from datetime import datetime
 
             iso = created_raw.replace("Z", "+00:00")
-            # strip nanoseconds past microsecond precision (docker emits 9-digit fractional)
+            # python parses at most microseconds, docker emits 9 digit fractional seconds
             if "." in iso:
                 head, tail = iso.split(".", 1)
                 tz_idx = max(tail.find("+"), tail.find("-"))
@@ -944,9 +875,7 @@ class DockerHostManager:
         containers = client.containers.list(all=True, filters={"name": name_prefix})
         results: list[dict[str, object]] = []
         for c in containers:
-            # Docker's `name` filter is a partial/regex match, not a prefix
-            # guarantee. Enforce the caller's namespace locally before any
-            # reconciliation code can treat a returned object as a session.
+            # the docker name filter is a regex match not a prefix, so enforce the caller namespace locally
             if not str(c.name or "").startswith(name_prefix):
                 continue
             created_raw = c.attrs.get("Created", "") if c.attrs else ""
@@ -962,9 +891,7 @@ class DockerHostManager:
         return results
 
     def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, object]]:
-        # Lenient listing swallows errors and returns [] so a flapping host
-        # cannot break a read-only status loop. Destructive callers must use
-        # the strict variant because an error looks identical to no containers.
+        # lenient, an error returns empty so a flapping host cannot break a read only status loop
         def _do() -> list[dict[str, object]]:
             try:
                 client = self._get_client(context_name)
@@ -976,9 +903,7 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def list_session_containers_strict(self, context_name: str, name_prefix: str) -> list[dict[str, object]] | None:
-        # strict listing: None on any error, so callers can distinguish "host
-        # answered: nothing there" from "host unreachable". The reconcile
-        # sweep only acts on a non-None result.
+        # strict, an error returns none so destructive callers can tell an empty host from an unreachable one
         def _do() -> list[dict[str, object]] | None:
             try:
                 client = self._get_client(context_name)
@@ -1017,13 +942,8 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def check_storage_limit_compatibility(self, context_name: str, storage_limit: str) -> bool:
-        """Return whether a configured overlay writable-layer quota can work.
-
-        Docker's per-container ``overlay2.size`` option requires overlay2 on an
-        XFS backing filesystem. Treat missing/unknown daemon metadata as
-        ineligible when quotas are configured: admitting work and discovering
-        the mismatch at create time strands a durable reservation and gives the
-        user a generic startup failure.
+        """a writable layer quota needs the overlay2 driver on an xfs backing filesystem
+        unknown daemon metadata counts as ineligible, a create time mismatch strands a durable reservation
         """
         if not storage_limit.strip():
             return True
@@ -1039,16 +959,7 @@ class DockerHostManager:
                 }
                 backing = status.get("backing filesystem", "")
                 supports_dtype = status.get("supports d_type", "")
-                compatible = (
-                    driver == "overlay2"
-                    and backing == "xfs"
-                    and supports_dtype
-                    in (
-                        "true",
-                        "1",
-                        "yes",
-                    )
-                )
+                compatible = driver == "overlay2" and backing == "xfs" and supports_dtype in ("true", "1", "yes")
                 if not compatible:
                     logger.warning(
                         "context %s is ineligible for storage_limit=%s (driver=%r backing=%r supports_d_type=%r)",
@@ -1076,8 +987,7 @@ class DockerHostManager:
                 attrs = img.attrs or {}
                 size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
                 raw = attrs.get("Created", "")[:19]
-                # reproducible-build images (nix, bazel) report 1980-01-01,
-                # fall back to LastTagTime for a meaningful date
+                # reproducible build images report 1980-01-01, so fall back to the last tag time
                 if raw.startswith("1980"):
                     last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                     if last_tag:
@@ -1155,14 +1065,8 @@ class DockerHostManager:
         *,
         minimum_remaining: int = 60,
     ) -> int:
-        """Credit a held interval to the image's persisted lifetime deadline.
-
-        Docker archive I/O remains available while the container cgroup is
-        frozen. The image watchdog is therefore unable to observe the file
-        while it is replaced, and the plugin verifies the exact content before
-        allowing unpause. The file mtime records the last credited instant, so
-        a crash/retry adds only the new portion of the hold rather than the
-        entire interval again.
+        """docker archive io still works while the cgroup is frozen so the watchdog cannot observe the replacement
+        the file mtime records the last credited instant so a retry adds only the new part of the hold
         """
         state_dir = "/var/lib/remote-desktop"
         filename = "max-lifetime-deadline"
@@ -1278,8 +1182,7 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def get_host_memory(self, context_name: str) -> int | None:
-        # MemTotal in bytes from docker info; None on any failure. used by the
-        # orchestrator to auto-derive per-host session caps
+        # total host memory in bytes, the orchestrator derives per host session caps from it
         if context_name not in self._context_configs:
             return None
 
@@ -1294,10 +1197,8 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def inspect_container_state(self, context_name: str, container_id: str) -> ContainerState:
-        """Return a strict state without conflating transport failure with absence.
-
-        Destructive callers must treat ``paused`` and ``unknown`` as holds.
-        ``not_found`` is returned only for Docker's explicit NotFound response.
+        """destructive callers must treat paused and unknown as holds
+        not_found is returned only when docker explicitly reports the container missing
         """
 
         def _do():
@@ -1321,5 +1222,5 @@ class DockerHostManager:
         state = self.inspect_container_state(context_name, container_id)
         if state == "unknown":
             raise HostsUnavailableException(f"container state unavailable on {context_name}")
-        # Paused is alive: it is an evidence hold, not a dead container to reap.
+        # paused is alive, it is an evidence hold rather than a dead container to reap
         return state in ("running", "paused")

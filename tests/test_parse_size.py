@@ -30,7 +30,7 @@ def test_gb_suffix():
 
 
 def test_gb_before_g():
-    # "gb" must match before "g" so "2gb" doesn't parse as "2g" + leftover "b"
+    # gb must match before g, otherwise 2gb parses as 2g with a leftover b
     assert parse_size("1gb") == 1024**3
     assert parse_size("1g") == 1024**3
 

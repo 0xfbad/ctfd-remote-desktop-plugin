@@ -17,16 +17,13 @@ from .settings import (
     validate_setting_value,
 )
 
-# end_reason values persisted to the desktop_session_history.end_reason column.
-# these strings live in the DB, the names exist only to prevent typo drift at call sites
+# these strings are persisted in desktop_session_history.end_reason, editing one orphans stored rows
 END_REASON_RECONCILIATION = "reconciliation"
 END_REASON_USER_DESTROYED = "user_destroyed"
 END_REASON_ADMIN_KILLED = "admin_killed"
 END_REASON_EXPIRED = "expired"
 
-# Durable lifecycle states.  The active session row remains authoritative until
-# Docker teardown is confirmed; non-active states are deliberately retained so
-# recovery never has to reconstruct a session from an incomplete operation row.
+# the session row stays authoritative until teardown is confirmed so recovery never rebuilds it from an operation
 LIFECYCLE_ACTIVE = "active"
 LIFECYCLE_STOPPING = "stopping"
 LIFECYCLE_CLEANUP_PENDING = "cleanup_pending"
@@ -58,29 +55,23 @@ CREATE_OPERATION_STATES = frozenset(
     }
 )
 
-# noVNC viewer query string shared by the absolute and relative vnc.html URL builders
 VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true"
 
 
 def proxy_vnc_url(user_id: int, password: str) -> str:
-    # Password stays in the fragment: browsers do not send it in HTTP requests
-    # or Referer headers. noVNC and ttyd are only exposed through authenticated
-    # same-origin reverse-proxy routes.
+    # password stays in the fragment, browsers never send it in requests or referer headers
     return f"/remote-desktop/vnc/{user_id}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
 
 
-# strftime format for human-facing timestamps (event log datetime, image build date).
-# %-d / %-I are glibc-specific no-pad directives, fine on the linux deploy target
+# %-d and %-I are glibc only no pad directives, fine on the linux deploy target
 DISPLAY_DATETIME_FORMAT = "%b %-d, %Y %-I:%M:%S %p"
 
 
 def _esc(val: str | None) -> str:
-    """html-escape a string for safe embedding in JSON / innerHTML contexts"""
     return str(_markup_escape(val)) if val else ""
 
 
 def username_or_fallback(user: Users | None, user_id: int) -> str:
-    """display name for a user, falling back to "User {id}" when the row is gone"""
     return user.name if user else f"User {user_id}"
 
 
@@ -92,19 +83,16 @@ class DesktopDockerContextModel(db.Model):
     pub_hostname = db.Column(db.String(512), nullable=False)
     weight = db.Column(db.Integer, default=1)
     enabled = db.Column(db.Boolean, default=True)
-    # admission control: NULL = auto-derive from host RAM, 0 = drain, N = explicit cap
+    # null means auto derive from host ram, 0 means drain, any other value is an explicit cap
     max_containers = db.Column(db.Integer, nullable=True)
-    # authoritative concurrent-session counter, shared across gunicorn workers.
-    # incremented by the atomic conditional reserve, decremented on release,
-    # absolute-synced by the leader reconcile, healed by the leader audit
+    # authoritative across gunicorn workers, reserve increments, release decrements, leader reconcile resyncs
     active_sessions = db.Column(db.Integer, nullable=False, default=0, server_default="0")
 
 
 class DesktopContainerInfoModel(db.Model):
     __tablename__ = "desktop_container_info"
     container_id = db.Column(db.String(512), primary_key=True)
-    # Intentionally not a Users FK: deleting an account must not erase the
-    # authoritative row for a live, held, or cleanup-pending Docker object.
+    # deliberately not a users fk, deleting an account must not erase the row for a live docker object
     user_id = db.Column(db.Integer, nullable=False)
     container_name = db.Column(db.String(512), nullable=False)
     vnc_port = db.Column(db.Integer, nullable=False)
@@ -122,15 +110,11 @@ class DesktopContainerInfoModel(db.Model):
     timer_duration = db.Column(db.Float(precision=53), default=0)
     extensions_used = db.Column(db.Integer, default=0)
     max_extensions = db.Column(db.Integer, default=3)
-    # raw sid of the CTFd session minted for autologin into the container.
-    # A cookie may not be minted in every session creation path. On destroy,
-    # NULL means there is no server-side session cache entry to revoke.
+    # sid of the autologin ctfd session, null means destroy has no server side cache entry to revoke
     cookie_sid = db.Column(db.String(128), nullable=True)
-    # set when the container is paused (io tripwire or admin hold); expiry and
-    # shutdown cleanup skip paused rows so the writable layer survives as evidence
+    # expiry and shutdown cleanup skip paused rows so the writable layer survives as evidence
     paused_at = db.Column(db.Float(precision=53), nullable=True)
-    # Generated before any Docker side effect. Unlike container_id this exists
-    # throughout create, cancellation, active use, teardown, and history.
+    # unlike container_id this exists before any docker side effect and stays through teardown and history
     session_uuid = db.Column(db.String(36), nullable=False)
     lifecycle_state = db.Column(
         db.String(32), nullable=False, default=LIFECYCLE_ACTIVE, server_default=LIFECYCLE_ACTIVE
@@ -144,12 +128,8 @@ class DesktopContainerInfoModel(db.Model):
 
 
 class DesktopSessionOperationModel(db.Model):
-    """Stable per-user lifecycle mutex and crash-recovery record.
-
-    There is intentionally no Users foreign key and no cascading delete. A
-    deleted CTFd user can still own a live or cleanup-pending Docker object, and
-    recovery must remain able to lock and finish that generation.
-    """
+    """per user lifecycle mutex and crash recovery record
+    no users fk and no cascade, a deleted user can still own a docker object recovery must finish"""
 
     __tablename__ = "desktop_session_operations"
     user_id = db.Column(db.Integer, primary_key=True)
@@ -196,8 +176,7 @@ def history_from_row(
     ended_at: float,
     reason: str,
 ) -> DesktopSessionHistoryModel:
-    """build a history row from a live container row, snapshotting the session.
-    ended_at is passed in so the caller controls the teardown timestamp"""
+    """ended_at is passed in so the caller controls the teardown timestamp"""
     return DesktopSessionHistoryModel(
         user_id=row.user_id,
         username=username,
@@ -228,12 +207,8 @@ class DesktopSettingsModel(db.Model):
 
 
 class DesktopPluginMetadataModel(db.Model):
-    """Version markers kept outside strict settings for rollback safety.
-
-    Contract-1 plugin binaries reject unknown ``desktop_settings`` keys at
-    startup. They safely ignore this additive table, so a code rollback does
-    not require emergency settings-row surgery.
-    """
+    """version markers kept out of desktop_settings, contract 1 binaries reject unknown keys there
+    they ignore this extra table, so a code rollback needs no settings row surgery"""
 
     __tablename__ = "desktop_plugin_metadata"
     key = db.Column(db.String(128), primary_key=True)
@@ -244,10 +219,10 @@ class DesktopEventLogModel(db.Model):
     __tablename__ = "desktop_event_log"
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     event_id = db.Column(db.String(128), nullable=False)
-    # no FK on user_id, deleting a user should not cascade-wipe their audit trail
     timestamp = db.Column(db.Float(precision=53), nullable=False, index=True)
     event_type = db.Column(db.String(128), nullable=False, index=True)
     level = db.Column(db.String(16), nullable=False)
+    # no fk here, deleting a user must not cascade wipe the audit trail
     user_id = db.Column(db.Integer, nullable=True)
     username = db.Column(db.String(512), nullable=True)
     message = db.Column(db.Text, nullable=False)
@@ -277,7 +252,7 @@ def _ensure_revision_row() -> None:
     try:
         db.session.commit()
     except IntegrityError:
-        # Another worker won the one-time seed race.
+        # another worker won the one time seed race
         db.session.rollback()
 
 
@@ -311,7 +286,7 @@ def _locked_profile() -> tuple[
 
 
 def initialize_settings() -> None:
-    """Seed, strictly validate, and canonically rewrite settings at startup."""
+    """seed, validate, and canonically rewrite every settings row at startup"""
     _ensure_revision_row()
     try:
         effective, by_key, revision = _locked_profile()
@@ -324,20 +299,14 @@ def initialize_settings() -> None:
             raise SettingsValidationError("unsupported settings schema version")
         public_profile_migrated = False
         if schema_version < 2:
-            # Settings schema 2 adds SYS_CHROOT for su/runuser and a readiness
-            # budget longer than the image's serial bounded startup gates.
-            # Upgrade only rows equal to the exact v1 defaults so deliberate
-            # operator overrides survive unchanged.
+            # upgrade only rows still equal to the exact v1 defaults so operator overrides survive
             legacy_cap_add = "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE"
             cap_row = by_key.get("cap_add")
             if cap_row is not None and decode_stored_setting("cap_add", cap_row.value) == legacy_cap_add:
                 effective["cap_add"] = SETTING_DEFAULTS["cap_add"]
                 public_profile_migrated = True
             readiness_row = by_key.get("vnc_ready_attempts")
-            if (
-                readiness_row is not None
-                and decode_stored_setting("vnc_ready_attempts", readiness_row.value) == 180
-            ):
+            if readiness_row is not None and decode_stored_setting("vnc_ready_attempts", readiness_row.value) == 180:
                 effective["vnc_ready_attempts"] = SETTING_DEFAULTS["vnc_ready_attempts"]
                 public_profile_migrated = True
             schema_version = 2
@@ -349,15 +318,12 @@ def initialize_settings() -> None:
                 db.session.add(DesktopSettingsModel(key=key, value=canonical))
             else:
                 row.value = canonical
-        # Canonicalize registered internal values without exposing them.
         for key in INTERNAL_SETTING_KEYS:
             row = by_key.get(key)
             if row is not None:
                 row.value = serialize_setting(key, decode_stored_setting(key, row.value))
         if schema_row is None:
-            db.session.add(
-                DesktopPluginMetadataModel(key="settings_schema_version", value=str(schema_version))
-            )
+            db.session.add(DesktopPluginMetadataModel(key="settings_schema_version", value=str(schema_version)))
         else:
             schema_row.value = str(schema_version)
 
@@ -372,7 +338,6 @@ def initialize_settings() -> None:
 
 
 def set_setting(key: str, value: SettingValue) -> None:
-    """Persist an explicitly classified, non-runtime internal setting."""
     if key != "image_cache":
         raise SettingsValidationError(f"setting {key!r} is not writable through the internal settings path")
     parsed = validate_setting_value(key, value)
@@ -384,9 +349,7 @@ def set_setting(key: str, value: SettingValue) -> None:
             db.session.add(DesktopSettingsModel(key=key, value=serialize_setting(key, parsed)))
         else:
             row.value = serialize_setting(key, parsed)
-        # image_cache is diagnostics only. Keep the revision row locked as the
-        # cross-worker write mutex, but do not advance the runtime revision or
-        # admission-fenced workers would reload on every matrix GET.
+        # image_cache is diagnostics only, advancing the revision would make workers reload on every matrix scan
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -394,7 +357,6 @@ def set_setting(key: str, value: SettingValue) -> None:
 
 
 def user_flags(user: object | None) -> dict[str, bool]:
-    """extract is_admin/is_hidden/is_banned from a CTFd User, only includes truthy keys"""
     if not user:
         return {}
     flags: dict[str, bool] = {}
@@ -414,7 +376,6 @@ def get_all_settings() -> dict[str, SettingValue]:
 
 
 def set_settings(updates: dict[str, SettingValue]) -> None:
-    """Validate and persist one public batch under the singleton revision lock."""
     if not updates:
         raise SettingsValidationError("settings update cannot be empty")
     parsed: dict[str, SettingValue] = {}

@@ -1,5 +1,3 @@
-"""Authoritative container username handoff."""
-
 from unittest.mock import MagicMock, patch
 
 import pytest

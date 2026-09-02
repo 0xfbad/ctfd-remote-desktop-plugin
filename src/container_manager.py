@@ -64,20 +64,17 @@ logger = logging.getLogger(__name__)
 
 
 def _display_name(user_id: int) -> tuple[Users | None, str]:
-    """fetch user from DB and return (user_obj, display_name) tuple"""
     user = Users.query.filter_by(id=user_id).first()
     return user, username_or_fallback(user, user_id)
 
 
 def _revoke_session_cookie(app: Flask, sid: str | None) -> bool:
-    """Revoke one server-side CTFd session, retaining the caller's handle on failure."""
     if not sid:
         return True
     try:
         from CTFd.cache import cache
 
-        # An absent key is already revoked, so any non-exceptional backend
-        # response satisfies the security invariant.
+        # an absent key is already revoked so any non exceptional response is a success
         cache.delete(app.session_interface.key_prefix + sid)
         return True
     except Exception as exc:
@@ -86,11 +83,6 @@ def _revoke_session_cookie(app: Flask, sid: str | None) -> bool:
 
 
 def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None:
-    # CTFd uses server-side sessions, save_session writes to the cache
-    # backend so just signing the sid wouldn't populate it.
-    # returns (cookie_name, signed_cookie_value, raw_sid). the raw sid is
-    # needed to revoke the cache entry on container destroy (the cookie value
-    # is itsdangerous-signed and not directly usable as a cache key)
     from flask import session
     from werkzeug.wrappers import Response
     from CTFd.utils.security.auth import login_user
@@ -105,20 +97,18 @@ def _mint_session_cookie(app: Flask, user: Users) -> tuple[str, str, str] | None
                 raise RuntimeError("CTFd session interface did not provide a revocable sid")
             sid = raw_sid
             resp = Response()
+            # server side sessions only reach the cache backend through save_session
             app.session_interface.save_session(app, session, resp)
             for header in resp.headers.getlist("Set-Cookie"):
                 if header.startswith(f"{cookie_name}="):
                     value = header.split(f"{cookie_name}=", 1)[1].split(";", 1)[0]
+                    # the raw sid is the cache revocation key, the cookie value is signed
                     return cookie_name, value, sid
-            # save_session has already materialized the cache entry. Do not
-            # leave a credential behind when an unexpected session interface
-            # omits the browser cookie header.
+            # save_session already materialized the cache entry, do not leave a credential behind
             if not _revoke_session_cookie(app, sid):
                 logger.error("failed to roll back CTFd session after cookie mint returned no header")
         except Exception:
-            # save_session can fail after a backend accepted the write. Once a
-            # sid exists, make a best-effort rollback before propagating the
-            # creation failure to the outer lifecycle handler.
+            # save_session can fail after the backend accepted the write
             if sid and not _revoke_session_cookie(app, sid):
                 logger.error("failed to roll back CTFd session after cookie mint raised")
             raise
@@ -178,8 +168,7 @@ def _sanitize_username(raw: str, user_id: int | None = None) -> str:
 
 
 def _connection_ports(ssh_enabled: bool, web_terminal_enabled: bool) -> list[str]:
-    # noVNC is mandatory (the readiness gate polls 6080). Xvnc's 5900 listener
-    # stays container-internal for websockify and is never published raw.
+    # 6080 is always published for the readiness gate, 5900 stays internal for websockify
     ports = ["6080/tcp"]
     if ssh_enabled:
         ports.append("22/tcp")
@@ -197,8 +186,7 @@ class ContainerManager:
         self.app = app
         self.creation_status: dict[int, CreationStatusDict] = {}
         self.lock = Lock()
-        # per-user locks serialize destroy_container so concurrent admin-kill +
-        # user-destroy don't produce duplicate history rows for one teardown
+        # serializes destroy_container so concurrent kills cannot write duplicate history rows
         self._destroy_locks: dict[int, Lock] = {}
         self._destroy_locks_lock = Lock()
 
@@ -212,7 +200,7 @@ class ContainerManager:
 
     @staticmethod
     def _row_lifecycle_state(row: DesktopContainerInfoModel) -> str:
-        """Read lifecycle state while tolerating lightweight unit doubles."""
+        """derives the state for unit doubles that carry no lifecycle_state string"""
         state = getattr(row, "lifecycle_state", LIFECYCLE_ACTIVE)
         if isinstance(state, str):
             return state
@@ -233,7 +221,6 @@ class ContainerManager:
         return normalize_container_state(state)
 
     def _mirror_detected_hold(self, user_id: int, session_uuid: str) -> bool:
-        """Persist a Docker-observed pause if the same session is still active."""
         with self._get_destroy_lock(user_id):
             db.session.rollback()
             operation = self._locked_operation(user_id, create=True)
@@ -263,9 +250,7 @@ class ContainerManager:
         if not isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str):
             return query.first()
         row = query.populate_existing().with_for_update().first()
-        # The unit suite uses lightweight MagicMock queries configured on the
-        # direct `.first()` seam. Prefer that value when the chained mock
-        # did not return a model-shaped object.
+        # unit doubles only configure the direct first seam, prefer it over the chained mock
         if not isinstance(getattr(row, "user_id", None), int):
             direct = query.first()
             if direct is None or isinstance(getattr(direct, "user_id", None), int):
@@ -277,8 +262,7 @@ class ContainerManager:
         try:
             query = DesktopSessionOperationModel.query.filter_by(user_id=user_id)
         except AttributeError:
-            # The repository's fast unit harness replaces SQLAlchemy's Model
-            # base with a narrow mock. Real CTFd models always expose query.
+            # the unit suite swaps the model base for a mock, real models always expose query
             return None
         row = query.populate_existing().with_for_update().first()
         if not isinstance(getattr(row, "user_id", None), int):
@@ -302,8 +286,7 @@ class ContainerManager:
             created_at=now,
             updated_at=now,
         )
-        # Explicit assignment also keeps the lightweight model doubles used by
-        # the unit suite model-shaped; SQLAlchemy accepts the redundancy.
+        # redundant for the orm, needed to keep the unit model doubles model shaped
         row.user_id = user_id
         row.operation_uuid = str(getattr(row, "operation_uuid", "") or uuid.uuid4())
         row.state = OP_IDLE
@@ -313,17 +296,13 @@ class ContainerManager:
             db.session.add(row)
             db.session.flush()
             return row
-        except (IntegrityError, OperationalError):
-            # Another worker lazily created the stable mutex first. End the
-            # failed transaction and lock the winner's row. InnoDB can report
-            # the absent-row insert race as either duplicate-key or a victim
-            # of next-key-lock deadlock.
+        except (IntegrityError, OperationalError):  # innodb reports this race as duplicate key or deadlock
+            # another worker created the stable mutex first, lock the winner row
             db.session.rollback()
             query = DesktopSessionOperationModel.query.filter_by(user_id=user_id)
             return query.populate_existing().with_for_update().first()
 
     def _claim_create_operation(self, user_id: int) -> tuple[str, str] | None:
-        """Atomically claim a new logical generation for a user."""
         db.session.rollback()
         operation = self._locked_operation(user_id, create=True)
         active = self._locked_active_row(user_id)
@@ -338,8 +317,7 @@ class ContainerManager:
         session_uuid = str(uuid.uuid4())
         worker_uuid = str(uuid.uuid4())
         if operation is None:
-            # Unit-harness compatibility; production cannot reach this after
-            # schema validation and therefore always persists the claim.
+            # unit suite only, schema validation guarantees a row in production
             if hasattr(DesktopSessionOperationModel, "query"):
                 raise RuntimeError("failed to acquire durable desktop operation row")
             return session_uuid, worker_uuid
@@ -369,13 +347,10 @@ class ContainerManager:
         release_capacity_from: str | None = None,
         **fields: object,
     ) -> bool:
-        """Fenced progress update; a stale worker cannot overwrite a takeover."""
+        """fenced update, a stale worker cannot overwrite a takeover"""
         db.session.rollback()
         if release_capacity_from is not None:
-            # This context UPDATE is the transaction's first row lock. The
-            # exact-owner EXISTS fence prevents a stale worker from decrementing
-            # a replacement generation, and the ownership clear below commits
-            # atomically with it.
+            # context lock first, the owner fence blocks a stale worker decrement
             self.orchestrator.release_operation_slot_in_transaction(
                 release_capacity_from,
                 user_id,
@@ -420,8 +395,7 @@ class ContainerManager:
         value = getattr(row, "session_uuid", None)
         if isinstance(value, str) and value:
             return value
-        # Only reachable in lightweight unit doubles; startup schema validation
-        # guarantees a UUID before lifecycle code runs.
+        # unreachable in production, schema validation guarantees a uuid before lifecycle code runs
         container_id = str(getattr(row, "container_id", "test-double"))
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ctfd-remote-desktop:{container_id}"))
 
@@ -438,12 +412,8 @@ class ContainerManager:
         return _sanitize_username(user.name, user.id)
 
     def _read_resolved_username(self, context_name: str, container_name: str) -> str:
-        """Read the image's authoritative Linux account name.
-
-        The base image contains system accounts that a display-name sanitizer
-        cannot predict. The image resolves those collisions and persists the
-        result, so silently retaining the requested name would publish invalid
-        SSH credentials to the user.
+        """the image resolves account collisions the sanitizer cannot predict
+        keeping the requested name would publish invalid ssh credentials
         """
         command = [
             "/bin/bash",
@@ -500,18 +470,13 @@ class ContainerManager:
         import urllib.request
         import urllib.error
 
-        # ``vnc_ready_attempts`` historically represented half-second probe
-        # slots (420 = roughly 210 seconds). Bound the complete wait to that
-        # monotonic budget; a blackholed TCP endpoint must not multiply it by
-        # the per-request timeout. Disable ambient HTTP(S)_PROXY variables for
-        # runner-internal probes.
+        # vnc_ready_attempts counts half second slots, cap the whole wait so a dead endpoint cannot multiply it
         total_budget = max(float(http_timeout), max_attempts * _VNC_RETRY_INTERVAL_SECONDS)
         deadline = time.monotonic() + total_budget
+        # an empty proxy handler ignores ambient proxy env vars for internal probes
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         for attempt in range(max_attempts):
-            # Invoke on every attempt so a caller can maintain a durable lease
-            # even when one configured HTTP attempt takes much longer than the
-            # normal half-second refusal path.
+            # every attempt so the callback can renew a lease when one probe stalls
             if progress_callback:
                 progress_callback(attempt, max_attempts)
 
@@ -567,9 +532,7 @@ class ContainerManager:
     ) -> None:
         logger.info(f"[BACKGROUND] creating container for user {user_id}")
 
-        # Direct unit-level callers predate the durable request claim. They
-        # still exercise Docker serialization without fencing; production
-        # always supplies both tokens through create_container().
+        # unit callers omit both tokens, create_container always supplies them in production
         fenced = session_uuid is not None and worker_uuid is not None
         session_uuid = session_uuid or str(uuid.uuid4())
         worker_uuid = worker_uuid or str(uuid.uuid4())
@@ -601,9 +564,7 @@ class ContainerManager:
             else:
                 context_name = self.orchestrator.select_and_reserve()
 
-            # The scheduler transaction has already persisted the capacity
-            # owner. This immediate same-state update is a post-return lease
-            # heartbeat before hostname lookup or semaphore acquisition.
+            # same state update acts as a lease heartbeat before the hostname lookup and semaphore wait
             if fenced and not self._update_operation(
                 user_id,
                 session_uuid,
@@ -616,7 +577,7 @@ class ContainerManager:
                 raise RuntimeError("creation cancelled after host reservation")
 
             pub_hostname, check_hostname = self.host_manager.get_connection_hostnames(context_name)
-            # escaped for safe embedding in creation status messages rendered via innerHTML
+            # escaped because the ui renders creation status messages as html
             display_hostname = _esc(context_name)
 
             logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
@@ -657,7 +618,7 @@ class ContainerManager:
                 initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
                 extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
                 max_extensions = int(self._get_setting("max_extensions"))  # type: ignore[arg-type]
-                # hard ceiling so containers can't outlive the max possible session
+                # hard ceiling so a container cannot outlive the longest possible session
                 max_lifetime = int(initial_duration + (extension_duration * max_extensions) + 300)
 
                 container_env = {
@@ -666,7 +627,7 @@ class ContainerManager:
                     "CTFD_USERNAME": container_username,
                     "MAX_LIFETIME": str(max_lifetime),
                     "CTFD_URL": container_url,
-                    # "0" disables in the image; absent = on
+                    # the image treats an absent var as enabled so always pass an explicit 0
                     "ENABLE_SSH": "1" if ssh_enabled else "0",
                     "ENABLE_TTYD": "1" if web_terminal_enabled else "0",
                 }
@@ -683,22 +644,15 @@ class ContainerManager:
                     else:
                         logger.warning(f"failed to mint session cookie for user {user_id}, autologin disabled")
 
-                # Settings/session reads above may have opened an implicit
-                # transaction. End it before the remote Docker call.
+                # end the implicit transaction opened by the settings reads before remote io
                 db.session.rollback()
-                # From this point onward a transport failure can leave Docker's
-                # create outcome unknown. Failures before this line have not
-                # touched Docker and can release their durable reservation
-                # without an unnecessary remote cleanup attempt.
+                # past this line a transport failure leaves the create outcome unknown
                 container_create_started = True
                 result = self.host_manager.run_container(
                     context_name=context_name,
                     image=docker_image,
                     name=container_name,
-                    # A Docker context is an operator-facing identifier and may
-                    # contain characters that are invalid in a kernel hostname.
-                    # Keep its escaped form for UI text only; the UUID-derived
-                    # container name is already short, stable, and DNS-safe.
+                    # a context name can carry characters that are invalid in a kernel hostname
                     hostname=container_name,
                     env=container_env,
                     ports=_connection_ports(ssh_enabled, web_terminal_enabled),
@@ -720,8 +674,7 @@ class ContainerManager:
             port_map: dict[str, int] = result["ports"]  # type: ignore[assignment]
             container_id = str(result["container_id"])
             ssh_port = port_map.get("22/tcp")
-            # Kept non-null for the existing schema. This is now the internal
-            # Xvnc listener, not a published host port.
+            # internal xvnc listener rather than a published port, kept non null for the schema
             vnc_port = 5900
             novnc_port = port_map["6080/tcp"]
             ttyd_port = port_map.get("7682/tcp")
@@ -761,8 +714,6 @@ class ContainerManager:
             container_username = self._read_resolved_username(context_name, container_name)
             vnc_url = proxy_vnc_url(user_id, vnc_password)
 
-            # Check both the durable cross-worker cancellation flag and the
-            # process-local cancellation cache immediately before the active-row commit.
             if fenced and self._creation_cancelled(user_id, session_uuid, worker_uuid):
                 raise RuntimeError("creation cancelled by user")
             with self.lock:
@@ -845,8 +796,7 @@ class ContainerManager:
                     },
                 )
             except Exception:
-                # The active row and operation lease are already committed.
-                # Telemetry must not turn that live session into a cleanup path.
+                # the session is already committed, telemetry must not push it onto a cleanup path
                 logger.exception("failed to log session_created for committed session %s", session_uuid)
 
         except Exception as e:
@@ -856,21 +806,14 @@ class ContainerManager:
             stopped_ok = False
             if container_create_started and container_name and context_name:
                 try:
-                    # A failed containers.run() may have created the object but
-                    # failed before start. stop() is a no-op for Docker's
-                    # Created state and auto_remove will never fire there, so
-                    # creation rollback must remove the uncommitted object.
+                    # auto_remove never fires for a container that was created but never started
                     self.host_manager.force_remove_container(context_name, container_name)
                     stopped_ok = True
                     logger.info(f"removed container {container_name} after creation failure")
                 except Exception as stop_error:
                     logger.error(f"failed to stop container during cleanup: {stop_error}")
 
-            # A transient Docker/SSH failure after create can leave a live
-            # container whose stop outcome is unknown.  Keep its reservation
-            # until the strict live-container audit can prove it is gone.
-            # Failures before the Docker create call are known side-effect-free
-            # and can release their reservation immediately.
+            # an unconfirmed removal keeps its reservation until the strict audit proves it is gone
             cleanup_confirmed = not container_create_started or stopped_ok
             if context_name and cleanup_confirmed and not fenced:
                 try:
@@ -908,8 +851,7 @@ class ContainerManager:
                     logger.error("failed to persist creation cleanup state", exc_info=True)
 
             with self.lock:
-                # don't pre-escape, frontend assigns these to textContent which is xss-safe
-                # by default. pre-escaping causes &lt;...&gt; to render as literal entity text
+                # do not escape, the frontend assigns these as text and escaping would show entities
                 self.creation_status[user_id] = {
                     "status": "failed",
                     "error": str(e),
@@ -938,9 +880,7 @@ class ContainerManager:
 
         logger.info(f"create_container called for user {user_id} ({username})")
 
-        # single critical section serializes the check-and-claim. without this,
-        # two near-simultaneous POSTs can both pass the in-progress check and
-        # both spawn background greenlets, leaking a host slot
+        # one critical section for check and claim, two concurrent posts would both spawn a worker
         with self.lock:
             existing = self.creation_status.get(user_id)
             if existing and existing.get("status") not in (None, "failed", "ready"):
@@ -991,9 +931,7 @@ class ContainerManager:
                 },
             )
         except Exception:
-            # Admission and the durable queued claim already succeeded. Optional
-            # telemetry must never prevent the background task from being
-            # submitted and leave that claim stranded until stale recovery.
+            # the queued claim is already durable, telemetry must not strand it until stale recovery
             logger.exception("failed to log session_requested for user %s", user_id)
 
         try:
@@ -1049,21 +987,17 @@ class ContainerManager:
     ) -> ResultDict:
         _user, username = _display_name(user_id)
 
-        # Never acquire the process-local status lock while holding database
-        # row locks. create_container takes these resources in the opposite
-        # direction (local status, then operation/active-row claim), so doing
-        # this after _locked_operation would form a cross-request deadlock.
+        # take the status lock before any row lock, create_container uses that same order
         db.session.rollback()
         with self.lock:
             status = self.creation_status.get(user_id)
             if status and status.get("status") not in (None, "failed", "ready"):
-                # creation is in-flight, signal the background greenlet to abort
+                # the background greenlet polls this key and aborts
                 self.creation_status[user_id] = {"status": "cancelled"}
             else:
                 self.creation_status.pop(user_id, None)
 
-        # The local lock is only a contention optimization. The stable operation
-        # row and active-row FOR UPDATE locks are the cross-worker authority.
+        # the local lock is only a contention optimization, the row locks are the authority
         with self._get_destroy_lock(user_id):
             db.session.rollback()
             operation = self._locked_operation(user_id, create=True)
@@ -1082,8 +1016,7 @@ class ContainerManager:
                 db.session.rollback()
                 return {"success": False, "error": "Session changed before reconciliation"}
 
-            # evidence hold: stop + auto_remove would delete the writable layer;
-            # only an explicit admin kill gets through
+            # stop plus auto_remove would delete the writable layer held as evidence
             if self._is_paused(row) and reason != END_REASON_ADMIN_KILLED:
                 row.lifecycle_state = LIFECYCLE_HELD
                 if operation is not None:
@@ -1118,17 +1051,14 @@ class ContainerManager:
             container_id = str(row.container_id)
             session_uuid = self._session_uuid(row)
             row.session_uuid = session_uuid
-            # Release Users/operation/active row locks before the Docker/SSH
-            # state check. The session UUID fences the second transaction.
+            # release the row locks before remote io, session_uuid fences the second transaction
             db.session.commit()
 
         observed_state = self._inspect_container_state(context_name, container_id)
 
         admin_override = reason == END_REASON_ADMIN_KILLED
         if not admin_override and observed_state == "paused":
-            # Mirror an out-of-band Docker pause into the durable hold. This
-            # narrows the check/stop window, though the daemon can still pause
-            # the container after this inspection and before stop.
+            # narrows but does not close the window, a pause can still land after this check
             self._mirror_detected_hold(user_id, session_uuid)
             return {"success": False, "error": "Session suspended - contact your instructor"}
         if not admin_override and observed_state == "unknown":
@@ -1190,9 +1120,7 @@ class ContainerManager:
                 operation.updated_at = time.time()
             db.session.commit()
 
-        # Remote/cache/log operations deliberately run without database locks.
-        # Revoke the minted CTFd session before remote teardown. A cache failure
-        # must not turn a confirmed Docker stop into an untracked session.
+        # revoke before remote teardown so a cache failure cannot leave a live credential
         cookie_revoked = True
         if cookie_sid:
             from flask import current_app
@@ -1205,12 +1133,10 @@ class ContainerManager:
                 or observed_state in ("created", "exited", "not_found")
                 or reason == END_REASON_RECONCILIATION
             ):
-                # stop on a frozen container blocks the full timeout; remove directly
+                # stop on a frozen container blocks for the full timeout so remove directly
                 self.host_manager.force_remove_container(context_name, container_id)
             else:
-                # Resolve the exact immutable object, not its reusable name. A
-                # manually created replacement must never be removed by stale
-                # reconciliation after AutoRemove deleted the original.
+                # stop by id so a replacement that reused the name is never touched
                 self.host_manager.stop_container(context_name, container_id)
         except (
             docker.errors.DockerException,
@@ -1219,8 +1145,7 @@ class ContainerManager:
             OSError,
             HostsUnavailableException,
         ) as e:
-            # Unknown remote outcome: keep the full active row and every
-            # reservation. Recovery retries the exact UUID-derived container.
+            # an unknown outcome keeps the row and its reservations, recovery retries the same container
             db.session.rollback()
             operation = self._locked_operation(user_id, create=True)
             current = (
@@ -1242,9 +1167,7 @@ class ContainerManager:
             return {"success": False, "error": "Container stop outcome is unknown; cleanup will be retried"}
 
         if not cookie_revoked:
-            # Docker teardown is confirmed, but the CTFd login credential may
-            # still be valid. Retain the active row (and therefore cookie_sid)
-            # as the retry handle instead of erasing the only revocation key.
+            # keep the row because cookie_sid is the only handle for retrying revocation
             with self._get_destroy_lock(user_id):
                 db.session.rollback()
                 operation = self._locked_operation(user_id, create=True)
@@ -1268,16 +1191,11 @@ class ContainerManager:
                 "error": "Container stopped; session credential revocation will be retried",
             }
 
-        # Only now is it truthful to write history and remove the authoritative
-        # active row. If this process dies before the commit, recovery observes
-        # `stopping` and idempotently confirms/removes the already-stopped object.
+        # a crash before this commit leaves the row stopping and recovery finishes it
         ended_at = time.time()
         with self._get_destroy_lock(user_id):
             db.session.rollback()
-            # Lock/decrement the context counter before the operation/active
-            # rows, matching admission's lock order. The exact active owner is
-            # only deleted if every fence below still matches, and rollback
-            # restores the decrement on any mismatch.
+            # decrement the context counter first to match the admission lock order
             self.orchestrator.release_active_slot_in_transaction(
                 context_name,
                 user_id,
@@ -1355,7 +1273,7 @@ class ContainerManager:
             "pub_hostname": row.pub_hostname,
             "container_username": row.container_username,
             "vnc_password": row.vnc_password,
-            # Never return stored absolute/direct URLs.
+            # never return the stored absolute url
             "vnc_url": proxy_vnc_url(row.user_id, row.vnc_password),
             "created_at": row.created_at,
         }
@@ -1367,22 +1285,17 @@ class ContainerManager:
         return row.timer_duration - (time.time() - row.timer_start_time) <= 0
 
     def _verify_or_reap(self, row: DesktopContainerInfoModel) -> bool:
-        # returns True if the row is live or unverifiable (transient error).
-        # returns False if the container vanished and we deleted the row.
         user_id = row.user_id
         context_name = row.docker_context
         container_id = row.container_id
         session_uuid = self._session_uuid(row)
         db.session.rollback()
-        # State inspection does a paramiko SSH round-trip; keep it out of
-        # the per-user lock so we don't block destroy_container on the network
+        # the ssh round trip stays outside the per user lock so destroy_container is not blocked
         state = self._inspect_container_state(context_name, container_id)
         if state in ("running", "paused", "unknown"):
             return True
 
-        # Reachable-but-not-running includes Exited, Created, and NotFound.
-        # The reconciliation destroy path force-removes the exact object and
-        # only then finalizes history/reservations.
+        # exited, created and not_found all land here and get force removed by reconciliation
         self.destroy_container(
             user_id,
             reason=END_REASON_RECONCILIATION,
@@ -1390,8 +1303,7 @@ class ContainerManager:
         )
         return False
 
-    # builds the frontend TimerDict shape; keep in sync with
-    # routes._timer_dict which builds the same shape
+    # keep in sync with routes._timer_dict which builds the same shape
     @staticmethod
     def _timer_from_row(row: DesktopContainerInfoModel) -> TimerDict | None:
         if not row.timer_started:
@@ -1440,7 +1352,7 @@ class ContainerManager:
             user = users_by_id.get(row.user_id)
             container_data = {
                 "user_id": row.user_id,
-                # inv: dashboard JS at remote_desktop_dashboard.html:1074,1093 uses these via innerHTML; must stay _esc'd
+                # remote_desktop_dashboard.html renders these as html so they must stay escaped
                 "username": _esc(user.name) if user else "Unknown",
                 **user_flags(user),
                 "container_name": _esc(row.container_name),
@@ -1462,8 +1374,7 @@ class ContainerManager:
         if new_duration is None:
             new_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
 
-        # Lock the same active row whose destroy transition changes to stopping.
-        # The process-local lock is an optimization; FOR UPDATE is authoritative.
+        # same row lock as destroy, the local lock is only an optimization
         with self._get_destroy_lock(user_id):
             db.session.rollback()
             row = self._locked_active_row(user_id)
@@ -1552,8 +1463,7 @@ class ContainerManager:
                 for uid in stale:
                     del self.creation_status[uid]
 
-            # Cleanup-pending rows must be retried even when their timer never
-            # started (for example, a failed create that reached Docker).
+            # cleanup pending rows need a retry even when their timer never started
             rows = (
                 DesktopContainerInfoModel.query.all()
                 if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
@@ -1590,10 +1500,7 @@ class ContainerManager:
                 except Exception as e:
                     logger.error(f"failed to retry pending cleanup for user {user_id}: {e}")
 
-            # A watchdog/OOM/daemon event can remove an AutoRemove container
-            # without any user polling the status endpoint. Verify ordinary
-            # ACTIVE generations on the leader sweep so their durable rows and
-            # capacity claims cannot remain phantom for the full session TTL.
+            # a daemon side removal goes unnoticed unless this sweep verifies active rows
             expired = set(expired_user_ids)
             for row in verify_active:
                 if int(row.user_id) in expired:
@@ -1611,19 +1518,12 @@ class ContainerManager:
             self._recover_stale_operations()
             self._reconcile_orphans()
 
-    # Sweep Docker objects that are not referenced by either an active lifecycle
-    # row or an in-flight durable operation. Unknown host outcomes always retain
-    # their reference and therefore cannot be reaped as anonymous orphans.
     RECONCILE_NAME_PREFIX = "rd-session-"
     RECONCILE_SAFETY_AGE_SECONDS = 300
 
     def _recover_stale_operations(self) -> None:
-        """Take over abandoned creates without racing a live worker.
-
-        The operation row is first fenced under ``FOR UPDATE`` and committed;
-        Docker/listing work then happens with no database transaction open.
-        Paused containers become evidence holds. Unknown host outcomes retain
-        the operation and all reservations for a later retry.
+        """the operation row is fenced and committed before any docker io so no live worker is raced
+        paused containers become holds, unknown outcomes keep the reservation for a later retry
         """
         try:
             candidates = DesktopSessionOperationModel.query.filter(
@@ -1715,9 +1615,7 @@ class ContainerManager:
             if not confirmed_absent:
                 continue
 
-            # Decrement the exact durable reservation and clear its ownership
-            # in one transaction. Context first preserves admission's lock
-            # order; a failed fence rolls the decrement back.
+            # context lock first to match the admission lock order
             db.session.rollback()
             if context_name and capacity_reserved:
                 self.orchestrator.release_operation_slot_in_transaction(
@@ -1762,7 +1660,7 @@ class ContainerManager:
         db.session.rollback()
 
         for ctx_name in self.host_manager.get_connected_contexts():
-            # None means the host did not answer, so skip removal this sweep.
+            # none means the host did not answer so skip removal this sweep
             containers = self.host_manager.list_session_containers_strict(ctx_name, self.RECONCILE_NAME_PREFIX)
             if containers is None:
                 logger.warning(f"reconcile: list failed on {ctx_name}, skipping sweep")
@@ -1774,23 +1672,19 @@ class ContainerManager:
                     continue
                 created_raw = entry.get("created_ts", 0)
                 created_ts = float(created_raw) if isinstance(created_raw, (int, float, str)) else 0.0
-                # safety window guards against racing a brand-new container whose DB row hasn't
-                # committed yet. created_ts == 0 means parse failed; treat as too-young
-                age = now - created_ts if created_ts > 0 else 0
+                age = now - created_ts if created_ts > 0 else 0  # a failed timestamp parse counts as too young
+                # the safety window avoids racing a new container whose row is not committed yet
                 if age < self.RECONCILE_SAFETY_AGE_SECONDS:
                     continue
 
-                # A name prefix alone never establishes ownership: Docker's
-                # name filter is a partial match and unrelated containers can
-                # use the same prefix. Automatic deletion requires all managed
-                # labels to agree with the exact UUID-derived session name.
+                # the docker name filter is a partial match so labels must agree before deleting
                 if self._managed_orphan_identity(entry) is None:
                     logger.warning(f"reconcile: refusing unmanaged or malformed candidate {name} on {ctx_name}")
                     continue
 
                 state = normalize_container_state(entry.get("status"))
                 if state == "paused":
-                    # evidence hold: surface, never remove
+                    # evidence hold, surface it and never remove
                     event_logger.log_event(
                         "orphan_paused",
                         f"paused orphan {name} on {ctx_name} held for inspection (not removed)",
@@ -1804,8 +1698,7 @@ class ContainerManager:
 
                 logger.warning(f"reconcile: removing orphan {name} on {ctx_name} (age {int(age)}s)")
                 try:
-                    # force_remove handles Created-state orphans where stop+auto_remove is a no-op,
-                    # which otherwise spams the log every cleanup tick forever
+                    # force_remove is needed because stop and auto_remove do nothing in the created state
                     self.host_manager.force_remove_container(ctx_name, name)
                     event_logger.log_event(
                         "orphan_reaped",
@@ -1817,15 +1710,12 @@ class ContainerManager:
                             "age_seconds": int(age),
                         },
                     )
-                    # No durable row owns an orphan's possible historical
-                    # counter increment, so a name-only decrement could steal
-                    # a concurrently reserved generation. The next strict
-                    # compare-and-set audit heals any residual overcount.
+                    # no capacity decrement here, the next audit heals any overcount
                 except Exception as e:
                     logger.error(f"reconcile: failed to remove {name} on {ctx_name}: {e}")
 
     def pause_watch(self) -> None:
-        # mirrors out-of-band pause/unpause (host io tripwire) into paused_at
+        # mirrors out of band pause and unpause from the host into paused_at
         with self.app.app_context():  # type: ignore[union-attr]
             rows_by_name = {
                 r.container_name: (r.user_id, self._session_uuid(r), r.docker_context, r)
@@ -1888,9 +1778,7 @@ class ContainerManager:
                             LIFECYCLE_UNPAUSING,
                         )
                     ):
-                        # Holds are sticky. An out-of-band unpause must not
-                        # release evidence or credit the timer; only the audited
-                        # admin unpause path may transition through UNPAUSING.
+                        # holds are sticky, only the audited admin path may release one
                         container_name = str(row.container_name)
                         lifecycle_state = self._row_lifecycle_state(row)
                         unpause_lease_live = bool(
@@ -1932,7 +1820,7 @@ class ContainerManager:
 
     @staticmethod
     def _credit_pause_and_clear(row: DesktopContainerInfoModel) -> None:
-        # credit frozen time so the session isn't expire-destroyed on unpause
+        # credit the frozen time so the session does not expire on unpause
         if row.timer_started and row.timer_start_time and row.paused_at:
             row.timer_start_time += time.time() - row.paused_at
         row.paused_at = None
@@ -1993,19 +1881,14 @@ class ContainerManager:
         context_name = row.docker_context
         container_name = row.container_name
         paused_at = float(row.paused_at)
-        # Mark the explicit admin operation before remote I/O. pause_watch keeps
-        # HELD rows sticky but deliberately ignores this transient state.
+        # mark unpausing before remote io, pause_watch ignores this transient state
         row.lifecycle_state = LIFECYCLE_UNPAUSING
         if operation is not None and operation.session_uuid == session_uuid:
             operation.state = OP_UNPAUSING
             operation.updated_at = time.time()
         db.session.commit()
         try:
-            # The image enforces an independent absolute lifetime and Docker's
-            # AutoRemove would erase a held writable layer if that deadline
-            # fired immediately after thaw. Credit the frozen interval through
-            # Docker's archive API while the cgroup is still paused, verify the
-            # persisted deadline, and fail closed before unpause on any error.
+            # extend the image lifetime deadline before thaw or auto_remove erases the layer
             self.host_manager.extend_paused_lifetime_deadline(
                 context_name,
                 container_name,
@@ -2057,8 +1940,7 @@ class ContainerManager:
                 ).all()
             }
         except AttributeError:
-            # Compatibility for the lightweight unit model; production schema
-            # validation guarantees the durable operation model is queryable.
+            # unit model only, schema validation guarantees the query exists in production
             creating_user_ids = set()
 
         user_ids = sorted(active_user_ids | creating_user_ids)
@@ -2087,8 +1969,7 @@ class ContainerManager:
                 summary["failed"] += 1
                 logger.error(f"failed to kill session for user {user_id}: {e}")
 
-        # log unconditionally so an admin pressing kill-all on an empty fleet
-        # still leaves an attributable audit trail (killed=0)
+        # log even for an empty fleet so the attempt stays attributable
         event_logger.log_event(
             "admin_action",
             f"admin {admin_user.name} requested fleet teardown "
@@ -2252,10 +2133,7 @@ class ContainerManager:
             if container_name in referenced_names or session_uuid in referenced_sessions:
                 raise ValueError("container is referenced by an active or in-flight session")
 
-            # Evidence disposal is the exceptional path where an audit record is
-            # committed synchronously before remote destructive I/O. If the
-            # database cannot durably record intent, fail closed and keep the
-            # paused object.
+            # commit the audit before destructive io so a database failure keeps the evidence
             self._audit_paused_orphan_removal(
                 admin_user,
                 context_name=context_name,
@@ -2291,8 +2169,7 @@ class ContainerManager:
 
         cleanup_errors: list[str] = []
         try:
-            # Recount committed rows and observed Docker objects. Never blindly
-            # decrement capacity for an object that lacked an authoritative row.
+            # recount instead of decrementing, this orphan had no authoritative row
             self.orchestrator.audit_counts()
         except Exception as exc:
             cleanup_errors.append(f"capacity audit failed: {exc}")

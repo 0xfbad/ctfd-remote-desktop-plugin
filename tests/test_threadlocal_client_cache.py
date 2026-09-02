@@ -1,14 +1,5 @@
-"""Verify the thread-local _clients cache fix.
-
-Baseline (pre-patch) keys cache by context_name only. Two threads asking the
-same context get the same DockerClient -> paramiko Channel pinned to one
-Hub -> InvalidThreadUseError when the other thread uses it.
-
-Patched version keys by (context_name, threading.get_ident()), so each thread
-gets its own cached client.
-
-These tests don't need a real docker daemon; conftest.py stubs docker out.
-"""
+"""_clients is keyed by context_name and thread ident, one shared client pins the paramiko channel to one thread
+conftest.py stubs docker out so no daemon is needed"""
 
 import threading
 from unittest.mock import MagicMock, patch
@@ -17,19 +8,16 @@ import pytest
 
 
 def _make_manager():
-    # use the test-fix src path established by conftest
+    # conftest loads the plugin modules under the _rd_plugin package
     from _rd_plugin.docker_host_manager import DockerHostManager
 
     mgr = DockerHostManager()
-    # populate config so _get_client can find the endpoint
     mgr._context_configs = {"alpha": "unix:///fake.sock", "beta": "unix:///other.sock"}
     mgr._config_generation = 1
     return mgr
 
 
 def test_same_thread_same_context_returns_cached():
-    """Sanity: within one thread, two calls to _get_client for the same context
-    return the same cached client. No regression."""
     mgr = _make_manager()
     c1 = mgr._get_client("alpha")
     c2 = mgr._get_client("alpha")
@@ -37,7 +25,6 @@ def test_same_thread_same_context_returns_cached():
 
 
 def test_same_thread_different_contexts_distinct():
-    """Sanity: same thread, different contexts -> distinct cache entries."""
     mgr = _make_manager()
     mgr._get_client("alpha")
     mgr._get_client("beta")
@@ -46,44 +33,11 @@ def test_same_thread_different_contexts_distinct():
     assert ("beta", tid) in mgr._clients
 
 
-def _run_concurrent_grabs(mgr, contexts, n_threads):
-    """Make n_threads call _get_client(ctx) concurrently for each ctx in
-    contexts. Uses a barrier so all threads hit _get_client simultaneously and
-    none have died yet when others run the dead-thread pruner."""
-    barrier = threading.Barrier(n_threads)
-    results = {}
-    lock = threading.Lock()
-
-    def worker(idx):
-        tid = threading.get_ident()
-        barrier.wait()
-        local = [(ctx, mgr._get_client(ctx)) for ctx in contexts]
-        with lock:
-            results[idx] = (tid, local)
-        # keep thread alive until all done so pruner doesn't drop our entries
-        # while another worker is still running
-        barrier.wait()
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return results
-
-
 def test_different_threads_get_different_clients_for_same_context():
-    """The bug fix: thread A and thread B asking for the same context create
-    DISTINCT cache entries keyed by thread_ident. We verify by inspecting the
-    cache directly because docker.DockerClient is mocked (all instances ==).
-
-    On baseline (cache keyed by context only), the second thread reuses the
-    first thread's entry and we get only 1 cache key. The fix makes it 2.
-    """
+    """the cache is inspected directly because docker.DockerClient is mocked and every instance compares equal"""
     mgr = _make_manager()
 
-    # barriers with timeouts so test fails gracefully on baseline instead of
-    # deadlocking when worker threads are stuck waiting for main thread
+    # barrier timeouts so the test fails instead of deadlocking when a worker never arrives
     n = 2
     phase1 = threading.Barrier(n + 1, timeout=5.0)
     phase2 = threading.Barrier(n + 1, timeout=5.0)
@@ -119,7 +73,6 @@ def test_different_threads_get_different_clients_for_same_context():
 
 
 def test_clear_client_only_drops_calling_threads_entry():
-    """One worker's transport error must not close another active worker."""
     mgr = _make_manager()
     n = 2
     phase1 = threading.Barrier(n + 1, timeout=5.0)
@@ -169,7 +122,6 @@ def test_clear_client_only_drops_calling_threads_entry():
 
 
 def test_clear_client_doesnt_touch_other_contexts():
-    """Clearing one context must not evict cached clients for other contexts."""
     mgr = _make_manager()
 
     mgr._get_client("alpha")
@@ -185,8 +137,7 @@ def test_clear_client_doesnt_touch_other_contexts():
 
 
 def test_context_invalidation_lazily_replaces_peer_threads_client():
-    """An out-of-pool failure marks peer clients stale without closing them
-    while they may be active; the owning worker replaces its client next use."""
+    """invalidation marks peer clients stale without closing them while they may still be active"""
     mgr = _make_manager()
     ready = threading.Event()
     continue_worker = threading.Event()
@@ -266,7 +217,6 @@ def test_failed_fresh_ping_invalidates_threadpool_clients_lazily():
 
 
 def test_generation_change_preserves_other_threads_active_clients():
-    """A reload lazily rolls callers and never closes active peer clients."""
     mgr = _make_manager()
     n = 2
     phase1 = threading.Barrier(n + 1, timeout=5.0)
@@ -331,7 +281,6 @@ def test_generation_change_replaces_only_callers_stale_client():
 
 
 def test_generation_change_retires_callers_other_context_client():
-    """A worker touching beta also retires its stale alpha client after reload."""
     mgr = _make_manager()
     alpha = MagicMock(name="alpha")
     beta = MagicMock(name="beta")
@@ -355,7 +304,7 @@ def test_generation_change_retires_callers_other_context_client():
 
 
 def test_removed_context_client_is_retired_when_worker_uses_other_context():
-    """A removed context cannot leak a client until that exact name is reused."""
+    """a removed context must not leak a client until that exact name is reused"""
     mgr = _make_manager()
     alpha = MagicMock(name="alpha")
     beta = MagicMock(name="beta")
@@ -378,7 +327,6 @@ def test_removed_context_client_is_retired_when_worker_uses_other_context():
 
 
 def test_failed_replacement_still_closes_every_retired_client():
-    """A constructor error must not orphan clients already removed by a sweep."""
     mgr = _make_manager()
     alpha = MagicMock(name="alpha")
     beta = MagicMock(name="beta")
@@ -399,8 +347,6 @@ def test_failed_replacement_still_closes_every_retired_client():
 
 
 def test_dead_thread_entries_get_pruned():
-    """Thread terminates, its cached entry sits until the next _get_client call
-    which prunes dead threads against threading.enumerate()."""
     mgr = _make_manager()
 
     def grab():
@@ -408,23 +354,19 @@ def test_dead_thread_entries_get_pruned():
 
     t = threading.Thread(target=grab)
     t.start()
-    t.join()  # thread is dead now
+    t.join()
 
-    # one entry from the dead thread
     pre = len(mgr._clients)
     assert pre == 1
 
-    # now call from the main thread; pruner should remove the dead-thread entry
-    # AND add the main-thread entry, net should be 1
-    mgr._get_client("alpha")
+    mgr._get_client("alpha")  # the pruner drops the dead thread entry and adds ours, net one
     post_keys = list(mgr._clients.keys())
     assert len(post_keys) == 1
     assert post_keys[0] == ("alpha", threading.get_ident())
 
 
 def test_unknown_context_raises_hosts_unavailable():
-    """Unchanged behavior: asking for a context with no config raises typed
-    HostsUnavailableException so callers can map to 503."""
+    """callers map the typed exception to a 503"""
     from _rd_plugin.exceptions import HostsUnavailableException
 
     mgr = _make_manager()

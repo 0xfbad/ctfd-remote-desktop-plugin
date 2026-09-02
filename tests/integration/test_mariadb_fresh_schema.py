@@ -1,5 +1,3 @@
-"""Fresh-schema and locking checks against a disposable MariaDB server."""
-
 from __future__ import annotations
 
 import importlib.util
@@ -97,9 +95,7 @@ def _reset_to_fresh_ctfd_schema() -> None:
     engine = create_engine(DATABASE_URL)
     try:
         db.metadata.drop_all(engine)
-        # CTFd's own schema exists before plugins load. Only the minimal users
-        # table needed by this plugin's foreign keys is required for this test.
-        Users.__table__.create(engine)
+        Users.__table__.create(engine)  # ctfd owns the users table and creates it before plugins load
     finally:
         engine.dispose()
 
@@ -329,9 +325,7 @@ def test_missing_operation_user_primary_key_is_rejected_without_repair() -> None
     engine = create_engine(DATABASE_URL)
     try:
         with engine.begin() as connection:
-            # MariaDB makes the integer primary key AUTO_INCREMENT by default;
-            # remove that attribute in the same statement before dropping the
-            # key so this fixture can represent a structurally invalid table.
+            # mariadb needs auto_increment removed in the same statement before the primary key can be dropped
             connection.execute(
                 text("ALTER TABLE desktop_session_operations MODIFY user_id INTEGER NOT NULL, DROP PRIMARY KEY")
             )

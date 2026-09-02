@@ -11,7 +11,7 @@ SettingValue = bool | int | float | str | None
 
 
 class SettingsValidationError(ValueError):
-    """A submitted or persisted settings profile is not safe to use."""
+    pass
 
 
 @dataclass(frozen=True)
@@ -51,8 +51,6 @@ def _spec(
     )
 
 
-# This registry is the sole definition of setting names, types, defaults,
-# generic scalar bounds, API visibility, and restart behavior.
 SETTING_SPECS: dict[str, SettingSpec] = {
     "remote_desktop_enabled": _spec(False),
     "docker_image": _spec("ctfd-remote-desktop:latest", max_length=512),
@@ -63,10 +61,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "initial_duration": _spec(3600, minimum=60, maximum=604800),
     "extension_duration": _spec(1800, minimum=0, maximum=604800),
     "max_extensions": _spec(3, minimum=0, maximum=100),
-    # The image deliberately withholds noVNC until Xvnc, the XFCE session,
-    # window manager, and panel have each passed their bounded startup gate.
-    # At the 0.5s polling interval, 420 attempts gives that 150s worst-case
-    # phase budget another minute of host-load/key-generation headroom.
+    # 0.5s poll, 420 attempts covers the 150s worst case startup gate plus a minute of headroom
     "vnc_ready_attempts": _spec(420, minimum=1, maximum=3600),
     "http_request_timeout": _spec(3, minimum=1, maximum=120),
     "cleanup_interval": _spec(300, minimum=5, maximum=86400, restart_required=True),
@@ -95,9 +90,8 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "nofile_hard": _spec(1048576, minimum=0, maximum=1048576),
     "cgroup_parent": _spec("", max_length=128, allow_empty=True),
     "capacity_ram_fraction": _spec(0.7, minimum=0.01, maximum=1.0),
-    # Internal settings have an explicit non-public path and never appear in
-    # the admin settings API. The revision row is the cross-worker DB mutex.
     "image_cache": _spec("", max_length=2000000, allow_empty=True, public=False),
+    # this row is the cross worker mutex, every settings write locks it first
     "_settings_revision": _spec(1, minimum=1, maximum=2147483647, public=False),
 }
 

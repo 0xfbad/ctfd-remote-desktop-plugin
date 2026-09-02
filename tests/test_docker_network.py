@@ -1,11 +1,3 @@
-"""Verify configured Docker network plumbing.
-
-run_container must pass network=<name> to client.containers.run so the
-docker daemon attaches the new container to the named bridge instead of
-docker0. load_contexts must emit a warning when a connected Docker host
-is missing the configured network so the failure is visible before create.
-"""
-
 import logging
 from unittest.mock import patch, MagicMock
 
@@ -28,8 +20,6 @@ def _settings_profile(**overrides):
 
 
 def _patched_run_container(mgr, **overrides):
-    """invoke run_container with a mocked docker client; return the kwargs
-    that client.containers.run was called with"""
     mock_client = MagicMock()
     mock_container = MagicMock()
     mock_container.id = "container-id-xyz"
@@ -49,8 +39,7 @@ def _patched_run_container(mgr, **overrides):
     }
     mock_client.images.get.return_value = resolved_image
 
-    # keyed dispatch: run_container reads many settings now; a blanket
-    # return_value would feed e.g. cgroup_parent="4096" into the validators
+    # a blanket return_value would feed values like cgroup_parent 4096 into the validators, so dispatch by key
     base_settings = _settings_profile(
         pids_limit=4096,
         cap_drop="ALL",
@@ -65,17 +54,20 @@ def _patched_run_container(mgr, **overrides):
         cgroup_parent="",
     )
 
-    with patch.object(mgr, "_get_client", return_value=mock_client):
-        with patch("models.get_all_settings", return_value=base_settings):
-            kwargs = dict(
-                context_name="alpha",
-                image="img:latest",
-                name="rd-session-1-1700000000",
-                env={"VNC_PASSWORD": "secret"},
-                ports=["5900/tcp", "6080/tcp"],
-            )
-            kwargs.update(overrides)
-            mgr.run_container(**kwargs)
+    kwargs = dict(
+        context_name="alpha",
+        image="img:latest",
+        name="rd-session-1-1700000000",
+        env={"VNC_PASSWORD": "secret"},
+        ports=["5900/tcp", "6080/tcp"],
+    )
+    kwargs.update(overrides)
+
+    with (
+        patch.object(mgr, "_get_client", return_value=mock_client),
+        patch("models.get_all_settings", return_value=base_settings),
+    ):
+        mgr.run_container(**kwargs)
 
     assert mock_client.containers.run.called
     return mock_client.containers.run.call_args.kwargs
@@ -89,14 +81,12 @@ def test_run_container_passes_network_kwarg_to_docker():
 
 
 def test_run_container_passes_override_network_name():
-    """The configured network name must reach containers.run."""
     mgr = _make_manager()
     call_kwargs = _patched_run_container(mgr, network="bridge")
     assert call_kwargs["network"] == "bridge"
 
 
 def test_run_container_default_network_is_none():
-    """Omitting the optional network delegates selection to Docker."""
     mgr = _make_manager()
     call_kwargs = _patched_run_container(mgr)
     assert call_kwargs.get("network") is None
@@ -127,7 +117,6 @@ def test_check_hostname_uses_gateway_only_without_configured_address():
 
 
 def test_container_manager_reads_setting_and_passes_through():
-    """create_container reads rd_network_name and forwards to host_manager"""
     from _rd_plugin.container_manager import ContainerManager
 
     cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
@@ -186,7 +175,6 @@ def test_container_manager_reads_setting_and_passes_through():
 
 
 def test_container_manager_passes_overridden_network():
-    """setting overridden to 'bridge' flows all the way to host_manager"""
     from _rd_plugin.container_manager import ContainerManager
 
     cm = ContainerManager(MagicMock(), MagicMock(), MagicMock())
@@ -256,7 +244,6 @@ def _settings_dispatch(rd_network):
 
 
 def test_load_contexts_warns_when_network_missing(caplog):
-    """The startup probe warns before a create attempts a missing network."""
     from _rd_plugin.docker_host_manager import DockerHostManager
 
     mgr = DockerHostManager()
@@ -300,7 +287,7 @@ def test_load_contexts_no_warning_when_network_present(caplog):
 
 
 def test_load_contexts_skips_probe_when_network_is_bridge(caplog):
-    """The built-in bridge always exists, so it does not need a probe."""
+    """the built in bridge always exists so it needs no probe"""
     from _rd_plugin.docker_host_manager import DockerHostManager
 
     mgr = DockerHostManager()
@@ -320,9 +307,7 @@ def test_load_contexts_skips_probe_when_network_is_bridge(caplog):
 
 
 def test_load_contexts_warns_when_network_probe_throws(caplog):
-    """if the docker call itself errors (e.g. SSH flake mid-check), we must
-    still log a warning rather than silently treating the context as healthy
-    on the network front"""
+    """a probe error must still warn instead of leaving the context looking healthy on the network front"""
     from _rd_plugin.docker_host_manager import DockerHostManager
 
     mgr = DockerHostManager()
@@ -342,7 +327,6 @@ def test_load_contexts_warns_when_network_probe_throws(caplog):
 
 
 def test_failed_startup_probe_retains_config_and_recovers_on_ping():
-    """A transient load failure remains probeable by the periodic health job."""
     from _rd_plugin.docker_host_manager import DockerHostManager
     from _rd_plugin.docker_host_manager import docker
 

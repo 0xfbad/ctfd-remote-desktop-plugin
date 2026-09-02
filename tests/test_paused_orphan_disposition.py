@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -215,12 +216,7 @@ def test_manager_fails_closed_when_requested_audit_cannot_commit(container_manag
 
 
 def test_dashboard_exposes_small_paused_orphan_flow():
-    source = (
-        __import__("pathlib").Path(__file__).resolve().parents[1]
-        / "src"
-        / "templates"
-        / "remote_desktop_dashboard.html"
-    ).read_text()
+    source = (Path(__file__).resolve().parents[1] / "src" / "templates" / "remote_desktop_dashboard.html").read_text()
     assert 'id="paused-orphans-section"' in source
     assert "/dashboard/api/paused-orphans" in source
     assert "confirm: 'DELETE'" in source

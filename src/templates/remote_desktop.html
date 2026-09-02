@@ -25,9 +25,6 @@
         top: 0;
     }
 
-    /* hide the navbar above the viewport, ::before is the hover hit zone
-       and ::after is the visible drawer-handle indicator. the dedicated
-       fullscreen button hides everything via inline display:none */
     .navbar {
         position: fixed;
         top: 0;
@@ -37,6 +34,7 @@
         transform: translateY(-100%);
         transition: transform 0.2s ease;
     }
+    /* invisible strip below the hidden navbar, hovering it pulls the navbar down */
     .navbar::before {
         content: '';
         position: absolute;
@@ -46,6 +44,7 @@
         width: 42px;
         height: 9px;
     }
+    /* visible handle hinting that the navbar can be pulled down */
     .navbar::after {
         content: '';
         position: absolute;
@@ -213,8 +212,7 @@
         padding: 24px 16px;
     }
 
-    /* auto margins absorb free space: centered when it fits, top-aligned when
-       it overflows on short viewports */
+    /* auto margins center the content when it fits and top align it when it overflows */
     .no-session-screen::before,
     .no-session-screen::after { content: ""; }
     .no-session-screen::before { margin-top: auto; }
@@ -281,7 +279,6 @@
         display: none !important;
     }
 
-    /* ssh connection panel */
     .ssh-panel {
         display: flex;
         align-items: center;
@@ -642,11 +639,9 @@ function startSession() {
             hideSessionError();
             pollCreationStatus();
         } else if (data.error === 'Session creation already in progress') {
-            // session is being created already, latch onto the existing creation
             hideSessionError();
             pollCreationStatus();
         } else if (data.error === 'Session already exists') {
-            // page state is stale, reload to show the active session
             reloadPage();
         } else {
             if (startBtn) {
@@ -791,7 +786,6 @@ function switchMode(mode, tabEl) {
     const terminalFrame = document.getElementById('terminal-frame');
     const sshPanel = document.getElementById('ssh-panel');
 
-    // hide all panels
     if (vncFrame) vncFrame.classList.add('hidden');
     if (terminalFrame) terminalFrame.classList.add('hidden');
     if (sshPanel) sshPanel.classList.add('hidden');
@@ -800,7 +794,6 @@ function switchMode(mode, tabEl) {
         if (vncFrame) vncFrame.classList.remove('hidden');
     } else if (mode === 'terminal') {
         if (terminalFrame) {
-            // lazy-load the terminal iframe on first switch
             if (!terminalLoaded && terminalUrl) {
                 terminalFrame.src = terminalUrl;
                 terminalLoaded = true;
@@ -838,7 +831,6 @@ document.addEventListener('fullscreenchange', () => {
     if (!document.fullscreenElement) setFullscreen(false);
 });
 
-// shared tooltip, positions above the hovered [data-tip] element and clamps to viewport
 const _tooltipEl = document.createElement('div');
 _tooltipEl.id = 'bar-tooltip';
 document.body.appendChild(_tooltipEl);
@@ -919,7 +911,6 @@ function _onViewportChange() {
 window.addEventListener('scroll', _onViewportChange, true);
 window.addEventListener('resize', _onViewportChange);
 
-// report popover, content survives open/close in memory, lost on page reload
 let reportText = '';
 let reportSending = false;
 let reportShowingThanks = false;
@@ -936,7 +927,7 @@ function syncSendButton() {
     const empty = textarea.value.trim().length === 0;
     sendBtn.disabled = reportSending || empty || reportShowingThanks;
 
-    // sendReport manages its own button state during the request
+    // the send handler owns the button label while the request is in flight
     if (reportSending) return;
 
     if (reportShowingThanks) {
@@ -1072,8 +1063,7 @@ function allowNavigation() {
 
 function reloadPage() {
     allowNavigation();
-    // detach iframes directly - setting f.src=about:blank first queues a frame
-    // navigation whose beforeunload re-pops the leave dialog
+    // remove the frames outright, blanking src queues a navigation that re pops the leave dialog
     document.querySelectorAll('iframe').forEach(f => {
         try { f.contentWindow.onbeforeunload = null; } catch (_) {}
         f.remove();
@@ -1087,7 +1077,7 @@ document.addEventListener('DOMContentLoaded', function() {
         document.documentElement.style.setProperty('--navbar-height', navbar.offsetHeight + 'px');
     }
 
-    // multi-line placeholder via JS, the attribute encoding for newlines is browser-inconsistent
+    // set the placeholder here, newline encoding in the html attribute varies by browser
     const reportTextarea = document.getElementById('report-textarea');
     if (reportTextarea) {
         reportTextarea.placeholder = REPORT_PLACEHOLDER;

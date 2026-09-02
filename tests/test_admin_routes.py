@@ -7,8 +7,7 @@ from routes import create_routes
 
 
 def _get_handler(bp, name):
-    # Blueprint is a shared MagicMock in the lightweight Flask test shim, so
-    # select the registration from this fixture's most recent create_routes call.
+    # the blueprint stub is one shared mock for the session, so the last match is the handler just registered
     for c in reversed(bp.route.return_value.call_args_list):
         fn = c.args[0]
         if getattr(fn, "__name__", None) == name:
@@ -86,8 +85,7 @@ def test_clear_endpoint_missing_confirm_returns_400(handlers, name):
 @pytest.mark.parametrize("name", ["clear_history", "clear_reports"])
 def test_clear_endpoint_wrong_confirm_returns_400(handlers, name):
     with patch("routes.request") as req, patch("routes.jsonify") as jsonify:
-        # case-sensitive: lowercase "delete" must be rejected
-        req.get_json.return_value = {"confirm": "delete"}
+        req.get_json.return_value = {"confirm": "delete"}  # the confirm check is case sensitive
         jsonify.side_effect = lambda payload: payload
         payload, status = handlers[name]()
         assert status == 400
@@ -95,8 +93,7 @@ def test_clear_endpoint_wrong_confirm_returns_400(handlers, name):
 
 
 def _install_models_stub(**queries):
-    # the handlers do `from .models import ...` at call time, which under the test
-    # package layout resolves to the `models` module already loaded by conftest
+    # handlers import models at call time, which under the test package layout is the module conftest already loaded
     mod = sys.modules["models"]
     for attr, q in queries.items():
         setattr(mod, attr, MagicMock(query=q))
@@ -214,29 +211,14 @@ def test_clear_reports_correct_confirm_proceeds(handlers):
         logger.log_event.assert_called_once()
 
 
-# -- settings validation (validate-then-apply) --------------------------------
-
-
-def _get_latest_handler(bp, name):
-    # the flask Blueprint stub is a shared MagicMock, so bp.route accumulates
-    # registrations from every create_routes call in the session; the LAST
-    # match is the one bound to the container_manager we just passed in
-    for c in reversed(bp.route.return_value.call_args_list):
-        fn = c.args[0]
-        if getattr(fn, "__name__", None) == name:
-            return fn
-    raise LookupError(name)
-
-
 @pytest.fixture()
 def cm_handlers():
-    """like handlers, but keeps the container_manager mock for call assertions"""
     cm = MagicMock()
     bp = create_routes(cm, MagicMock())
     return cm, {
-        "settings_put": _get_latest_handler(bp, "admin_update_settings"),
-        "pause": _get_latest_handler(bp, "admin_pause_session"),
-        "unpause": _get_latest_handler(bp, "admin_unpause_session"),
+        "settings_put": _get_handler(bp, "admin_update_settings"),
+        "pause": _get_handler(bp, "admin_pause_session"),
+        "unpause": _get_handler(bp, "admin_unpause_session"),
     }
 
 
@@ -277,8 +259,7 @@ def test_settings_put_log_max_file_zero_rejected(cm_handlers):
 
 
 def test_settings_put_multi_key_batch_is_all_or_nothing(cm_handlers):
-    # one bad key must reject the WHOLE batch before any set_setting commit,
-    # otherwise the per-key commits partially apply the update
+    # one bad key must reject the batch before any commit, otherwise the per key commits partially apply
     _cm, handlers = cm_handlers
     result, set_setting = _put_settings(handlers["settings_put"], {"storage_limit": "20m", "cpu_limit": 4})
     payload, status = result
@@ -298,7 +279,7 @@ def test_settings_put_cgroup_parent_must_be_slice(cm_handlers):
 def test_settings_update_reloads_locally_and_publishes_cross_worker():
     orchestrator = MagicMock()
     bp = create_routes(MagicMock(), orchestrator)
-    handler = _get_latest_handler(bp, "admin_update_settings")
+    handler = _get_handler(bp, "admin_update_settings")
     from models import SETTING_DEFAULTS
 
     with (
@@ -317,7 +298,7 @@ def test_settings_update_reloads_locally_and_publishes_cross_worker():
 def test_manual_context_reload_publishes_cross_worker():
     orchestrator = MagicMock()
     bp = create_routes(MagicMock(), orchestrator)
-    handler = _get_latest_handler(bp, "admin_reload_contexts")
+    handler = _get_handler(bp, "admin_reload_contexts")
 
     with (
         patch("routes.jsonify", side_effect=lambda payload: payload),
@@ -334,7 +315,7 @@ def test_context_test_checks_configured_image_after_ping():
     cm.host_manager.ping.return_value = True
     cm.host_manager.get_image_info.return_value = None
     bp = create_routes(cm, MagicMock())
-    handler = _get_latest_handler(bp, "admin_test_context")
+    handler = _get_handler(bp, "admin_test_context")
     context = MagicMock(context_name="alpha")
     model = MagicMock()
     model.query.get.return_value = context
@@ -348,9 +329,6 @@ def test_context_test_checks_configured_image_after_ping():
     assert "not found" in payload["error"]
     cm.host_manager.get_image_info.assert_called_once_with("alpha", "img:latest")
     cm.host_manager.check_image.assert_not_called()
-
-
-# -- pause / unpause ----------------------------------------------------------
 
 
 def _invoke_pause(handler):
@@ -407,11 +385,7 @@ def test_admin_pause_failure_returns_400_and_skips_audit_log(cm_handlers):
     payload, status = result
     assert status == 400
     assert payload == {"error": "Session already paused"}
-    # nothing was paused, so no admin_action / session_paused rows
     logger.log_event.assert_not_called()
-
-
-# -- infra status classification ----------------------------------------------
 
 
 def test_infra_status_capacity_message_is_503():

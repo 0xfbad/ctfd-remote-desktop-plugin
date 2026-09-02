@@ -1,5 +1,3 @@
-"""Public runner hostname validation and URL normalization."""
-
 import pytest
 
 from _rd_plugin.utils import normalize_public_hostname
