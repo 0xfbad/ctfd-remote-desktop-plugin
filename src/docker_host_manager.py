@@ -19,6 +19,7 @@ import paramiko
 
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
+from .messages import HOST_UNREACHABLE, SERVER_BUSY
 from .utils import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
@@ -351,7 +352,7 @@ class DockerHostManager:
         self._client_threads: dict[ClientKey, threading.Thread] = {}
 
         self._config_generation: int = 0
-        self._lock: threading.RLock = threading.RLock()  # reentrant so wrapped ops re-enter locked helpers
+        self._lock: threading.RLock = threading.RLock()  # reentrant so wrapped ops reenter locked helpers
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         self._semaphore_limits: dict[str, int] = {}
 
@@ -468,6 +469,11 @@ class DockerHostManager:
         assert client is not None
         return client
 
+    def _transient_host_failure(self, context_name: str) -> HostsUnavailableException:
+        logger.warning("transient client failure on %s", context_name, exc_info=True)
+        self._clear_client(context_name)
+        return HostsUnavailableException(HOST_UNREACHABLE)
+
     def _clear_client(self, context_name: str) -> None:
         # mark peers stale by epoch instead of closing a transport another worker may still be using
         key = (context_name, threading.get_ident())
@@ -507,7 +513,7 @@ class DockerHostManager:
 
         acquired = sem.acquire(blocking=True, timeout=timeout)
         if not acquired:
-            raise Exception("server busy, please try again shortly")
+            raise HostsUnavailableException(SERVER_BUSY)
         return sem
 
     def release_semaphore(self, semaphore: threading.BoundedSemaphore | str | None) -> None:
@@ -845,13 +851,12 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             except Exception:
-                self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}")
+                raise self._transient_host_failure(context_name)
 
         return self._call(context_name, _do)
 
     def force_remove_container(self, context_name: str, container_name: str) -> None:
-        # a created container never auto_remove from a no-op stop, forced removal covers every state in one call
+        # stop does nothing to a created container so auto_remove never fires, forced removal covers every state in one call
         def _do():
             client = self._get_client(context_name)
             try:
@@ -863,8 +868,7 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             except Exception:
-                self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}")
+                raise self._transient_host_failure(context_name)
 
         return self._call(context_name, _do)
 
@@ -909,8 +913,7 @@ class DockerHostManager:
             except ValueError:
                 raise
             except Exception as exc:
-                self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}") from exc
+                raise self._transient_host_failure(context_name) from exc
 
         return self._call(context_name, _do)
 
@@ -1116,8 +1119,7 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             except Exception:
-                self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}")
+                raise self._transient_host_failure(context_name)
 
         return self._call(context_name, _do)
 
@@ -1175,8 +1177,7 @@ class DockerHostManager:
             except ValueError:
                 raise
             except Exception as exc:
-                self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}") from exc
+                raise self._transient_host_failure(context_name) from exc
 
         return int(self._call(context_name, _do))
 
@@ -1193,8 +1194,7 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
             except Exception:
-                self._clear_client(context_name)
-                raise HostsUnavailableException(f"transient client failure on {context_name}")
+                raise self._transient_host_failure(context_name)
 
         return self._call(context_name, _do)
 
