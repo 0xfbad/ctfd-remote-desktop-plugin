@@ -7,7 +7,9 @@ import secrets
 import traceback
 import uuid
 from dataclasses import dataclass
-from typing import Callable, TypeIs
+from typing import Callable
+
+from typing_extensions import TypeIs
 from threading import Lock
 
 import docker
