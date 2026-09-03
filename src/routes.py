@@ -33,6 +33,26 @@ from .docker_host_manager import (
     ping_endpoint,
 )
 from .exceptions import HostsUnavailableException
+from .messages import (
+    CONFIRM_REQUIRED,
+    CREATE_ALREADY_RUNNING,
+    CREATE_IN_PROGRESS,
+    EMAIL_VERIFICATION_PAGE,
+    EMAIL_VERIFICATION_REQUIRED,
+    FEATURE_DISABLED,
+    FEATURE_DISABLED_PAGE,
+    INVALID_REQUEST,
+    LIFECYCLE_BUSY,
+    NOT_DESTROYABLE,
+    NO_ACTIVE_SESSION,
+    REPORT_EMPTY,
+    REPORT_TOO_LONG,
+    SERVER_ERROR,
+    SESSION_ALREADY_EXISTS,
+    SESSION_SUSPENDED,
+    SETTINGS_INVALID,
+    STATE_UNKNOWN,
+)
 from .utils import normalize_public_hostname, ratelimit_per_user
 
 logger = logging.getLogger(__name__)
@@ -92,12 +112,26 @@ def _log_admin_target_action(
 
 
 _INFRA_ERROR_TOKENS = ("context", "docker host", "unreachable", "unavailable", "no healthy contexts", "at capacity")
+_TERMINAL_ERRORS = frozenset(
+    {
+        SESSION_SUSPENDED,
+        NOT_DESTROYABLE,
+        NO_ACTIVE_SESSION,
+        STATE_UNKNOWN,
+        # create race losers are a routine double submit, 409 not 500
+        CREATE_IN_PROGRESS,
+        CREATE_ALREADY_RUNNING,
+        LIFECYCLE_BUSY,
+    }
+)
 
 
 def _infra_status(error: str | None) -> int:
     # 503 marks the failure as infrastructure so clients and probes know a retry is worthwhile
     if not error:
         return 500
+    if error in _TERMINAL_ERRORS:
+        return 409
     lowered = error.lower()
     return 503 if any(tok in lowered for tok in _INFRA_ERROR_TOKENS) else 500
 
@@ -165,7 +199,7 @@ def _require_confirm():
     # confirm token keeps a stray post from admin xss or a hijacked session from wiping audit data
     payload = request.get_json(silent=True) or {}
     if payload.get("confirm") != "DELETE":
-        return jsonify({"error": 'confirmation required: post body must contain {"confirm": "DELETE"}'}), 400
+        return jsonify({"error": CONFIRM_REQUIRED}), 400
     return None
 
 
@@ -232,12 +266,24 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         from .models import get_setting
 
         if not get_setting("remote_desktop_enabled", True):
-            return render_template("remote_desktop.html", page_blocked="disabled")
+            return render_template(
+                "remote_desktop.html",
+                page_blocked="disabled",
+                disabled_message=FEATURE_DISABLED_PAGE,
+                verification_message=EMAIL_VERIFICATION_PAGE,
+                server_error_message=SERVER_ERROR,
+            )
 
         user = get_current_user()
 
         if get_setting("require_verified") and not is_admin() and not is_verified():
-            return render_template("remote_desktop.html", page_blocked="unverified")
+            return render_template(
+                "remote_desktop.html",
+                page_blocked="unverified",
+                disabled_message=FEATURE_DISABLED_PAGE,
+                verification_message=EMAIL_VERIFICATION_PAGE,
+                server_error_message=SERVER_ERROR,
+            )
 
         container_info = container_manager.get_container_info(user.id)
         creation_status = container_manager.get_creation_status(user.id)
@@ -275,6 +321,9 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         return render_template(
             "remote_desktop.html",
+            disabled_message=FEATURE_DISABLED_PAGE,
+            verification_message=EMAIL_VERIFICATION_PAGE,
+            server_error_message=SERVER_ERROR,
             container_info=template_container_info,
             vnc_url=vnc_url,
             terminal_url=terminal_url,
@@ -307,15 +356,15 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             effective_settings = get_all_settings()
         except SettingsValidationError as exc:
             logger.error("session admission refused because stored settings are invalid: %s", exc)
-            return jsonify({"error": "Remote Desktop settings are invalid; contact an administrator"}), 503
+            return jsonify({"error": SETTINGS_INVALID}), 503
 
         if not effective_settings["remote_desktop_enabled"]:
-            return jsonify({"error": "Remote Desktop is currently disabled"}), 403
+            return jsonify({"error": FEATURE_DISABLED}), 403
 
         user = get_current_user()
 
         if effective_settings["require_verified"] and not is_admin() and not is_verified():
-            return jsonify({"error": "Email verification required"}), 403
+            return jsonify({"error": EMAIL_VERIFICATION_REQUIRED}), 403
 
         logger.info(f"create session request from user {user.name} (ID: {user.id})")
 
@@ -327,7 +376,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 username=user.name,
                 level="warning",
             )
-            return jsonify({"error": "Session already exists"}), 400
+            return jsonify({"error": SESSION_ALREADY_EXISTS}), 400
 
         creation_status = container_manager.get_creation_status(user.id)
         if creation_status and creation_status.get("status") not in ["failed", "none"]:
@@ -338,7 +387,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 username=user.name,
                 level="warning",
             )
-            return jsonify({"error": "Session creation already in progress"}), 400
+            return jsonify({"error": CREATE_IN_PROGRESS}), 400
 
         # localhost inside the container is the container itself, so firefox needs host.docker.internal
         parsed = urlparse(request.url_root)
@@ -410,7 +459,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         user = get_current_user()
 
         if not container_manager.get_container_info(user.id):
-            return jsonify({"error": "No active session"}), 400
+            return jsonify({"error": NO_ACTIVE_SESSION}), 400
 
         result = container_manager.destroy_container(user.id)
         if not result.get("success"):
@@ -426,7 +475,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         user = get_current_user()
 
         if not container_manager.get_container_info(user.id):
-            return jsonify({"error": "No active session"}), 400
+            return jsonify({"error": NO_ACTIVE_SESSION}), 400
 
         result = container_manager.extend_session_timer(user.id)
         if not result.get("success"):
@@ -442,20 +491,20 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         from .models import DesktopReportModel, get_setting
 
         if not get_setting("remote_desktop_enabled", True):
-            return jsonify({"error": "Remote Desktop is currently disabled"}), 403
+            return jsonify({"error": FEATURE_DISABLED}), 403
 
         user = get_current_user()
 
         if get_setting("require_verified") and not is_admin() and not is_verified():
-            return jsonify({"error": "Email verification required"}), 403
+            return jsonify({"error": EMAIL_VERIFICATION_REQUIRED}), 403
 
         content = (request.form.get("content") or "").strip()
         if not content:
-            return jsonify({"error": "Report cannot be empty"}), 400
+            return jsonify({"error": REPORT_EMPTY}), 400
 
         # cap length so one user cannot dump megabytes through repeated posts under the rate limit
         if len(content) > 5000:
-            return jsonify({"error": "Report is too long (5000 char max)"}), 400
+            return jsonify({"error": REPORT_TOO_LONG}), 400
 
         report = DesktopReportModel(
             user_id=user.id,
@@ -471,6 +520,13 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/api/cleanup", methods=["POST"])
     @admins_only
     def trigger_cleanup():
+        from flask import current_app
+        from . import _claim_scheduler_leader
+
+        # the sweep audits and reconciles every host, the same single leader contract as the scheduled job
+        if not _claim_scheduler_leader(current_app._get_current_object()):
+            return jsonify({"error": "cleanup runs on the scheduler leader"}), 409
+
         container_manager.periodic_cleanup()
         return jsonify({"success": True, "message": "Cleanup triggered"})
 
@@ -844,6 +900,14 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except (json.JSONDecodeError, TypeError):
             return jsonify(cached=False)
 
+        if (
+            not isinstance(cache, dict)
+            or not isinstance(cache.get("matrix"), dict)
+            or "contexts" not in cache
+            or "scanned_at" not in cache
+        ):
+            return jsonify(cached=False)
+
         return jsonify(
             cached=True,
             images=sorted(cache["matrix"].keys()),
@@ -1196,7 +1260,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         from .models import DesktopDockerContextModel
 
         if not isinstance(request.json, dict):
-            return jsonify({"error": "invalid request"}), 400
+            return jsonify({"error": INVALID_REQUEST}), 400
 
         context_name = request.json.get("context_name")
         hostname = request.json.get("hostname")
@@ -1261,7 +1325,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
 
         if not isinstance(request.json, dict):
-            return jsonify({"error": "invalid request"}), 400
+            return jsonify({"error": INVALID_REQUEST}), 400
 
         payload = request.json
 
