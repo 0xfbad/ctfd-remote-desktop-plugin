@@ -22,6 +22,7 @@ from .orchestrator import Orchestrator
 from .container_manager import ContainerManager
 from .routes import create_routes
 from . import event_bus
+from . import workspace_context
 from .database import prepare_database as _prepare_database
 from .database import validate_database_schema as _validate_database_schema  # noqa: F401
 
@@ -360,6 +361,7 @@ def load(app: Flask) -> None:
         orchestrator.load_from_db()
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
+    workspace_context.install(host_manager)
 
     event_bus.init(app, on_message=_make_bus_callback(orchestrator))
 

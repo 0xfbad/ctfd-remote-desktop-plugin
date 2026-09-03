@@ -63,6 +63,23 @@ from .docker_host_manager import (
 )
 from .orchestrator import Orchestrator, ReservationClaim
 from .exceptions import HostsUnavailableException
+from .messages import (
+    CREATE_ALREADY_RUNNING,
+    CREDENTIAL_REVOCATION_PENDING,
+    LIFECYCLE_BUSY,
+    MAX_EXTENSIONS,
+    NOT_DESTROYABLE,
+    NOT_READY_IN_TIME,
+    NO_ACTIVE_CONTAINER,
+    NO_ACTIVE_SESSION,
+    SESSION_ALREADY_EXISTS,
+    SESSION_CHANGED,
+    SESSION_STOPPING,
+    SESSION_SUSPENDED,
+    STATE_UNKNOWN,
+    STOP_OUTCOME_UNKNOWN,
+    TIMER_NOT_STARTED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -775,6 +792,7 @@ class ContainerManager:
             # read once so ports and env can never disagree for one container
             ssh_enabled = bool(self._get_setting("ssh_enabled"))
             web_terminal_enabled = bool(self._get_setting("web_terminal_enabled"))
+            workspace_context_enabled = bool(self._get_setting("workspace_context_enabled"))
 
             initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
             extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
@@ -791,6 +809,7 @@ class ContainerManager:
                 # the image treats an absent var as enabled so always pass an explicit 0
                 "ENABLE_SSH": "1" if ssh_enabled else "0",
                 "ENABLE_TTYD": "1" if web_terminal_enabled else "0",
+                "ENABLE_WORKSPACE_CONTEXT": "1" if workspace_context_enabled else "0",
             }
 
             from flask import current_app
@@ -873,7 +892,8 @@ class ContainerManager:
             progress_callback=_vnc_progress,
         )
         if not vnc_ready:
-            raise Exception(f"VNC server on {check_hostname}:{novnc_port} did not become ready in time")
+            logger.warning("VNC server on %s:%s did not become ready in time", check_hostname, novnc_port)
+            raise Exception(NOT_READY_IN_TIME)
 
     def _commit_created_session(
         self,
@@ -1009,15 +1029,15 @@ class ContainerManager:
         with self.lock:
             existing = self.creation_status.get(user_id)
             if existing and existing.get("status") not in (None, "failed", "ready"):
-                return {"success": False, "error": "Creation already in progress"}
+                return {"success": False, "error": CREATE_ALREADY_RUNNING}
 
             existing_row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
             if existing_row:
-                return {"success": False, "error": "Session already exists"}
+                return {"success": False, "error": SESSION_ALREADY_EXISTS}
 
             claim = self._claim_create_operation(user_id)
             if claim is None:
-                return {"success": False, "error": "Session creation or cleanup already in progress"}
+                return {"success": False, "error": LIFECYCLE_BUSY}
             session_uuid, worker_uuid = claim
             self.creation_status[user_id] = {"status": "queued", "message": "Queued..."}
 
@@ -1149,7 +1169,7 @@ class ContainerManager:
             return {"success": True, "status": "stopping"}
         if lifecycle_state in (LIFECYCLE_HELD, LIFECYCLE_UNPAUSING) and not admin_override:
             db.session.rollback()
-            return {"success": False, "error": "Session suspended - contact your instructor"}
+            return {"success": False, "error": SESSION_SUSPENDED}
         if lifecycle_state not in (
             LIFECYCLE_ACTIVE,
             LIFECYCLE_CLEANUP_PENDING,
@@ -1157,7 +1177,7 @@ class ContainerManager:
             LIFECYCLE_UNPAUSING,
         ):
             db.session.rollback()
-            return {"success": False, "error": "Session is not in a destroyable state"}
+            return {"success": False, "error": NOT_DESTROYABLE}
         return None
 
     def destroy_container(
@@ -1193,10 +1213,10 @@ class ContainerManager:
                     db.session.commit()
                     return {"success": True, "status": "cancelling"}
                 db.session.rollback()
-                return {"success": False, "error": "No active container found"}
+                return {"success": False, "error": NO_ACTIVE_CONTAINER}
             if expected_session_uuid is not None and self._session_uuid(row) != expected_session_uuid:
                 db.session.rollback()
-                return {"success": False, "error": "Session changed before reconciliation"}
+                return {"success": False, "error": SESSION_CHANGED}
 
             # stop plus auto_remove would delete the writable layer held as evidence
             if self._is_paused(row) and reason != END_REASON_ADMIN_KILLED:
@@ -1206,7 +1226,7 @@ class ContainerManager:
                     operation.session_uuid = self._session_uuid(row)
                     operation.updated_at = time.time()
                 db.session.commit()
-                return {"success": False, "error": "Session suspended - contact your instructor"}
+                return {"success": False, "error": SESSION_SUSPENDED}
 
             gate = self._gate_destroy_state(self._row_lifecycle_state(row), reason == END_REASON_ADMIN_KILLED)
             if gate is not None:
@@ -1226,21 +1246,21 @@ class ContainerManager:
         if not admin_override and observed_state == "paused":
             # narrows but does not close the window, a pause can still land after this check
             self._mirror_detected_hold(user_id, session_uuid)
-            return {"success": False, "error": "Session suspended - contact your instructor"}
+            return {"success": False, "error": SESSION_SUSPENDED}
         if not admin_override and observed_state == "unknown":
             db.session.rollback()
-            return {"success": False, "error": "Container state is unknown; refusing destructive cleanup"}
+            return {"success": False, "error": STATE_UNKNOWN}
 
         with self._get_destroy_lock(user_id):
             operation, current = self._reload_session_rows(user_id, row)
             if not self._same_session(current, session_uuid):
                 db.session.rollback()
-                return {"success": False, "error": "Session changed before teardown"}
+                return {"success": False, "error": SESSION_CHANGED}
             if not admin_override and (
                 self._is_paused(current) or self._row_lifecycle_state(current) == LIFECYCLE_HELD
             ):
                 db.session.rollback()
-                return {"success": False, "error": "Session suspended - contact your instructor"}
+                return {"success": False, "error": SESSION_SUSPENDED}
 
             lifecycle_state = self._row_lifecycle_state(current)
             gate = self._gate_destroy_state(lifecycle_state, admin_override)
@@ -1300,7 +1320,7 @@ class ContainerManager:
             logger.warning(
                 f"stop outcome unknown for {container_name}: context unavailable; retaining the capacity reservation"
             )
-            return {"success": False, "error": "Container stop outcome is unknown; cleanup will be retried"}
+            return {"success": False, "error": STOP_OUTCOME_UNKNOWN}
 
         if not cookie_revoked:
             # keep the row because cookie_sid is the only handle for retrying revocation
@@ -1308,13 +1328,13 @@ class ContainerManager:
                 operation, current = self._reload_session_rows(user_id, row)
                 if not self._same_session(current, session_uuid):
                     db.session.rollback()
-                    return {"success": False, "error": "Session changed while credential revocation was pending"}
+                    return {"success": False, "error": SESSION_CHANGED}
                 self._mark_cleanup_pending(
                     operation, current, session_uuid, reason, "CTFd session credential revocation pending"
                 )
             return {
                 "success": False,
-                "error": "Container stopped; session credential revocation will be retried",
+                "error": CREDENTIAL_REVOCATION_PENDING,
             }
 
         # a crash before this commit leaves the row stopping and recovery finishes it
@@ -1335,7 +1355,7 @@ class ContainerManager:
             )
             if not self._same_session(current, session_uuid):
                 db.session.rollback()
-                return {"success": False, "error": "Session changed during teardown"}
+                return {"success": False, "error": SESSION_CHANGED}
             history = history_from_row(current, username, ended_at, reason)
             db.session.add(history)
             db.session.delete(current)
@@ -1506,18 +1526,18 @@ class ContainerManager:
             row = self._locked_active_row(user_id)
             if not row:
                 db.session.rollback()
-                return {"success": False, "error": "No active session"}
+                return {"success": False, "error": NO_ACTIVE_SESSION}
             if self._row_lifecycle_state(row) != LIFECYCLE_ACTIVE:
                 db.session.rollback()
-                return {"success": False, "error": "Session is stopping or suspended"}
+                return {"success": False, "error": SESSION_STOPPING}
 
             if not row.timer_started:
                 db.session.rollback()
-                return {"success": False, "error": "Timer not started"}
+                return {"success": False, "error": TIMER_NOT_STARTED}
 
             if row.extensions_used >= row.max_extensions:
                 db.session.rollback()
-                return {"success": False, "error": "Maximum extensions reached"}
+                return {"success": False, "error": MAX_EXTENSIONS}
 
             now = time.time()
             elapsed = now - row.timer_start_time
@@ -1553,9 +1573,9 @@ class ContainerManager:
     def get_session_timer_status(self, user_id: int) -> TimerStatusDict:
         row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if not row:
-            return {"success": False, "error": "No active session"}
+            return {"success": False, "error": NO_ACTIVE_SESSION}
         if self._row_lifecycle_state(row) != LIFECYCLE_ACTIVE:
-            return {"success": False, "error": "Session is stopping or suspended"}
+            return {"success": False, "error": SESSION_STOPPING}
 
         if not row.timer_started:
             return {"success": True, "started": False, "time_remaining": 0}

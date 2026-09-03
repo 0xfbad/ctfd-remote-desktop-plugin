@@ -79,6 +79,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "rd_network_name": _spec("bridge", max_length=128),
     "ssh_enabled": _spec(True),
     "web_terminal_enabled": _spec(True),
+    "workspace_context_enabled": _spec(False),
     "storage_limit": _spec("", max_length=32, allow_empty=True),
     "log_max_size": _spec("50m", max_length=32, allow_empty=True),
     "log_max_file": _spec(3, minimum=1, maximum=100),
@@ -90,7 +91,8 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "nofile_hard": _spec(1048576, minimum=0, maximum=1048576),
     "cgroup_parent": _spec("", max_length=128, allow_empty=True),
     "capacity_ram_fraction": _spec(0.7, minimum=0.01, maximum=1.0),
-    "image_cache": _spec("", max_length=2000000, allow_empty=True, public=False),
+    # the value column is TEXT, a longer blob would be rejected or truncated by the database
+    "image_cache": _spec("", max_length=60000, allow_empty=True, public=False),
     # this row is the cross worker mutex, every settings write locks it first
     "_settings_revision": _spec(1, minimum=1, maximum=2147483647, public=False),
 }
