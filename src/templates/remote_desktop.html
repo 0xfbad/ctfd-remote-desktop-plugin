@@ -366,13 +366,13 @@
             <i class="fas fa-power-off" style="font-size: 72px; color: #6c757d; margin-bottom: 24px;"></i>
             <h2>Remote Desktop Unavailable</h2>
             <p class="text-muted mt-3" style="font-size: 16px;">
-                This feature has been disabled by an administrator. Check back later.
+                {{ disabled_message }}
             </p>
             {% elif page_blocked == "unverified" %}
             <i class="fas fa-envelope" style="font-size: 72px; color: #6c757d; margin-bottom: 24px;"></i>
             <h2>Verify Your Email</h2>
             <p class="text-muted mt-3" style="font-size: 16px;">
-                You need to verify your email address before you can access Remote Desktop.
+                {{ verification_message }}
             </p>
             <a href="/confirm" class="btn btn-primary btn-lg mt-3">Verify Email</a>
             {% endif %}
@@ -511,7 +511,7 @@ function showSessionError(detail) {
     const metaEl = document.getElementById('session-error-meta');
     const detailEl = document.getElementById('session-error-detail');
     if (!el) return;
-    msgEl.textContent = 'Something went wrong on our end, please try again later or contact an administrator.';
+    msgEl.textContent = {{ server_error_message | tojson }};
     const d = new Date();
     const ts = d.toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true});
     const user = window.init.userName || 'unknown';
@@ -638,6 +638,7 @@ function startSession() {
         if (ok && data.status === 'creating') {
             hideSessionError();
             pollCreationStatus();
+        // these two literals mirror src/messages.py, which is the source of truth
         } else if (data.error === 'Session creation already in progress') {
             hideSessionError();
             pollCreationStatus();

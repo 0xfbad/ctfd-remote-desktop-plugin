@@ -154,11 +154,6 @@
 		height: 400px;
 	}
 
-	.stat-card .card-body {
-		padding: 12px;
-		text-align: center;
-	}
-
 	.cfg-help {
 		display: inline-flex;
 		align-items: center;
@@ -1062,24 +1057,6 @@
 		});
 	}
 
-	function clearHistory() {
-		if (!confirm('Clear all session history? This resets stats and charts.')) return;
-		const fd = new FormData();
-		fd.append('nonce', window.init.csrfNonce);
-		fetch('/remote-desktop/dashboard/api/clear_history', {
-			method: 'POST',
-			headers: { 'X-Requested-With': 'XMLHttpRequest' },
-			credentials: 'same-origin',
-			body: fd
-		})
-		.then(r => r.json())
-		.then(data => {
-			if (data.success) {
-				refreshStats();
-			}
-		});
-	}
-
 	function killAllSessions() {
 		if (!confirm('Purge ALL active sessions? This cannot be undone.')) return;
 
@@ -1361,7 +1338,7 @@
 	}
 
 	window.addEventListener('resize', function() {
-		[topUsersChart, dailyUsageChart, concurrentChart, durationDistChart, endReasonsChart, perHostChart, heatmapChart].forEach(c => {
+		[topUsersChart, durationDistChart, endReasonsChart, perHostChart, heatmapChart].forEach(c => {
 			if (c) c.resize();
 		});
 	});

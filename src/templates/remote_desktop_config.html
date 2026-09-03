@@ -34,6 +34,14 @@
                 </div>
             </div>
         </div>
+        <div class="row mt-2">
+            <div class="col-md-6">
+                <div class="custom-control custom-switch">
+                    <input type="checkbox" class="custom-control-input" id="rd-setting-workspace_context_enabled">
+                    <label class="custom-control-label" for="rd-setting-workspace_context_enabled">Workspace context for the tutor (sends recent commands to the AI tutor)</label>
+                </div>
+            </div>
+        </div>
     </div>
     <div class="row">
         <div class="col-md-6">
@@ -317,7 +325,7 @@
 (function() {
     var rdSettingKeys = [
         'remote_desktop_enabled', 'require_verified',
-        'ssh_enabled', 'web_terminal_enabled',
+        'ssh_enabled', 'web_terminal_enabled', 'workspace_context_enabled',
         'docker_image', 'rd_network_name', 'memory_limit', 'cpu_limit', 'shm_size', 'resolution',
         'memory_reservation', 'swap_limit', 'log_max_size', 'log_max_file',
         'storage_limit', 'cgroup_parent',
