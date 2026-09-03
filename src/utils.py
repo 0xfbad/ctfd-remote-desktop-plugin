@@ -6,6 +6,8 @@ import re
 
 from flask import jsonify, request
 
+from .messages import RATE_LIMITED
+
 
 _DNS_NAME_RE = re.compile(
     r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
@@ -42,11 +44,63 @@ def _response_status(response):
     return getattr(response, "status_code", 200)
 
 
+_RATE_LIMIT_INCR_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
+_RATE_LIMIT_DECR_LUA = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current > 0 then
+    return redis.call('DECR', KEYS[1])
+end
+return current
+"""
+
+
+def _increment_rate_limit(key: str, interval: int) -> int:
+    from . import event_bus
+
+    client = event_bus._get_publish_client()
+    if client is not None:
+        return int(client.eval(_RATE_LIMIT_INCR_LUA, 1, key, interval))
+
+    # no portable atomic increment outside redis, this fallback can undercount under concurrent requests
+    from CTFd.cache import cache
+
+    try:
+        if cache.add(key, 1, timeout=interval):
+            return 1
+    except (AttributeError, NotImplementedError):
+        pass
+    current = int(cache.get(key) or 0) + 1
+    cache.set(key, current, timeout=interval)
+    return current
+
+
+def _decrement_rate_limit(key: str, interval: int) -> None:
+    from . import event_bus
+
+    client = event_bus._get_publish_client()
+    if client is not None:
+        client.eval(_RATE_LIMIT_DECR_LUA, 1, key)
+        return
+
+    from CTFd.cache import cache
+
+    current = int(cache.get(key) or 0)
+    if current > 0:
+        # the cache backend cannot rewrite a value without also restarting its window
+        cache.set(key, current - 1, timeout=interval)
+
+
 def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_user", count_4xx=True):
     def decorator(f):
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
-            from CTFd.cache import cache
             from CTFd.utils.user import get_current_user, get_ip
 
             if request.method != method:
@@ -58,35 +112,19 @@ def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_use
                 bucket = f"u{user.id}"
             else:
                 bucket = f"ip{get_ip()}"
-            key = f"{key_prefix}:{bucket}:{request.endpoint}"
+            # the effective policy is part of the key so a limit change does not inherit an old bucket
+            key = f"ctfd-remote-desktop:{key_prefix}:{bucket}:{request.endpoint}:{limit}:{interval}"
 
-            current = cache.get(key)
-            if current is not None and int(current) >= limit:
-                resp = jsonify(
-                    {
-                        "code": 429,
-                        "message": f"Too many requests. Limit is {limit} requests in {interval} seconds",
-                    }
-                )
+            if _increment_rate_limit(key, interval) > limit:
+                resp = jsonify({"code": 429, "message": RATE_LIMITED.format(limit=limit, interval=interval)})
                 resp.status_code = 429
                 resp.headers["Retry-After"] = str(interval)
                 return resp
 
-            def _bump():
-                if current is None:
-                    cache.set(key, 1, timeout=interval)
-                else:
-                    cache.set(key, int(current) + 1, timeout=interval)
-
-            if count_4xx:
-                _bump()
-                return f(*args, **kwargs)
-
             response = f(*args, **kwargs)
-            status = _response_status(response)
-            # skip 4xx so cheap rejections do not burn the user budget
-            if status < 400 or status >= 500:
-                _bump()
+            # a 4xx burst still occupies budget until the compensating decrements land
+            if not count_4xx and 400 <= _response_status(response) < 500:
+                _decrement_rate_limit(key, interval)
             return response
 
         return wrapper

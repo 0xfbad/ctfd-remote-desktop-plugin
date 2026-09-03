@@ -13,7 +13,8 @@ from .docker_host_manager import (
     SESSION_LABEL_MANAGED,
     parse_size,
 )
-from .exceptions import HostsUnavailableException, HostsAtCapacityException, CAPACITY_MESSAGE
+from .exceptions import HostsUnavailableException, HostsAtCapacityException
+from .messages import AT_CAPACITY, NO_HEALTHY_HOSTS
 from .event_logger import event_logger
 
 logger = logging.getLogger(__name__)
@@ -433,7 +434,7 @@ class Orchestrator:
                 level="warning",
                 metadata=meta,
             )
-        raise HostsAtCapacityException(CAPACITY_MESSAGE)
+        raise HostsAtCapacityException(AT_CAPACITY)
 
     def select_and_reserve(self, claim: ReservationClaim | None = None) -> str:
         for attempt in range(2):
@@ -442,7 +443,7 @@ class Orchestrator:
                 fences = dict(self.context_fences)
                 healthy = [n for n, h in self.health.items() if h and n in fences]
             if not healthy:
-                raise HostsUnavailableException("no healthy contexts available")
+                raise HostsUnavailableException(NO_HEALTHY_HOSTS)
             snapshot = self._capacity_snapshot(healthy)
             candidates = rank_candidates(healthy, snapshot)
             for name in candidates:
@@ -465,7 +466,7 @@ class Orchestrator:
         with self.lock:
             healthy = [n for n, h in self.health.items() if h]
         if not healthy:
-            raise HostsUnavailableException("no healthy docker contexts available")
+            raise HostsUnavailableException(NO_HEALTHY_HOSTS)
         snapshot = self._capacity_snapshot(healthy)
         candidates = rank_candidates(healthy, snapshot)
         if candidates:

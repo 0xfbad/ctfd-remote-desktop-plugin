@@ -12,8 +12,5 @@ class HostsUnavailableException(RemoteDesktopException):
     pass
 
 
-CAPACITY_MESSAGE = "All servers are at capacity right now. Please try again in a few minutes."
-
-
 class HostsAtCapacityException(HostsUnavailableException):
     pass
