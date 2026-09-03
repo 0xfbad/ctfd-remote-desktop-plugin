@@ -52,6 +52,7 @@ _persistence_stats: dict[str, int] = {
     "write_failures": 0,
     "dropped_overflow": 0,
     "dropped_retry_exhausted": 0,
+    "dropped_row_rejected": 0,
 }
 
 
@@ -335,32 +336,64 @@ def _row_for_insert(row: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in row.items() if key != _PERSIST_RETRY_FIELD}
 
 
-def _write_persist_batch(app: Any, batch: list[dict[str, Any]]) -> bool:
+def _write_rows_individually(db: Any, model: Any, batch: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
+    from sqlalchemy.exc import DataError, IntegrityError
+
+    written = 0
+    rejected = 0
+    retry: list[dict[str, Any]] = []
+    for row in batch:
+        try:
+            db.session.bulk_insert_mappings(model, [_row_for_insert(row)])
+            db.session.commit()
+            written += 1
+        except (IntegrityError, DataError):
+            db.session.rollback()
+            rejected += 1
+        except Exception:
+            logger.warning("event log persistence row failed", exc_info=True)
+            db.session.rollback()
+            retry.append(row)
+
+    if rejected:
+        total = _increment_persistence_stat("dropped_row_rejected", rejected)
+        logger.error("event persistence dropped rejected rows=%d total=%d", rejected, total)
+    return written, retry
+
+
+def _write_persist_batch(app: Any, batch: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]] | None:
+    """returns rows written and rows still needing a retry, or None when the whole batch failed"""
     try:
         with app.app_context():
             from CTFd.models import db
+            from sqlalchemy.exc import DataError, IntegrityError
             from .models import DesktopEventLogModel
 
-            committed = False
             try:
-                db.session.bulk_insert_mappings(DesktopEventLogModel, [_row_for_insert(row) for row in batch])
-                db.session.commit()
-                committed = True
+                try:
+                    db.session.bulk_insert_mappings(DesktopEventLogModel, [_row_for_insert(row) for row in batch])
+                    db.session.commit()
+                    return len(batch), []
+                except (IntegrityError, DataError):
+                    # one duplicate event_id or overlong field must not discard the rest of the batch
+                    logger.warning("event log persistence batch rejected, retrying row by row", exc_info=True)
+                    db.session.rollback()
+                    return _write_rows_individually(db, DesktopEventLogModel, batch)
             except Exception:
                 logger.warning("event log persistence batch failed", exc_info=True)
                 try:
                     db.session.rollback()
                 except Exception:
                     logger.warning("event log persistence rollback failed", exc_info=True)
+                return None
             finally:
                 try:
                     db.session.remove()
                 except Exception:
                     logger.warning("event log persistence session cleanup failed", exc_info=True)
-            return committed
     except Exception:
         logger.warning("event log drainer iteration crashed", exc_info=True)
-        return False
+        return None
 
 
 def _requeue_failed_batch(q: Any, batch: list[dict[str, Any]]) -> None:
@@ -384,9 +417,14 @@ def _requeue_failed_batch(q: Any, batch: list[dict[str, Any]]) -> None:
 
 
 def _process_persist_batch(app: Any, q: Any, batch: list[dict[str, Any]]) -> bool:
-    if _write_persist_batch(app, batch):
-        _increment_persistence_stat("persisted", len(batch))
-        return True
+    outcome = _write_persist_batch(app, batch)
+    if outcome is not None:
+        written, retry = outcome
+        if written:
+            _increment_persistence_stat("persisted", written)
+        if not retry:
+            return True
+        batch = retry
 
     _increment_persistence_stat("write_failures")
     # the unique event_id makes a retry after an ambiguous commit collide instead of duplicating
