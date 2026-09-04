@@ -89,8 +89,11 @@ def _age(seconds: float) -> str:
 
 def _parse(payload: str) -> list[tuple[int, int, str, str]]:
     rows: list[tuple[int, int, str, str]] = []
-    # the first element of a tail -c read can be a partial line
-    for line in payload.split("\n")[1:]:
+    lines = payload.split("\n")
+    # tail -c starts mid line only when the log outgrew the read window, a short log begins at a boundary
+    if len(payload.encode("utf-8", "replace")) >= READ_BYTES:
+        lines = lines[1:]
+    for line in lines:
         fields = line.split("\t")
         if len(fields) != 5:
             continue
