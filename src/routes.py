@@ -4,6 +4,7 @@ import base64
 import time
 import datetime
 import logging
+from functools import wraps
 import json
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
-from CTFd.utils.user import get_current_user, is_admin, is_verified, get_ip
+from CTFd.utils.user import authed, get_current_user, is_admin, is_verified, get_ip
 from .container_manager import ContainerManager, ContainerInfoDict, TimerDict, TimerStatusDict
 from .orchestrator import Orchestrator
 from .event_logger import event_logger, get_persisted_events, EventDict
@@ -1043,13 +1044,23 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             resp.headers[authorization_header] = f"Basic {token}"
         return resp
 
+    def _subrequest_authed(fn):
+        # nginx auth_request maps anything but 401 and 403 to a 500, so never redirect anonymous callers
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not authed():
+                return "", 401
+            return fn(*args, **kwargs)
+
+        return wrapper
+
     @remote_desktop_bp.route("/remote-desktop/vnc/auth", methods=["GET"])
-    @authed_only
+    @_subrequest_authed
     def vnc_auth():
         return _proxy_auth("X-VNC-User-ID", "novnc_port", "X-VNC-Host", "X-VNC-Port")
 
     @remote_desktop_bp.route("/remote-desktop/terminal/auth", methods=["GET"])
-    @authed_only
+    @_subrequest_authed
     def terminal_auth():
         return _proxy_auth(
             "X-Terminal-User-ID",
