@@ -199,7 +199,11 @@ class Orchestrator:
             for ctx in contexts
         }
 
+        previous_endpoints = self.host_manager.get_endpoints()
         self.host_manager.load_contexts(contexts, probe=probe)
+        current_endpoints = self.host_manager.get_endpoints()
+        # a context keeps its published health only while its resolved endpoint string is untouched
+        unchanged = {name for name, url in current_endpoints.items() if previous_endpoints.get(name) == url}
 
         # health check runs outside the lock, every probe below is a network call
         new_health: dict[str, bool] = {}
@@ -221,10 +225,26 @@ class Orchestrator:
                     new_cap_stale.add(name)
                 events.append(event)
         else:
-            # every context stays a health key so the first tick iterates it, and stale so the tick derives
-            # the real cap before publishing health, admission must never see the fallback cap
-            new_health = {str(ctx.context_name): False for ctx in contexts}
-            new_cap_stale = set(new_health)
+            with self.lock:
+                carried_health = dict(self.health)
+                carried_caps = dict(self.auto_caps)
+                carried_stale = set(self._cap_stale)
+            for ctx in contexts:
+                name = str(ctx.context_name)
+                cap_is_publishable = ctx.max_containers is not None or (
+                    name in carried_caps and name not in carried_stale
+                )
+                if name in unchanged and cap_is_publishable:
+                    # boot carries nothing, a live worker keeps serving the health its own tick already published
+                    new_health[name] = carried_health.get(name, False)
+                    if name in carried_caps:
+                        new_auto_caps[name] = carried_caps[name]
+                    if name in carried_stale:
+                        new_cap_stale.add(name)
+                else:
+                    # new, moved, or newly auto capped, the tick derives the real cap before admission sees one
+                    new_health[name] = False
+                    new_cap_stale.add(name)
 
         with self.lock:
             self.health = new_health
@@ -243,15 +263,16 @@ class Orchestrator:
             healthy_count = sum(1 for h in new_health.values() if h)
             logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
         else:
-            logger.info(f"loaded {len(contexts)} contexts (catalog only, health deferred to the first scheduler tick)")
+            carried = sum(1 for name, healthy in new_health.items() if healthy)
+            logger.info(f"loaded {len(contexts)} contexts (catalog only, {carried} health entries carried forward)")
 
     def note_initial_probe_done(self) -> None:
         self._initial_probe.set()
 
     def _await_initial_probe(self, timeout: float = 5.0) -> None:
         # a catalog only boot leaves health unpopulated, park the requester instead of probing on the request path
-        # this does not cover the whole boot window, the event is set only after a full tick finishes
-        # so a request landing mid tick still fails closed with no healthy hosts instead of hanging
+        # the event is set by the first published context result, a request landing before that fails closed
+        # with no healthy hosts instead of hanging
         self._initial_probe.wait(timeout)
 
     def has_healthy_context(self) -> bool:
@@ -535,7 +556,12 @@ class Orchestrator:
             if self._catalog_is_current():
                 return
             logger.warning("Docker context catalog changed without a local reload; refreshing before admission")
-            self._load_from_db_serialized()
+            # catalog only, a request must never pay a dead host probe, the health tick republishes reachability
+            already_probed = self._initial_probe.is_set()
+            self._load_from_db_serialized(probe=False)
+            if already_probed:
+                # this worker already finished a probe cycle, re-parking later requests would add a fresh stall
+                self._initial_probe.set()
 
     def _count_committed_sessions(self) -> tuple[dict[str, int], Counter[str], dict[str, set[str]], bool]:
         from CTFd.models import db
@@ -750,6 +776,8 @@ class Orchestrator:
                 else:
                     self.health[name] = False
                     changed_to_unhealthy = current_health
+                # one published result is enough to unpark requesters, waiting for a dead peer costs them the budget
+                self._initial_probe.set()
 
             if changed_to_healthy:
                 logger.info(f"health_check: context {name} recovered")

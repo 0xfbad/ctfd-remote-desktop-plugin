@@ -77,26 +77,42 @@ def _install_bounded_ssh_adapter() -> None:
         # the base is resolved at runtime so mypy cannot prove it is a class
         class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
             _ctfd_bounded_connect = True
+            # the attribute name is shared with challenge-containers so either install order finds a local
+            _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT
 
             def _create_paramiko_client(self, base_url):
                 super()._create_paramiko_client(base_url)
-                timeout = getattr(_SSH_CONNECT_TIMEOUT, "value", DEFAULT_CLIENT_TIMEOUT)
+                # resolved off the class so a foreign plugin adapter keeps owning its own local
+                timeout = getattr(
+                    getattr(type(self), "_ctfd_ssh_connect_timeout", None), "value", DEFAULT_CLIENT_TIMEOUT
+                )
                 _apply_ssh_connect_timeouts(self.ssh_params, timeout)
 
         api_client.SSHHTTPAdapter = BoundedSSHHTTPAdapter
         _SSH_ADAPTER_PATCHED = True
 
 
+def _ssh_timeout_local() -> threading.local:
+    """the installed adapter may belong to another plugin, publish the per call timeout where it will read it"""
+    try:
+        from docker.api import client as api_client
+
+        return getattr(api_client.SSHHTTPAdapter, "_ctfd_ssh_connect_timeout", _SSH_CONNECT_TIMEOUT)
+    except (ImportError, AttributeError):
+        return _SSH_CONNECT_TIMEOUT
+
+
 def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT):
     if not endpoint.startswith("ssh://"):
         return docker.DockerClient(base_url=endpoint, timeout=timeout)
     _install_bounded_ssh_adapter()
-    _SSH_CONNECT_TIMEOUT.value = timeout
+    local = _ssh_timeout_local()
+    local.value = timeout
     try:
         return docker.DockerClient(base_url=endpoint, timeout=timeout)
     finally:
         try:
-            del _SSH_CONNECT_TIMEOUT.value
+            del local.value
         except AttributeError:
             pass
 
@@ -434,38 +450,63 @@ class DockerHostManager:
             return None
         return client
 
-    def _get_client(self, context_name: str) -> docker.DockerClient:
-        tid = threading.get_ident()
-        current_thread = threading.current_thread()
-        to_close: list[docker.DockerClient] = []
-        missing_context = False
-        cooling_down = False
-        client_error: Exception | None = None
+    def _connect_and_store(
+        self, context_name: str, key: ClientKey, owner: threading.Thread, url: str
+    ) -> docker.DockerClient:
+        """the handshake runs unlocked, an ssh connect to a dead host would otherwise stall every lock reader"""
+        try:
+            client = _new_docker_client(url, timeout=DEFAULT_CLIENT_TIMEOUT)
+        except Exception:
+            with self._lock:
+                self._client_failures[context_name] = time.monotonic() + CLIENT_FAILURE_COOLDOWN
+            raise
+
+        loser: docker.DockerClient | None = None
         with self._lock:
-            key = (context_name, tid)
+            if self._context_configs.get(context_name) != url:
+                # the catalog moved during the handshake, this transport points at a retired endpoint
+                loser, client = client, None
+            else:
+                cached = self._clients.get(key)
+                if (
+                    cached is not None
+                    and self._client_threads.get(key) is owner
+                    and not self._entry_is_stale_locked(key)
+                ):
+                    loser, client = client, cached  # a peer stored one on this key while we connected
+                else:
+                    stale = self._pop_entry_locked(key)
+                    if stale is not None:
+                        loser = stale
+                    self._client_failures.pop(context_name, None)
+                    self._clients[key] = client
+                    self._client_generations[key] = self._config_generation
+                    self._client_epochs[key] = self._context_client_epochs.get(context_name, 0)
+                    self._client_threads[key] = owner
+
+        if loser is not None:
+            try:
+                loser.close()
+            except Exception:
+                pass
+        if client is None:
+            raise HostsUnavailableException(f"context '{context_name}' changed endpoint while connecting")
+        return client
+
+    def _get_client(self, context_name: str) -> docker.DockerClient:
+        current_thread = threading.current_thread()
+        key = (context_name, threading.get_ident())
+        to_close: list[docker.DockerClient] = []
+        url: str | None = None
+        cooling_down = False
+        with self._lock:
             self._sweep_dead_entries_locked(to_close)
             self._sweep_owned_stale_entries_locked(current_thread, to_close)
             client = self._take_current_client_locked(key, current_thread, to_close)
-
             if client is None:
                 url = self._context_configs.get(context_name)
-                if url and self._client_failures.get(context_name, 0.0) > time.monotonic():
-                    # a cached client is never checked against the cooldown, only a fresh connect is skipped
-                    cooling_down = True
-                elif url:
-                    try:
-                        client = _new_docker_client(url, timeout=DEFAULT_CLIENT_TIMEOUT)
-                    except Exception as exc:
-                        client_error = exc  # defer the raise so entries retired above still get closed
-                        self._client_failures[context_name] = time.monotonic() + CLIENT_FAILURE_COOLDOWN
-                    else:
-                        self._client_failures.pop(context_name, None)
-                        self._clients[key] = client
-                        self._client_generations[key] = self._config_generation
-                        self._client_epochs[key] = self._context_client_epochs.get(context_name, 0)
-                        self._client_threads[key] = current_thread
-                else:
-                    missing_context = True
+                # a cached client is never checked against the cooldown, only a fresh connect is skipped
+                cooling_down = bool(url) and self._client_failures.get(context_name, 0.0) > time.monotonic()
 
         # close outside the lock, paramiko teardown can block on ssh for seconds
         for old in to_close:
@@ -473,15 +514,15 @@ class DockerHostManager:
                 old.close()
             except Exception:
                 pass
-        if client_error is not None:
-            raise client_error
+
+        if client is not None:
+            return client
         if cooling_down:
             raise HostsUnavailableException(HOST_UNREACHABLE)
-        if missing_context:
+        if not url:
             # typed so callers map a stale row miss to 503 instead of 500
             raise HostsUnavailableException(f"no client for context '{context_name}'")
-        assert client is not None
-        return client
+        return self._connect_and_store(context_name, key, current_thread, url)
 
     def _transient_host_failure(self, context_name: str) -> HostsUnavailableException:
         logger.warning("transient client failure on %s", context_name, exc_info=True)
@@ -552,6 +593,13 @@ class DockerHostManager:
         new_configs: dict[str, str] = {}
         new_pub_hostnames: dict[str, str] = {}
         new_connected_contexts: set[str] = set()
+        probed_ok: set[str] = set()
+        probe_failed: set[str] = set()
+
+        now = time.monotonic()
+        with self._lock:
+            previous_configs = dict(self._context_configs)
+            cooling_down = {name for name, until in self._client_failures.items() if until > now}
 
         effective_profile = get_all_settings()
         rd_network = str(effective_profile["rd_network_name"] or "bridge")
@@ -575,6 +623,11 @@ class DockerHostManager:
             if not probe:
                 # the first health tick repopulates reachability, boot must not pay a connect per context
                 logger.info(f"catalog: context '{ctx.context_name}' -> {endpoint}")
+                continue
+
+            if ctx.context_name in cooling_down and previous_configs.get(ctx.context_name) == endpoint:
+                # the negative cache already knows this host is down, one connect per cooldown, not per reload
+                logger.info(f"context '{ctx.context_name}' is inside the connect cooldown, probe skipped")
                 continue
 
             def _check(endpoint=endpoint, ctx_name=ctx.context_name):
@@ -604,7 +657,7 @@ class DockerHostManager:
                         except Exception as e:
                             logger.debug(f"context {ctx_name} backing-fs check failed: {e}")
                     return None
-                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException) as e:
+                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, OSError) as e:
                     return e
                 finally:
                     if client:
@@ -620,8 +673,10 @@ class DockerHostManager:
 
             if err is None:
                 new_connected_contexts.add(ctx.context_name)
+                probed_ok.add(ctx.context_name)
                 logger.info(f"connected to context '{ctx.context_name}' at {endpoint}")
             else:
+                probe_failed.add(ctx.context_name)
                 logger.error(f"could not connect to context '{ctx.context_name}': {err}")
 
         create_limit = effective_profile["max_concurrent_creates"]
@@ -629,12 +684,25 @@ class DockerHostManager:
             raise ValueError("max_concurrent_creates must be an integer")
 
         with self._lock:
+            # only a vanished or moved context invalidates its cooldown, clearing all of them costs one connect each
+            unchanged = {name for name, url in new_configs.items() if self._context_configs.get(name) == url}
+            self._client_failures = {
+                name: until
+                for name, until in self._client_failures.items()
+                if name in unchanged and name not in probed_ok
+            }
+            for name in probe_failed:
+                self._client_failures[name] = time.monotonic() + CLIENT_FAILURE_COOLDOWN
+
             self._context_configs = new_configs
             self._pub_hostnames = new_pub_hostnames
             self._connected_contexts = new_connected_contexts
             self._config_generation += 1
-            self._client_failures.clear()  # a reload can change the endpoint
             self._init_semaphores(create_limit)
+
+    def get_endpoints(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._context_configs)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
         with self._lock:
