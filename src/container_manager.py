@@ -1121,7 +1121,15 @@ class ContainerManager:
                 result["hostname"] = _esc(context)
             return result
         with self.lock:
-            return self.creation_status.get(user_id)
+            status = self.creation_status.get(user_id)
+        if not status or status.get("status") not in ("ready", "cancelled"):
+            return status
+        # the terminal entry is per worker and only the leader sweeps it, so it must not block a create once the row is gone
+        if DesktopContainerInfoModel.query.filter_by(user_id=user_id).first() is not None:
+            return status
+        with self.lock:
+            self.creation_status.pop(user_id, None)
+        return None
 
     def _reload_session_rows(
         self,
