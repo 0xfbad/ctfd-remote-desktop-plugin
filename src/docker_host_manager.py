@@ -35,6 +35,7 @@ LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
 
 DEFAULT_CLIENT_TIMEOUT = 10  # seconds of docker sdk http read time, the ssh connect phase is bounded separately
+CLIENT_FAILURE_COOLDOWN = 60  # seconds a failed connect is remembered so one dead host costs one connect
 THREADPOOL_SIZE = 4  # caps concurrent in flight blocking calls per host
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
@@ -351,6 +352,11 @@ class DockerHostManager:
         self._context_client_epochs: dict[str, int] = {}
         self._client_threads: dict[ClientKey, threading.Thread] = {}
 
+        # a failed connect is remembered so a per row loop pays one timeout per host, not one per row
+        # cleared by a successful ping, so the bound is the health tick on any worker that runs one
+        # and the flat cooldown otherwise
+        self._client_failures: dict[str, float] = {}
+
         self._config_generation: int = 0
         self._lock: threading.RLock = threading.RLock()  # reentrant so wrapped ops reenter locked helpers
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
@@ -433,6 +439,7 @@ class DockerHostManager:
         current_thread = threading.current_thread()
         to_close: list[docker.DockerClient] = []
         missing_context = False
+        cooling_down = False
         client_error: Exception | None = None
         with self._lock:
             key = (context_name, tid)
@@ -442,12 +449,17 @@ class DockerHostManager:
 
             if client is None:
                 url = self._context_configs.get(context_name)
-                if url:
+                if url and self._client_failures.get(context_name, 0.0) > time.monotonic():
+                    # a cached client is never checked against the cooldown, only a fresh connect is skipped
+                    cooling_down = True
+                elif url:
                     try:
                         client = _new_docker_client(url, timeout=DEFAULT_CLIENT_TIMEOUT)
                     except Exception as exc:
                         client_error = exc  # defer the raise so entries retired above still get closed
+                        self._client_failures[context_name] = time.monotonic() + CLIENT_FAILURE_COOLDOWN
                     else:
+                        self._client_failures.pop(context_name, None)
                         self._clients[key] = client
                         self._client_generations[key] = self._config_generation
                         self._client_epochs[key] = self._context_client_epochs.get(context_name, 0)
@@ -463,6 +475,8 @@ class DockerHostManager:
                 pass
         if client_error is not None:
             raise client_error
+        if cooling_down:
+            raise HostsUnavailableException(HOST_UNREACHABLE)
         if missing_context:
             # typed so callers map a stale row miss to 503 instead of 500
             raise HostsUnavailableException(f"no client for context '{context_name}'")
@@ -476,6 +490,7 @@ class DockerHostManager:
 
     def _clear_client(self, context_name: str) -> None:
         # mark peers stale by epoch instead of closing a transport another worker may still be using
+        # the connect cooldown deliberately survives this, _clear_client runs on every swallowed failure
         key = (context_name, threading.get_ident())
         with self._lock:
             self._context_client_epochs[context_name] = self._context_client_epochs.get(context_name, 0) + 1
@@ -531,7 +546,7 @@ class DockerHostManager:
             except ValueError:
                 pass
 
-    def load_contexts(self, contexts: list[DesktopDockerContextModel]) -> None:
+    def load_contexts(self, contexts: list[DesktopDockerContextModel], probe: bool = True) -> None:
         from .models import get_all_settings
 
         new_configs: dict[str, str] = {}
@@ -556,6 +571,11 @@ class DockerHostManager:
             # keep the resolved endpoint even if the probe below fails, the health check needs a url to recover it
             new_configs[ctx.context_name] = endpoint
             new_pub_hostnames[ctx.context_name] = public_hostname
+
+            if not probe:
+                # the first health tick repopulates reachability, boot must not pay a connect per context
+                logger.info(f"catalog: context '{ctx.context_name}' -> {endpoint}")
+                continue
 
             def _check(endpoint=endpoint, ctx_name=ctx.context_name):
                 client = None
@@ -613,6 +633,7 @@ class DockerHostManager:
             self._pub_hostnames = new_pub_hostnames
             self._connected_contexts = new_connected_contexts
             self._config_generation += 1
+            self._client_failures.clear()  # a reload can change the endpoint
             self._init_semaphores(create_limit)
 
     def get_pub_hostname(self, context_name: str) -> str | None:
@@ -655,6 +676,8 @@ class DockerHostManager:
             if endpoint_is_current:
                 if reachable:
                     self._connected_contexts.add(context_name)
+                    # a failed ping never arms the cooldown, one flap must not fast fail teardown of live sessions
+                    self._client_failures.pop(context_name, None)
                 else:
                     self._connected_contexts.discard(context_name)
         if not endpoint_is_current:

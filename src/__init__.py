@@ -10,6 +10,7 @@ import shlex
 import sys
 import tempfile
 import threading
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 import docker
@@ -290,6 +291,7 @@ def _reconcile_containers(
             str(row.container_id),
             ContainerManager._row_lifecycle_state(row),
             str(row.lifecycle_reason or END_REASON_RECONCILIATION),
+            ContainerManager._session_uuid(row),
         )
         for row in DesktopContainerInfoModel.query.all()
     ]
@@ -297,7 +299,7 @@ def _reconcile_containers(
     removed = 0
     kept = 0
 
-    for user_id, docker_context, container_id, lifecycle_state, lifecycle_reason in rows:
+    for user_id, docker_context, container_id, lifecycle_state, lifecycle_reason, session_uuid in rows:
         if lifecycle_state == LIFECYCLE_HELD:
             kept += 1
             continue
@@ -330,10 +332,12 @@ def _reconcile_containers(
 
             reason = END_REASON_RECONCILIATION
 
+        # the reconcile now runs against live traffic, fence every destroy so a recreated session survives
         result = container_manager.destroy_container(
             user_id,
             reason=reason,
             log_destruction=True,
+            expected_session_uuid=session_uuid,
         )
         if result.get("success"):
             removed += 1
@@ -352,13 +356,19 @@ def load(app: Flask) -> None:
 
     _prepare_database(app)
 
+    # only when serving HTTP, not CLI commands where scheduler threads prevent exit
+    # only the serving path defers the probe, because only it starts a scheduler that can complete it
+    _serving = (
+        "gunicorn" in sys.modules or os.environ.get("WERKZEUG_RUN_MAIN") or (len(sys.argv) > 1 and sys.argv[1] == "run")
+    )
+
     host_manager = DockerHostManager()
     orchestrator = Orchestrator(host_manager)
 
     with app.app_context():
         _seed_defaults()
         _seed_local_context()
-        orchestrator.load_from_db()
+        orchestrator.load_from_db(probe=not _serving)
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
     workspace_context.install(host_manager)
@@ -381,10 +391,6 @@ def load(app: Flask) -> None:
     with open(config_tpl) as f:
         app.overridden_templates["remote_desktop_config.html"] = f.read()
 
-    # only when serving HTTP, not CLI commands where scheduler threads prevent exit
-    _serving = (
-        "gunicorn" in sys.modules or os.environ.get("WERKZEUG_RUN_MAIN") or (len(sys.argv) > 1 and sys.argv[1] == "run")
-    )
     if not _serving:
         logger.info("remote desktop plugin loaded (scheduler skipped, CLI mode)")
         return
@@ -393,23 +399,18 @@ def load(app: Flask) -> None:
     event_logger_module.start_persistence_drainer(app)
     atexit.register(event_logger_module.stop_persistence_drainer)
 
-    # followers continue below as contenders and take leadership on a later tick if the owner dies
-    if _claim_scheduler_leader(app):
-        with app.app_context():
-            _reconcile_containers(app, host_manager, orchestrator, container_manager)
-
     from .models import get_setting
     from apscheduler.schedulers.gevent import GeventScheduler
 
     scheduler = GeventScheduler()
 
-    def _with_app_ctx(fn: Callable[[], None]) -> Callable[[], None]:
+    def _with_app_ctx(fn: Callable[[], None], leader_only: bool = True) -> Callable[[], None]:
         def wrapper() -> None:
             with app.app_context():
                 from CTFd.models import db
 
                 try:
-                    if not _claim_scheduler_leader(app):
+                    if leader_only and not _claim_scheduler_leader(app):
                         return
                     fn()
                 finally:
@@ -417,24 +418,48 @@ def load(app: Flask) -> None:
 
         return wrapper
 
+    _startup_reconciled = False
+
+    def _cleanup_tick() -> None:
+        nonlocal _startup_reconciled
+        if not _startup_reconciled:
+            # the leader reconciles once per process, a worker promoted later still gets a startup pass
+            _reconcile_containers(app, host_manager, orchestrator, container_manager)
+            _startup_reconciled = True
+        container_manager.periodic_cleanup()
+
+    def _health_tick() -> None:
+        # every worker probes, a follower that never ran health_check served frozen boot health forever
+        leader = False
+        try:
+            leader = _claim_scheduler_leader(app)
+        except Exception:
+            logger.warning("scheduler leadership check failed during health check", exc_info=True)
+        try:
+            orchestrator.health_check(log_events=leader)
+        finally:
+            orchestrator.note_initial_probe_done()
+
     cleanup_interval = get_setting("cleanup_interval")
 
     scheduler.add_job(
-        func=_with_app_ctx(container_manager.periodic_cleanup),
+        func=_with_app_ctx(_cleanup_tick),
         trigger="interval",
         seconds=cleanup_interval,
         misfire_grace_time=30,
         coalesce=True,
         id="expiry_check",
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=3),
     )
 
     scheduler.add_job(
-        func=_with_app_ctx(orchestrator.health_check),
+        func=_with_app_ctx(_health_tick, leader_only=False),
         trigger="interval",
         seconds=30,
         misfire_grace_time=30,
         coalesce=True,
         id="health_check",
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=1),
     )
 
     scheduler.add_job(

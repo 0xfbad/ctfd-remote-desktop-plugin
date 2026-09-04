@@ -4,7 +4,7 @@ import time
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from threading import Lock
+from threading import Event, Lock
 
 from .docker_host_manager import (
     IMAGE_CONTRACT_VERSION,
@@ -94,6 +94,9 @@ class Orchestrator:
         # serializes reloads so a slow old reload cannot overwrite a newer host snapshot
         self._load_lock = Lock()
         self.context_fences: dict[str, ContextFence] = {}
+        # cleared only by a catalog only load, so probing callers and tests are unaffected
+        self._initial_probe = Event()
+        self._initial_probe.set()
 
     def _derive_auto_cap(self, context_name: str, connected: bool) -> tuple[int, bool]:
         """stale means host ram was unreadable and the fallback cap was used"""
@@ -107,9 +110,9 @@ class Orchestrator:
         )
         return cap, not mem_total
 
-    def load_from_db(self) -> None:
+    def load_from_db(self, probe: bool = True) -> None:
         with self._load_lock:
-            self._load_from_db_serialized()
+            self._load_from_db_serialized(probe=probe)
 
     def _probe_context(
         self,
@@ -178,7 +181,7 @@ class Orchestrator:
             )
         return healthy, auto_cap, stale, event
 
-    def _load_from_db_serialized(self) -> None:
+    def _load_from_db_serialized(self, probe: bool = True) -> None:
         from .models import DesktopDockerContextModel, get_setting
 
         # read first so a racing settings commit fails admission closed, not pairing old settings with a new revision
@@ -196,36 +199,60 @@ class Orchestrator:
             for ctx in contexts
         }
 
-        self.host_manager.load_contexts(contexts)
-        connected = set(self.host_manager.get_connected_contexts())
-        docker_image = str(get_setting("docker_image"))
-        storage_limit = str(get_setting("storage_limit") or "").strip()
+        self.host_manager.load_contexts(contexts, probe=probe)
 
         # health check runs outside the lock, every probe below is a network call
         new_health: dict[str, bool] = {}
         new_auto_caps: dict[str, int] = {}
         new_cap_stale: set[str] = set()
         events: list[tuple[str, str, str, dict[str, str | int | ImageInfo | None]]] = []
-        for ctx in contexts:
-            name = ctx.context_name
-            healthy, auto_cap, stale, event = self._probe_context(ctx, name in connected, docker_image, storage_limit)
-            new_health[name] = healthy
-            new_auto_caps[name] = auto_cap
-            if stale:
-                new_cap_stale.add(name)
-            events.append(event)
+        if probe:
+            connected = set(self.host_manager.get_connected_contexts())
+            docker_image = str(get_setting("docker_image"))
+            storage_limit = str(get_setting("storage_limit") or "").strip()
+            for ctx in contexts:
+                name = ctx.context_name
+                healthy, auto_cap, stale, event = self._probe_context(
+                    ctx, name in connected, docker_image, storage_limit
+                )
+                new_health[name] = healthy
+                new_auto_caps[name] = auto_cap
+                if stale:
+                    new_cap_stale.add(name)
+                events.append(event)
+        else:
+            # every context stays a health key so the first tick iterates it, and stale so the tick derives
+            # the real cap before publishing health, admission must never see the fallback cap
+            new_health = {str(ctx.context_name): False for ctx in contexts}
+            new_cap_stale = set(new_health)
 
         with self.lock:
             self.health = new_health
             self.auto_caps = new_auto_caps
             self._cap_stale = new_cap_stale
             self.context_fences = new_context_fences
+            if probe:
+                self._initial_probe.set()
+            else:
+                self._initial_probe.clear()
 
         for event_type, message, level, metadata in events:
             event_logger.log_event(event_type, message, level=level, metadata=metadata)  # type: ignore[arg-type]
 
-        healthy_count = sum(1 for h in new_health.values() if h)
-        logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
+        if probe:
+            healthy_count = sum(1 for h in new_health.values() if h)
+            logger.info(f"loaded {len(contexts)} contexts, {healthy_count} healthy")
+        else:
+            logger.info(f"loaded {len(contexts)} contexts (catalog only, health deferred to the first scheduler tick)")
+
+    def note_initial_probe_done(self) -> None:
+        self._initial_probe.set()
+
+    def _await_initial_probe(self, timeout: float = 5.0) -> None:
+        # a catalog only boot leaves health unpopulated, park the requester instead of probing on the request path
+        # this does not cover the whole boot window, the event is set only after a full tick finishes
+        # so a request landing mid tick still fails closed with no healthy hosts instead of hanging
+        self._initial_probe.wait(timeout)
 
     def has_healthy_context(self) -> bool:
         with self.lock:
@@ -437,6 +464,7 @@ class Orchestrator:
         raise HostsAtCapacityException(AT_CAPACITY)
 
     def select_and_reserve(self, claim: ReservationClaim | None = None) -> str:
+        self._await_initial_probe()
         for attempt in range(2):
             self._refresh_catalog_if_stale()
             with self.lock:
@@ -462,6 +490,7 @@ class Orchestrator:
 
     def admission_check(self) -> None:
         # probe only, no capacity is reserved
+        self._await_initial_probe()
         self._refresh_catalog_if_stale()
         with self.lock:
             healthy = [n for n, h in self.health.items() if h]
@@ -667,7 +696,7 @@ class Orchestrator:
             )
         return status
 
-    def health_check(self) -> None:
+    def health_check(self, log_events: bool = True) -> None:
         from .models import get_setting
 
         with self.lock:
@@ -724,17 +753,19 @@ class Orchestrator:
 
             if changed_to_healthy:
                 logger.info(f"health_check: context {name} recovered")
-                event_logger.log_event(
-                    "host_healthy",
-                    f"context {name} marked healthy",
-                    level="info",
-                    metadata={"context_name": name},
-                )
+                if log_events:
+                    event_logger.log_event(
+                        "host_healthy",
+                        f"context {name} marked healthy",
+                        level="info",
+                        metadata={"context_name": name},
+                    )
             elif changed_to_unhealthy:
                 logger.warning(f"health_check: context {name} marked unhealthy: {reason}")
-                event_logger.log_event(
-                    "host_unhealthy",
-                    f"context {name} marked unhealthy: {reason}",
-                    level="warning",
-                    metadata={"context_name": name, "reason": reason},
-                )
+                if log_events:
+                    event_logger.log_event(
+                        "host_unhealthy",
+                        f"context {name} marked unhealthy: {reason}",
+                        level="warning",
+                        metadata={"context_name": name, "reason": reason},
+                    )
