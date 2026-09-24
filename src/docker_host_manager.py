@@ -883,6 +883,15 @@ class DockerHostManager:
                     f"desktop image {image!r} on context {context_name!r} did not resolve to an immutable image ID"
                 )
 
+            container_hostname = hostname or name
+            if not hostname:
+                try:
+                    container_hostname = client.info().get("Name") or name
+                except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
+                    logger.warning("could not read runner hostname for %s, using container name", context_name)
+                    self._clear_client(context_name)
+                    client = self._get_client(context_name)
+
             last_err: Exception | None = None
             container = None
             for _ in range(50):
@@ -891,7 +900,7 @@ class DockerHostManager:
                     container = client.containers.run(
                         resolved_image_id,
                         name=name,
-                        hostname=hostname or name,
+                        hostname=container_hostname,
                         detach=True,
                         auto_remove=True,
                         init=True,

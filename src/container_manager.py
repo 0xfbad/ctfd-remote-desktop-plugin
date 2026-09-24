@@ -865,8 +865,6 @@ class ContainerManager:
                 context_name=context_name,
                 image=docker_image,
                 name=container_name,
-                # a context name can carry characters that are invalid in a kernel hostname
-                hostname=container_name,
                 env=container_env,
                 ports=_connection_ports(ssh_enabled, web_terminal_enabled),
                 shm_size=shm_size,
