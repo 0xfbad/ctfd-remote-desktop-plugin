@@ -14,7 +14,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 import docker
 import gevent.monkey
-import gevent.threadpool
+import gevent.pool
 import paramiko
 
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
@@ -36,7 +36,7 @@ DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docke
 
 DEFAULT_CLIENT_TIMEOUT = 10  # seconds of docker sdk http read time, the ssh connect phase is bounded separately
 CLIENT_FAILURE_COOLDOWN = 60  # seconds a failed connect is remembered so one dead host costs one connect
-THREADPOOL_SIZE = 4  # caps concurrent in flight blocking calls per host
+HOST_CONCURRENCY = 4
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
 ContainerResult = dict[str, str | dict[str, int]]
@@ -50,15 +50,12 @@ _SSH_ADAPTER_PATCHED = False
 
 
 def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
-    """the docker sdk timeout is not forwarded to SSHClient.connect
-    without these a blackholed runner occupies a context worker forever
-    """
+    # the docker sdk does not forward its timeout to SSHClient.connect
     bounded = max(1.0, float(timeout))
     params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded)
 
 
 def _install_bounded_ssh_adapter() -> None:
-    """process wide timeout fix for docker-py 7.x"""
     global _SSH_ADAPTER_PATCHED
     if _SSH_ADAPTER_PATCHED:
         return
@@ -74,15 +71,13 @@ def _install_bounded_ssh_adapter() -> None:
             _SSH_ADAPTER_PATCHED = True
             return
 
-        # the base is resolved at runtime so mypy cannot prove it is a class
         class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
             _ctfd_bounded_connect = True
-            # the attribute name is shared with challenge-containers so either install order finds a local
+            # both plugins use this attribute so either adapter install order shares the timeout
             _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT
 
             def _create_paramiko_client(self, base_url):
                 super()._create_paramiko_client(base_url)
-                # resolved off the class so a foreign plugin adapter keeps owning its own local
                 timeout = getattr(
                     getattr(type(self), "_ctfd_ssh_connect_timeout", None), "value", DEFAULT_CLIENT_TIMEOUT
                 )
@@ -93,7 +88,7 @@ def _install_bounded_ssh_adapter() -> None:
 
 
 def _ssh_timeout_local() -> threading.local:
-    """the installed adapter may belong to another plugin, publish the per call timeout where it will read it"""
+    # another plugin may own the installed adapter and its timeout local
     try:
         from docker.api import client as api_client
 
@@ -194,9 +189,7 @@ def _metadata_name_and_endpoint(meta: object) -> tuple[str | None, str | None]:
 
 
 def _validate_endpoint(candidate: str, context_name: str) -> str | None:
-    """allow only the one local socket or a well formed ssh transport
-    context metadata is operator controlled but must not widen the control plane to unauthenticated tcp daemons
-    """
+    # operator metadata must not enable unauthenticated tcp daemons
     if not candidate or candidate != candidate.strip() or any(c.isspace() for c in candidate):
         return None
     if candidate.startswith("unix://"):
@@ -238,7 +231,6 @@ def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
                 return validated
 
     if hostname:
-        # a manually configured hostname may already carry a scheme, never build ssh://root@ssh://host
         candidate = hostname if "://" in hostname else f"ssh://{hostname if '@' in hostname else f'root@{hostname}'}"
         validated = _validate_endpoint(candidate, context_name)
         if validated is not None:
@@ -359,8 +351,8 @@ class DockerHostManager:
         # reachability is separate from the endpoint catalog so a startup probe failure does not drop the host
         self._connected_contexts: set[str] = set()
 
-        # keyed per thread because paramiko channels bind gevent events to the hub of the creating thread
         self._clients: dict[ClientKey, docker.DockerClient] = {}
+        self._idle_clients: dict[ClientKey, list[tuple[int, int, docker.DockerClient]]] = {}
         self._client_generations: dict[ClientKey, int] = {}
 
         # an epoch bump lets each worker replace its own client instead of closing a peer paramiko transport
@@ -368,33 +360,80 @@ class DockerHostManager:
         self._context_client_epochs: dict[str, int] = {}
         self._client_threads: dict[ClientKey, threading.Thread] = {}
 
-        # a failed connect is remembered so a per row loop pays one timeout per host, not one per row
-        # cleared by a successful ping, so the bound is the health tick on any worker that runs one
-        # and the flat cooldown otherwise
+        # share failed connects across rows so an unavailable host costs one timeout per cooldown
         self._client_failures: dict[str, float] = {}
 
         self._config_generation: int = 0
-        self._lock: threading.RLock = threading.RLock()  # reentrant so wrapped ops reenter locked helpers
+        self._lock: threading.RLock = threading.RLock()
         self._semaphores: dict[str, threading.BoundedSemaphore] = {}
         self._semaphore_limits: dict[str, int] = {}
 
-        # per context pool isolates blocking paramiko calls so one hung host cannot starve the others
-        self._threadpools: dict[str, gevent.threadpool.ThreadPool] = {}
+        self._pools: dict[ClientKey, gevent.pool.Pool] = {}
 
-    def _get_threadpool(self, context_name: str) -> gevent.threadpool.ThreadPool:
+    def _get_pool(self, context_name: str) -> gevent.pool.Pool:
+        key = (context_name, threading.get_native_id())
         with self._lock:
-            pool = self._threadpools.get(context_name)
+            pool = self._pools.get(key)
             if pool is None:
-                pool = gevent.threadpool.ThreadPool(maxsize=THREADPOOL_SIZE)
-                self._threadpools[context_name] = pool
+                pool = gevent.pool.Pool(size=HOST_CONCURRENCY)
+                self._pools[key] = pool
             return pool
 
     def _call(self, context_name: str, fn, *args, **kwargs):
-        # cli paths have no gevent hub and pool.apply hangs in futex there, so run inline
         if not gevent.monkey.is_module_patched("threading"):
             return fn(*args, **kwargs)
-        pool = self._get_threadpool(context_name)
-        return pool.apply(fn, args=args, kwds=kwargs)
+
+        if (context_name, threading.get_ident()) in self._clients:
+            return fn(*args, **kwargs)
+
+        def leased_call():
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._release_client(context_name)
+
+        # paramiko transport greenlets need the serving hub to keep running between requests
+        return self._get_pool(context_name).apply(leased_call)
+
+    def _release_client(self, context_name: str) -> None:
+        key = (context_name, threading.get_ident())
+        with self._lock:
+            stale = self._entry_is_stale_locked(key)
+            client = self._pop_entry_locked(key)
+            if client is None:
+                return
+            if not stale:
+                idle_key = (context_name, threading.get_native_id())
+                entry = (self._config_generation, self._context_client_epochs.get(context_name, 0), client)
+                self._idle_clients.setdefault(idle_key, []).append(entry)
+                return
+        self._close_clients([client])
+
+    @staticmethod
+    def _close_clients(clients: list[docker.DockerClient]) -> None:
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _take_idle_client_locked(self, context_name: str, to_close: list[docker.DockerClient]):
+        native_id = threading.get_native_id()
+        for key, entries in list(self._idle_clients.items()):
+            if key[1] != native_id:
+                continue
+            valid = []
+            for generation, epoch, client in entries:
+                if generation == self._config_generation and epoch == self._context_client_epochs.get(key[0], 0):
+                    valid.append((generation, epoch, client))
+                else:
+                    to_close.append(client)
+            if valid:
+                self._idle_clients[key] = valid
+            else:
+                self._idle_clients.pop(key)
+        idle = self._idle_clients.get((context_name, native_id), [])
+        return idle.pop()[2] if idle else None
 
     def _pop_entry_locked(self, key: ClientKey) -> docker.DockerClient | None:
         client = self._clients.pop(key, None)
@@ -464,7 +503,6 @@ class DockerHostManager:
         loser: docker.DockerClient | None = None
         with self._lock:
             if self._context_configs.get(context_name) != url:
-                # the catalog moved during the handshake, this transport points at a retired endpoint
                 loser, client = client, None
             else:
                 cached = self._clients.get(key)
@@ -473,7 +511,7 @@ class DockerHostManager:
                     and self._client_threads.get(key) is owner
                     and not self._entry_is_stale_locked(key)
                 ):
-                    loser, client = client, cached  # a peer stored one on this key while we connected
+                    loser, client = client, cached
                 else:
                     stale = self._pop_entry_locked(key)
                     if stale is not None:
@@ -504,16 +542,17 @@ class DockerHostManager:
             self._sweep_owned_stale_entries_locked(current_thread, to_close)
             client = self._take_current_client_locked(key, current_thread, to_close)
             if client is None:
+                client = self._take_idle_client_locked(context_name, to_close)
+                if client is not None:
+                    self._clients[key] = client
+                    self._client_generations[key] = self._config_generation
+                    self._client_epochs[key] = self._context_client_epochs.get(context_name, 0)
+                    self._client_threads[key] = current_thread
+            if client is None:
                 url = self._context_configs.get(context_name)
-                # a cached client is never checked against the cooldown, only a fresh connect is skipped
                 cooling_down = bool(url) and self._client_failures.get(context_name, 0.0) > time.monotonic()
 
-        # close outside the lock, paramiko teardown can block on ssh for seconds
-        for old in to_close:
-            try:
-                old.close()
-            except Exception:
-                pass
+        self._close_clients(to_close)
 
         if client is not None:
             return client
@@ -530,22 +569,18 @@ class DockerHostManager:
         return HostsUnavailableException(HOST_UNREACHABLE)
 
     def _clear_client(self, context_name: str) -> None:
-        # mark peers stale by epoch instead of closing a transport another worker may still be using
-        # the connect cooldown deliberately survives this, _clear_client runs on every swallowed failure
+        # retain the connect cooldown when failures invalidate transports
         key = (context_name, threading.get_ident())
         with self._lock:
             self._context_client_epochs[context_name] = self._context_client_epochs.get(context_name, 0) + 1
             old = self._pop_entry_locked(key)
-        if old is not None:
-            try:
-                old.close()
-            except Exception:
-                pass
+            to_close = [old] if old is not None else []
+            idle_key = (context_name, threading.get_native_id())
+            to_close.extend(entry[2] for entry in self._idle_clients.pop(idle_key, []))
+        self._close_clients(to_close)
 
     def _init_semaphores(self, limit: int) -> None:
-        """not distributed, every ctfd process enforces this create limit on its own
-        matching semaphore objects survive a reload so in flight acquisitions stay in one generation
-        """
+        # retain unchanged semaphores so reloads cannot split in flight acquisitions across generations
         with self._lock:
             old_semaphores = self._semaphores
             old_limits = self._semaphore_limits
@@ -561,7 +596,6 @@ class DockerHostManager:
             self._semaphore_limits = dict.fromkeys(new_semaphores, limit)
 
     def acquire_semaphore(self, context_name: str, timeout: int = 10) -> threading.BoundedSemaphore | None:
-        """returns the exact object the caller must release"""
         with self._lock:
             sem = self._semaphores.get(context_name)
         if sem is None:
@@ -573,9 +607,7 @@ class DockerHostManager:
         return sem
 
     def release_semaphore(self, semaphore: threading.BoundedSemaphore | str | None) -> None:
-        """a context name is still accepted for compatibility
-        new callers pass the object from acquire_semaphore, name lookup is not generation safe across a reload
-        """
+        # legacy names remain accepted, callers must release the acquired object to survive reloads
         if isinstance(semaphore, str):
             with self._lock:
                 sem = self._semaphores.get(semaphore)
@@ -626,7 +658,6 @@ class DockerHostManager:
                 continue
 
             if ctx.context_name in cooling_down and previous_configs.get(ctx.context_name) == endpoint:
-                # the negative cache already knows this host is down, one connect per cooldown, not per reload
                 logger.info(f"context '{ctx.context_name}' is inside the connect cooldown, probe skipped")
                 continue
 
@@ -646,7 +677,6 @@ class DockerHostManager:
                         except Exception as e:
                             logger.warning(f"context {ctx_name} network check failed for '{rd_network}': {e}")
                     if storage_limit:
-                        # storage_opt on a non xfs data root makes the daemon refuse every create, warn at load
                         try:
                             backing = dict(client.info().get("DriverStatus") or []).get("Backing Filesystem", "")
                             if backing and backing != "xfs":
@@ -712,7 +742,6 @@ class DockerHostManager:
         return self.get_connection_hostnames(context_name)[1]
 
     def get_connection_hostnames(self, context_name: str) -> tuple[str | None, str | None]:
-        """returns the user facing address and the readiness address"""
         with self._lock:
             configured = self._pub_hostnames.get(context_name)
             endpoint = self._context_configs.get(context_name, "")
@@ -738,7 +767,6 @@ class DockerHostManager:
         # fresh client, a cached paramiko transport wedges on dead tcp sockets past the health check interval
         reachable = ping_endpoint(url, timeout=3)
 
-        # a probe that finishes after a reload must not overwrite the new catalog reachability
         with self._lock:
             endpoint_is_current = self._context_configs.get(context_name) == url
             if endpoint_is_current:
@@ -777,7 +805,6 @@ class DockerHostManager:
         cap_drop = [c.strip() for c in str(effective_profile["cap_drop"]).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(effective_profile["cap_add"]).split(",") if c.strip()]
 
-        # an empty or zero setting omits the kwarg entirely, storage_opt is xfs only and breaks the ext4 dev box
         extra_kwargs: dict = {}
 
         storage_limit = str(effective_profile["storage_limit"] or "").strip()
@@ -787,7 +814,7 @@ class DockerHostManager:
 
         log_max_size = str(effective_profile["log_max_size"] or "").strip()
         if log_max_size:
-            # max-file must be a string, the daemon rejects integer log opts
+            # the daemon rejects integer log options
             extra_kwargs["log_config"] = {
                 "type": "json-file",
                 "config": {"max-size": log_max_size, "max-file": str(int(effective_profile["log_max_file"] or 3))},
@@ -913,7 +940,6 @@ class DockerHostManager:
                     if attempt < 4:
                         time.sleep(0.3)
             except Exception:
-                # a reload failure usually means the transport is dead, drop the client and let cleanup reconnect
                 self._clear_client(context_name)
                 raise
 
@@ -970,8 +996,6 @@ class DockerHostManager:
         container_name: str,
         expected_labels: dict[str, str],
     ) -> dict[str, str]:
-        """compares immutable id and name so a stale dashboard request cannot delete a replacement container"""
-
         def _do() -> dict[str, str]:
             client = self._get_client(context_name)
             try:
@@ -1049,7 +1073,6 @@ class DockerHostManager:
         return results
 
     def list_containers_by_prefix(self, context_name: str, name_prefix: str) -> list[dict[str, object]]:
-        # lenient, an error returns empty so a flapping host cannot break a read only status loop
         def _do() -> list[dict[str, object]]:
             try:
                 client = self._get_client(context_name)
@@ -1061,7 +1084,7 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def list_session_containers_strict(self, context_name: str, name_prefix: str) -> list[dict[str, object]] | None:
-        # strict, an error returns none so destructive callers can tell an empty host from an unreachable one
+        # destructive callers must distinguish an empty host from an unreachable one
         def _do() -> list[dict[str, object]] | None:
             try:
                 client = self._get_client(context_name)
@@ -1100,9 +1123,7 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def check_storage_limit_compatibility(self, context_name: str, storage_limit: str) -> bool:
-        """a writable layer quota needs the overlay2 driver on an xfs backing filesystem
-        unknown daemon metadata counts as ineligible, a create time mismatch strands a durable reservation
-        """
+        # reject unsupported quota settings before they can strand a creation reservation
         if not storage_limit.strip():
             return True
 
@@ -1145,7 +1166,7 @@ class DockerHostManager:
                 attrs = img.attrs or {}
                 size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
                 raw = attrs.get("Created", "")[:19]
-                # reproducible build images report 1980-01-01, so fall back to the last tag time
+                # reproducible builds use a fixed creation timestamp, use the last tag time instead
                 if raw.startswith("1980"):
                     last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                     if last_tag:
@@ -1222,9 +1243,6 @@ class DockerHostManager:
         *,
         minimum_remaining: int = 60,
     ) -> int:
-        """docker archive io still works while the cgroup is frozen so the watchdog cannot observe the replacement
-        the file mtime records the last credited instant so a retry adds only the new part of the hold
-        """
 
         def _do() -> int:
             client = self._get_client(context_name)
@@ -1241,6 +1259,7 @@ class DockerHostManager:
                 if credited_mtime > now + 1:
                     raise ValueError("maximum-lifetime deadline mtime is in the future")
 
+                # archive mtime prevents retries from crediting the same hold twice
                 credit_from = max(paused_at, credited_mtime)
                 credit_seconds = max(0, math.ceil(now - credit_from))
                 new_deadline = current_deadline + credit_seconds
@@ -1249,6 +1268,7 @@ class DockerHostManager:
                 if new_deadline > 9_999_999_999:
                     raise ValueError("maximum-lifetime deadline extension overflowed")
 
+                # archive io works while paused so the watchdog cannot observe a partial replacement
                 if credit_seconds:
                     archive = _build_deadline_archive(new_deadline, int(now))
                     if container.put_archive(_DEADLINE_STATE_DIR, archive) is False:
@@ -1290,7 +1310,6 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def get_host_memory(self, context_name: str) -> int | None:
-        # total host memory in bytes, the orchestrator derives per host session caps from it
         if context_name not in self._context_configs:
             return None
 
@@ -1305,9 +1324,7 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def inspect_container_state(self, context_name: str, container_id: str) -> ContainerState:
-        """destructive callers must treat paused and unknown as holds
-        not_found is returned only when docker explicitly reports the container missing
-        """
+        # destructive callers must preserve paused and unknown sessions
 
         def _do():
             try:

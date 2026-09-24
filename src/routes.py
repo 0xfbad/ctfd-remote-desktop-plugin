@@ -46,6 +46,7 @@ from .messages import (
     LIFECYCLE_BUSY,
     NOT_DESTROYABLE,
     NO_ACTIVE_SESSION,
+    NO_ACTIVE_CONTAINER,
     REPORT_EMPTY,
     REPORT_TOO_LONG,
     SERVER_ERROR,
@@ -607,11 +608,17 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         target_user = Users.query.filter_by(id=user_id).first()
         if not target_user:
             return jsonify({"error": "User not found"}), 404
-        target_username = username_or_fallback(target_user, user_id)
+        result = container_manager.destroy_container(user_id, reason=END_REASON_ADMIN_KILLED)
+        if not result.get("success"):
+            error = str(result.get("error", "Failed to kill container"))
+            status = 400 if error in {NO_ACTIVE_CONTAINER, NO_ACTIVE_SESSION} else _infra_status(error)
+            return jsonify({"error": error}), status
 
+        target_username = username_or_fallback(target_user, user_id)
+        action_text = "requested session cancellation" if result.get("status") == "cancelling" else "killed session"
         _log_admin_target_action(
             admin_user,
-            f"admin {admin_user.name} killed session for {target_username}",
+            f"admin {admin_user.name} {action_text} for {target_username}",
             "kill",
             user_id,
             target_username,
@@ -619,12 +626,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             level="warning",
         )
 
-        result = container_manager.destroy_container(user_id, reason=END_REASON_ADMIN_KILLED)
-
-        if result.get("success"):
-            return jsonify({"success": True})
-        error = str(result.get("error", "Failed to kill container"))
-        return jsonify({"error": error}), _infra_status(error)
+        return jsonify({"success": True})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
     @admins_only

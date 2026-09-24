@@ -7,7 +7,7 @@ import secrets
 import traceback
 import uuid
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, TypeVar
 
 from typing_extensions import TypeIs
 from threading import Lock
@@ -82,6 +82,21 @@ from .messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_TransactionResult = TypeVar("_TransactionResult")
+
+
+def _retry_transaction(action: Callable[[], _TransactionResult]) -> _TransactionResult:
+    for attempt in range(5):
+        try:
+            return action()
+        except OperationalError as exc:
+            db.session.rollback()
+            if not exc.orig.args or exc.orig.args[0] not in (1205, 1213) or attempt == 4:
+                raise
+            time.sleep(0.02 * (attempt + 1) + secrets.randbelow(20) / 1000)
+    raise AssertionError("transaction retry exhausted")
 
 
 def _display_name(user_id: int) -> tuple[Users | None, str]:
@@ -297,6 +312,21 @@ class ContainerManager:
         except AttributeError:
             # the unit suite swaps the model base for a mock, real models always expose query
             return None
+        if create and db.engine.dialect.name in ("mysql", "mariadb"):
+            from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+            now = time.time()
+            # insert before locking so absent users cannot share an innodb gap lock
+            statement = mysql_insert(DesktopSessionOperationModel.__table__).values(
+                user_id=user_id,
+                operation_uuid=str(uuid.uuid4()),
+                state=OP_IDLE,
+                cancel_requested=False,
+                capacity_reserved=False,
+                created_at=now,
+                updated_at=now,
+            )
+            db.session.execute(statement.on_duplicate_key_update(user_id=statement.inserted.user_id))
         row = query.populate_existing().with_for_update().first()
         if not isinstance(getattr(row, "user_id", None), int):
             direct = query.first()
@@ -329,16 +359,19 @@ class ContainerManager:
             db.session.add(row)
             db.session.flush()
             return row
-        except (IntegrityError, OperationalError):  # innodb reports this race as duplicate key or deadlock
+        except IntegrityError:
             # another worker created the stable mutex first, lock the winner row
             db.session.rollback()
             query = DesktopSessionOperationModel.query.filter_by(user_id=user_id)
             return query.populate_existing().with_for_update().first()
 
     def _claim_create_operation(self, user_id: int) -> tuple[str, str] | None:
+        return _retry_transaction(lambda: self._claim_create_operation_once(user_id))
+
+    def _claim_create_operation_once(self, user_id: int) -> tuple[str, str] | None:
         db.session.rollback()
         operation = self._locked_operation(user_id, create=True)
-        active = self._locked_active_row(user_id)
+        active = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
         if active is not None:
             db.session.rollback()
             return None
@@ -905,11 +938,28 @@ class ContainerManager:
         context_name: str,
         container_name: str,
     ) -> None:
+        _retry_transaction(
+            lambda: self._commit_created_session_once(
+                user_id, session_uuid, worker_uuid, fenced, row, context_name, container_name
+            )
+        )
+
+    def _commit_created_session_once(
+        self,
+        user_id: int,
+        session_uuid: str,
+        worker_uuid: str,
+        fenced: bool,
+        row: DesktopContainerInfoModel,
+        context_name: str,
+        container_name: str,
+    ) -> None:
         try:
             if fenced:
                 db.session.rollback()
                 operation = self._locked_operation(user_id)
-                existing = self._locked_active_row(user_id)
+                # the operation mutex owns this user, locking an absent active row would lock other users too
+                existing = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
                 if (
                     operation is None
                     or operation.session_uuid != session_uuid
