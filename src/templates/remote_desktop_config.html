@@ -51,15 +51,15 @@
                 <input type="text" class="form-control" id="rd-setting-docker_image">
             </div>
             <div class="form-group">
-                <label>Docker Network <span class="cfg-help" data-tip="The single Docker network joined by every new session. The default bridge network requires no additional setup.">?</span></label>
+                <label>Docker Network <span class="cfg-help" data-tip="The shared Docker network joined by new sessions. Selecting a network does not isolate students from one another; runner network policy must enforce that separation.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-rd_network_name" placeholder="bridge">
             </div>
             <div class="form-group">
-                <label>Memory Limit <span class="cfg-help" data-tip="Maximum RAM each desktop can use (e.g. 512m, 1g). Increase if users run memory-heavy applications, decrease to fit more desktops on one server.">?</span></label>
+                <label>Memory Limit <span class="cfg-help" data-tip="Maximum RAM each desktop can use (e.g. 4g, 8g), not RAM reserved per desktop. Changes apply to new sessions.">?</span></label>
                 <input type="text" class="form-control" id="rd-setting-memory_limit">
             </div>
             <div class="form-group">
-                <label>CPU Limit <span class="cfg-help" data-tip="Maximum CPU cores each desktop can use (e.g. 1.0 = one core, 0.5 = half a core). Lower values let you run more desktops per server, higher values give users a snappier experience.">?</span></label>
+                <label>CPU Limit <span class="cfg-help" data-tip="CPU quota requested for each desktop (e.g. 2.0 = two logical CPUs). Verify the runner scheduler enforces this quota under load before relying on it for student isolation.">?</span></label>
                 <input type="number" class="form-control no-spin" id="rd-setting-cpu_limit" min="0.1" max="64" step="0.1" required>
             </div>
             <div class="form-group">
@@ -242,7 +242,7 @@
                 <div class="form-group">
                     <label>Max Sessions</label>
                     <input type="number" class="form-control" id="rd-edit-ctx-max-containers" min="0" placeholder="auto">
-                    <small class="form-text text-muted">Max concurrent sessions on this host. Blank = auto (capacity RAM fraction &times; host RAM / memory limit). 0 = drain: no new sessions.</small>
+                    <small class="form-text text-muted">Max concurrent sessions on this host. A positive value overrides the RAM estimate and permits overcommit. Blank = automatic RAM budget (capacity RAM fraction &times; host RAM / memory limit, rounded down); unreadable RAM blocks new sessions. 0 = drain: no new sessions.</small>
                 </div>
                 <div class="form-check">
                     <input type="checkbox" class="form-check-input" id="rd-edit-ctx-enabled">
@@ -364,20 +364,20 @@
             var settings = data.settings || {};
             rdSettingKeys.forEach(function(key) {
                 var el = document.getElementById('rd-setting-' + key);
-                if (el && settings[key] !== undefined) {
-                    if (el.type === 'checkbox') {
-                        el.checked = settings[key] === true || settings[key] === 'true' || settings[key] === 1;
-                    } else {
-                        el.value = settings[key];
-                    }
+                if (!el || settings[key] === undefined) return;
+
+                if (el.type === 'checkbox') {
+                    el.checked = settings[key] === true || settings[key] === 'true' || settings[key] === 1;
+                } else {
+                    el.value = settings[key];
                 }
             });
             durationFields.forEach(function(df) {
-                if (settings[df.key] !== undefined) {
-                    var hm = secsToHM(settings[df.key]);
-                    document.getElementById(df.h).value = hm.h;
-                    document.getElementById(df.m).value = hm.m;
-                }
+                if (settings[df.key] === undefined) return;
+
+                var hm = secsToHM(settings[df.key]);
+                document.getElementById(df.h).value = hm.h;
+                document.getElementById(df.m).value = hm.m;
             });
         })
         .catch(function(err) { console.error('Error loading RD settings:', err); });
@@ -388,16 +388,16 @@
         var payload = {};
         rdSettingKeys.forEach(function(key) {
             var el = document.getElementById('rd-setting-' + key);
-            if (el) {
-                if (el.type === 'checkbox') {
-                    payload[key] = el.checked;
-                } else if (rdIntegerSettingKeys.indexOf(key) !== -1) {
-                    payload[key] = Number.parseInt(el.value, 10);
-                } else if (rdFloatSettingKeys.indexOf(key) !== -1) {
-                    payload[key] = Number.parseFloat(el.value);
-                } else {
-                    payload[key] = el.value;
-                }
+            if (!el) return;
+
+            if (el.type === 'checkbox') {
+                payload[key] = el.checked;
+            } else if (rdIntegerSettingKeys.indexOf(key) !== -1) {
+                payload[key] = Number.parseInt(el.value, 10);
+            } else if (rdFloatSettingKeys.indexOf(key) !== -1) {
+                payload[key] = Number.parseFloat(el.value);
+            } else {
+                payload[key] = el.value;
             }
         });
         durationFields.forEach(function(df) {
@@ -694,7 +694,7 @@
             hostname: document.getElementById('rd-edit-ctx-hostname').value || null,
             pub_hostname: document.getElementById('rd-edit-ctx-pub-hostname').value,
             weight: parseInt(document.getElementById('rd-edit-ctx-weight').value) || 1,
-            max_containers: rawMax === '' ? null : parseInt(rawMax, 10), // 0 means drain, no falsy fallback
+            max_containers: rawMax === '' ? null : parseInt(rawMax, 10),
             enabled: document.getElementById('rd-edit-ctx-enabled').checked
         };
         if (!payload.pub_hostname) { CTFd.ui.ezq.ezAlert({ title: 'Error', body: 'Public hostname is required', button: 'OK' }); return; }
@@ -775,8 +775,10 @@
             var latest = null;
             ctxs.forEach(function(ctx) {
                 var e = mx[img] && mx[img][ctx];
-                if (e && e.available && e.info && e.info.contract_status === 'compatible') {
-                    if (!latest || e.info.created > latest.created) latest = e.info;
+                if (!e || !e.available || !e.info) return;
+
+                if (e.info.contract_status === 'compatible' && (!latest || e.info.created > latest.created)) {
+                    latest = e.info;
                 }
             });
             return latest;
@@ -809,8 +811,7 @@
 
                 var info = entry.info;
 
-                // compare by size not by hash, a locally built image gets a different id on every host
-                var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb;
+                var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb; // independent builds can have different image ids
                 var sizeDiff = ref ? Math.abs(info.size_mb - ref.size_mb) : 0;
                 var threshold = ref ? Math.max(ref.size_mb * 0.05, 1) : 0;
                 var isStale = ref && !isRef && sizeDiff > threshold;
