@@ -1,0 +1,15 @@
+{
+  "upstream": "https://github.com/novnc/noVNC/tree/v1.6.0",
+  "debian_package": "novnc 1:1.6.0-2",
+  "image": "sha256:3f3fa19e5701acb5783420897a57c8e5c85107df489491d011b7c04f0383abc8",
+  "modifications": {
+    "app/ui.js": "retain pre-1672 reconnect behavior by making the reconnect branch an else if"
+  },
+  "content_hash": "sha256 of sorted relative path, newline, file sha256, newline, truncated to 16 hex characters",
+  "debian_archive": "https://deb.debian.org/debian/pool/main/n/novnc/novnc_1.6.0-2_all.deb",
+  "debian_archive_sha256": "7943751137815b9b98c7b424413de78aefa8a1045129ac06c001e9e68e0de98e",
+  "debian_changes": [
+    "keyboard input width fix in app/styles/base.css",
+    "regenerated app/images/icons/novnc-ios-*.png"
+  ]
+}

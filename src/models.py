@@ -17,14 +17,12 @@ from .settings import (
     validate_setting_value,
 )
 
-# these strings are persisted in desktop_session_history.end_reason, editing one orphans stored rows
-END_REASON_RECONCILIATION = "reconciliation"
+END_REASON_RECONCILIATION = "reconciliation"  # persisted reason values must stay compatible with stored history
 END_REASON_USER_DESTROYED = "user_destroyed"
 END_REASON_ADMIN_KILLED = "admin_killed"
 END_REASON_EXPIRED = "expired"
 
-# the session row stays authoritative until teardown is confirmed so recovery never rebuilds it from an operation
-LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_ACTIVE = "active"  # session rows stay authoritative until teardown is confirmed
 LIFECYCLE_STOPPING = "stopping"
 LIFECYCLE_CLEANUP_PENDING = "cleanup_pending"
 LIFECYCLE_HELD = "held"
@@ -55,16 +53,19 @@ CREATE_OPERATION_STATES = frozenset(
     }
 )
 
-VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true"
+NOVNC_VERSION = "869e3dcb0d8de7f5"
+VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true&host="
 
 
 def proxy_vnc_url(user_id: int, password: str) -> str:
-    # password stays in the fragment, browsers never send it in requests or referer headers
-    return f"/remote-desktop/vnc/{user_id}/vnc.html?{VNC_VIEWER_QUERY}#password={password}"
+    return (
+        f"/remote-desktop/static/novnc/{NOVNC_VERSION}/vnc.html?{VNC_VIEWER_QUERY}"
+        f"&path=/remote-desktop/vnc/{user_id}/websockify"
+        f"#password={password}"  # fragments keep credentials out of requests and referer headers
+    )
 
 
-# %-d and %-I are glibc only no pad directives, fine on the linux deploy target
-DISPLAY_DATETIME_FORMAT = "%b %-d, %Y %-I:%M:%S %p"
+DISPLAY_DATETIME_FORMAT = "%b %-d, %Y %-I:%M:%S %p"  # no pad directives require glibc on the deploy target
 
 
 def _esc(val: str | None) -> str:
@@ -83,17 +84,14 @@ class DesktopDockerContextModel(db.Model):
     pub_hostname = db.Column(db.String(512), nullable=False)
     weight = db.Column(db.Integer, default=1)
     enabled = db.Column(db.Boolean, default=True)
-    # null means auto derive from host ram, 0 means drain, any other value is an explicit cap
-    max_containers = db.Column(db.Integer, nullable=True)
-    # authoritative across gunicorn workers, reserve increments, release decrements, leader reconcile resyncs
+    max_containers = db.Column(db.Integer, nullable=True)  # null derives from ram, zero drains the host
     active_sessions = db.Column(db.Integer, nullable=False, default=0, server_default="0")
 
 
 class DesktopContainerInfoModel(db.Model):
     __tablename__ = "desktop_container_info"
     container_id = db.Column(db.String(512), primary_key=True)
-    # deliberately not a users fk, deleting an account must not erase the row for a live docker object
-    user_id = db.Column(db.Integer, nullable=False)
+    user_id = db.Column(db.Integer, nullable=False)  # account deletion must preserve live docker object tracking
     container_name = db.Column(db.String(512), nullable=False)
     vnc_port = db.Column(db.Integer, nullable=False)
     novnc_port = db.Column(db.Integer, nullable=False)
@@ -110,12 +108,9 @@ class DesktopContainerInfoModel(db.Model):
     timer_duration = db.Column(db.Float(precision=53), default=0)
     extensions_used = db.Column(db.Integer, default=0)
     max_extensions = db.Column(db.Integer, default=3)
-    # sid of the autologin ctfd session, null means destroy has no server side cache entry to revoke
-    cookie_sid = db.Column(db.String(128), nullable=True)
-    # expiry and shutdown cleanup skip paused rows so the writable layer survives as evidence
-    paused_at = db.Column(db.Float(precision=53), nullable=True)
-    # unlike container_id this exists before any docker side effect and stays through teardown and history
-    session_uuid = db.Column(db.String(36), nullable=False)
+    cookie_sid = db.Column(db.String(128), nullable=True)  # null leaves no autologin cache entry to revoke
+    paused_at = db.Column(db.Float(precision=53), nullable=True)  # paused layers survive cleanup as evidence
+    session_uuid = db.Column(db.String(36), nullable=False)  # exists before docker creation and survives teardown
     lifecycle_state = db.Column(
         db.String(32), nullable=False, default=LIFECYCLE_ACTIVE, server_default=LIFECYCLE_ACTIVE
     )
@@ -128,11 +123,8 @@ class DesktopContainerInfoModel(db.Model):
 
 
 class DesktopSessionOperationModel(db.Model):
-    """per user lifecycle mutex and crash recovery record
-    no users fk and no cascade, a deleted user can still own a docker object recovery must finish"""
-
     __tablename__ = "desktop_session_operations"
-    user_id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, primary_key=True)  # account deletion must preserve pending recovery
     operation_uuid = db.Column(db.String(36), nullable=False)
     worker_lease_uuid = db.Column(db.String(36), nullable=True)
     session_uuid = db.Column(db.String(36), nullable=True)
@@ -176,7 +168,6 @@ def history_from_row(
     ended_at: float,
     reason: str,
 ) -> DesktopSessionHistoryModel:
-    """ended_at is passed in so the caller controls the teardown timestamp"""
     return DesktopSessionHistoryModel(
         user_id=row.user_id,
         username=username,
@@ -207,10 +198,7 @@ class DesktopSettingsModel(db.Model):
 
 
 class DesktopPluginMetadataModel(db.Model):
-    """version markers kept out of desktop_settings, contract 1 binaries reject unknown keys there
-    they ignore this extra table, so a code rollback needs no settings row surgery"""
-
-    __tablename__ = "desktop_plugin_metadata"
+    __tablename__ = "desktop_plugin_metadata"  # older binaries reject extra keys in desktop_settings
     key = db.Column(db.String(128), primary_key=True)
     value = db.Column(db.String(512), nullable=False)
 
@@ -222,8 +210,7 @@ class DesktopEventLogModel(db.Model):
     timestamp = db.Column(db.Float(precision=53), nullable=False, index=True)
     event_type = db.Column(db.String(128), nullable=False, index=True)
     level = db.Column(db.String(16), nullable=False)
-    # no fk here, deleting a user must not cascade wipe the audit trail
-    user_id = db.Column(db.Integer, nullable=True)
+    user_id = db.Column(db.Integer, nullable=True)  # account deletion must preserve the audit trail
     username = db.Column(db.String(512), nullable=True)
     message = db.Column(db.Text, nullable=False)
     metadata_json = db.Column(db.Text, nullable=True)
@@ -252,8 +239,7 @@ def _ensure_revision_row() -> None:
     try:
         db.session.commit()
     except IntegrityError:
-        # another worker won the one time seed race
-        db.session.rollback()
+        db.session.rollback()  # another worker can win the initial seed race
 
 
 def _decode_rows(rows) -> tuple[dict[str, SettingValue], dict[str, DesktopSettingsModel]]:
@@ -289,7 +275,6 @@ def _migrate_v1_defaults(
     effective: dict[str, SettingValue],
     by_key: dict[str, DesktopSettingsModel],
 ) -> bool:
-    # upgrade only rows still equal to the exact v1 defaults so operator overrides survive
     migrated = False
     legacy_cap_add = "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE"
     cap_row = by_key.get("cap_add")
@@ -304,7 +289,6 @@ def _migrate_v1_defaults(
 
 
 def initialize_settings() -> None:
-    """seed, validate, and canonically rewrite every settings row at startup"""
     _ensure_revision_row()
     try:
         effective, by_key, revision = _locked_profile()
@@ -358,8 +342,7 @@ def set_setting(key: str, value: SettingValue) -> None:
             db.session.add(DesktopSettingsModel(key=key, value=serialize_setting(key, parsed)))
         else:
             row.value = serialize_setting(key, parsed)
-        # image_cache is diagnostics only, advancing the revision would make workers reload on every matrix scan
-        db.session.commit()
+        db.session.commit()  # diagnostics must not advance the settings revision
     except Exception:
         db.session.rollback()
         raise

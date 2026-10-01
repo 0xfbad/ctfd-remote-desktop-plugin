@@ -11,13 +11,11 @@ if ! command -v flock >/dev/null 2>&1; then
     echo "error: flock is required to run setup safely" >&2
     exit 1
 fi
-# locking the directory descriptor keeps a lock artifact out of the checkout
-if ! exec 9<"$CTFD_ROOT"; then
+if ! exec 9<"$CTFD_ROOT"; then # a directory descriptor avoids a persistent lock file
     echo "error: could not open CTFd root for setup locking: $CTFD_ROOT" >&2
     exit 1
 fi
-# fail instead of waiting, a concurrent run would snapshot half changed config
-if ! flock -n 9; then
+if ! flock -n 9; then # a concurrent run could snapshot partially changed config
     echo "error: another remote desktop setup is already running for $CTFD_ROOT" >&2
     exit 1
 fi
@@ -61,6 +59,37 @@ ctfd_service_block() {
     ' "$COMPOSE_FILE"
 }
 
+nginx_service_block() {
+    awk '
+        /^  nginx:[[:space:]]*$/ { in_nginx=1 }
+        in_nginx && /^  [a-zA-Z0-9_-]+:[[:space:]]*$/ && !/^  nginx:/ { exit }
+        in_nginx { print }
+    ' "$COMPOSE_FILE"
+}
+
+configure_novnc_volume() {
+    asset_dir="$PLUGIN_DIR/src/static/novnc"
+    require_readable_host_dir "$asset_dir" "noVNC assets not found at $asset_dir"
+    asset_mount="      - '${asset_dir//\'/\'\'}:/var/www/ctfd-novnc:ro'"
+    if nginx_service_block | grep -Fxq "$asset_mount"; then
+        skip "noVNC asset volume"
+        return
+    fi
+    if nginx_service_block | grep -q '/var/www/ctfd-novnc'; then
+        err "nginx already has an unmanaged /var/www/ctfd-novnc mount; setup will not replace it"
+        exit 1
+    fi
+    rewrite_compose "could not find the volumes block inside the nginx service" \
+        -v addition="$asset_mount" '
+        /^  nginx:[[:space:]]*$/ { in_nginx=1 }
+        in_nginx && /^  [a-zA-Z0-9_-]+:[[:space:]]*$/ && !/^  nginx:/ { in_nginx=0 }
+        { print }
+        in_nginx && /^    volumes:[[:space:]]*$/ && !added { print addition; added=1 }
+        END { if (!added) exit 42 }
+    '
+    added "noVNC asset volume"
+}
+
 ctfd_group_add_block() {
     ctfd_service_block | awk '
         /^    group_add:/ { in_group=1 }
@@ -82,6 +111,11 @@ top_level_volume_exists() {
 require_config_files() {
     if [ ! -f "$COMPOSE_FILE" ]; then
         err "docker-compose.yml not found at $COMPOSE_FILE"
+        exit 1
+    fi
+
+    if [ ! -f "$PLUGIN_DIR/nginx.conf" ]; then
+        err "plugin nginx configuration not found at $PLUGIN_DIR/nginx.conf"
         exit 1
     fi
 
@@ -108,11 +142,10 @@ refuse_stale_staging() {
     fi
 }
 
-# require the source now, compose would create it later as an empty root owned directory
 require_readable_host_dir() {
     host_dir=$1
     message=$2
-    if [ ! -d "$host_dir" ] || [ ! -r "$host_dir" ] || [ ! -x "$host_dir" ]; then
+    if [ ! -d "$host_dir" ] || [ ! -r "$host_dir" ] || [ ! -x "$host_dir" ]; then # compose creates missing sources as root owned directories
         err "$message"
         exit 1
     fi
@@ -173,7 +206,6 @@ ensure_ctfd_dependency() {
     fi
 
     if ctfd_service_block | grep -q '^    depends_on:'; then
-        # appending a mapping entry to a list yields invalid compose, refuse instead
         first_dependency_line=$(ctfd_service_block | awk '/^    depends_on:/{found=1; next} found && NF {print; exit}')
         case "$first_dependency_line" in
             "      - "*) err "ctfd depends_on uses list form; convert it to mapping form before setup"; exit 1 ;;
@@ -207,7 +239,6 @@ ensure_ctfd_dependency() {
     added "ctfd depends_on $dependency"
 }
 
-# the plugin owns these service names, every run clobbers an existing block
 install_owned_service() {
     service_name=$1
     # shellcheck disable=SC2016
@@ -355,7 +386,6 @@ echo ""
 
 require_config_files
 
-# staging is opt in, a local docker daemon needs only the socket
 STAGE_SSH="${CTFD_RD_STAGE_SSH:-0}"
 STAGE_DOCKER_CONFIG="${CTFD_RD_STAGE_DOCKER_CONFIG:-0}"
 validate_staging_flag "$STAGE_SSH"
@@ -378,6 +408,7 @@ echo ""
 echo "docker-compose.yml"
 
 configure_docker_group_add
+configure_novnc_volume
 
 if ctfd_service_block | grep -q ':/var/run/docker.sock'; then
     skip "docker socket volume"
@@ -392,7 +423,6 @@ if [ "$STAGE_SSH" -eq 1 ] || [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
 fi
 
 if [ "$STAGE_SSH" -eq 1 ]; then
-    # upstream owns the generic permissions service for uploads and logs, do not reuse it
     cat >"$SETUP_TMP_DIR/ssh-permissions.yml" <<'COMPOSESERVICE'
   ssh-permissions:
     image: alpine:3.23
@@ -417,10 +447,9 @@ if [ "$STAGE_SSH" -eq 1 ]; then
         trap - HUP INT TERM EXIT; rm -rf -- "$stage" "$backup"
       '
 COMPOSESERVICE
-    stage_credentials ssh ssh "$SETUP_TMP_DIR/ssh-permissions.yml"
+    stage_credentials ssh ssh "$SETUP_TMP_DIR/ssh-permissions.yml" # upstream owns the generic permissions service for uploads and logs
 fi
 
-# tls material and registry config can be mode 0600, copy as root then chown inside the volume
 if [ "$STAGE_DOCKER_CONFIG" -eq 1 ]; then
     cat >"$SETUP_TMP_DIR/docker-permissions.yml" <<'COMPOSESERVICE'
   docker-permissions:
@@ -471,97 +500,7 @@ NGINX_MANAGED_BEGIN="# BEGIN CTFD-REMOTE-DESKTOP MANAGED LOCATIONS v1"
 NGINX_MANAGED_PREFIX="# BEGIN CTFD-REMOTE-DESKTOP MANAGED LOCATIONS v"
 NGINX_MANAGED_END="# END CTFD-REMOTE-DESKTOP MANAGED LOCATIONS"
 
-cat > "$SETUP_TMP_DIR/nginx-managed.conf" << 'NGINXBLOCK'
-    # BEGIN CTFD-REMOTE-DESKTOP MANAGED LOCATIONS v1
-    location ~ ^/remote-desktop/vnc/(?<vnc_user_id>\d+)/(?<vnc_path>.+)$ {
-      resolver 127.0.0.11 valid=30s;
-      auth_request /remote-desktop/vnc/auth;
-      auth_request_set $vnc_host $upstream_http_x_vnc_host;
-      auth_request_set $vnc_port $upstream_http_x_vnc_port;
-
-      proxy_pass http://$vnc_host:$vnc_port/$vnc_path$is_args$args;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
-      proxy_set_header Cookie ""; # novnc backend files are container controlled, never hand it the ctfd session
-      proxy_set_header Authorization "";
-      proxy_set_header Proxy-Authorization "";
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-      proxy_read_timeout 86400s;
-      proxy_send_timeout 86400s;
-      proxy_buffering off;
-      proxy_cache off;
-      proxy_hide_header Set-Cookie;
-      add_header Cache-Control "no-store";
-    }
-
-    location = /remote-desktop/vnc/auth {
-      internal;
-      proxy_pass http://app_servers;
-      proxy_pass_request_body off;
-      proxy_set_header Content-Length "";
-      proxy_set_header X-VNC-User-ID $vnc_user_id;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header Cookie $http_cookie;
-    }
-
-    location ~ ^/remote-desktop/terminal/(?<terminal_user_id>\d+)/(?<terminal_path>.*)$ {
-      resolver 127.0.0.11 valid=30s;
-      auth_request /remote-desktop/terminal/auth;
-      auth_request_set $terminal_host $upstream_http_x_terminal_host;
-      auth_request_set $terminal_port $upstream_http_x_terminal_port;
-      auth_request_set $terminal_authorization $upstream_http_x_terminal_authorization;
-
-      proxy_pass http://$terminal_host:$terminal_port/$terminal_path$is_args$args;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header Host $http_host; # ttyd checks origin, $host would drop an explicit public port
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header X-Forwarded-Proto $scheme;
-      proxy_set_header Cookie "";
-      proxy_set_header Authorization $terminal_authorization;
-      proxy_set_header Proxy-Authorization "";
-      proxy_set_header Accept-Encoding "";
-      gunzip on;
-
-      # inject nerd font so ttyd renders eza icons
-      sub_filter '</head>' '<link rel="preload" href="/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2" as="font" type="font/woff2" crossorigin><style>@font-face{font-family:JetBrainsMonoNerdFont;font-display:block;src:url(/remote-desktop/static/fonts/JetBrainsMonoNerdFontMono-Regular.woff2) format("woff2")}</style><script>document.fonts.ready.then(()=>{const i=setInterval(()=>{if(!window.term)return;clearInterval(i);Promise.all(Array.from(document.fonts).map(f=>f.load())).then(()=>{const o=window.term.options.fontFamily;window.term.options.fontFamily="monospace";window.term.options.fontFamily=o;if(window.term.fit)window.term.fit()})},50)})</script></head>';
-      sub_filter_once on;
-
-      proxy_read_timeout 86400s;
-      proxy_send_timeout 86400s;
-      proxy_buffering off;
-      proxy_cache off;
-      proxy_hide_header Set-Cookie;
-      add_header Cache-Control "no-store";
-    }
-
-    location = /remote-desktop/terminal/auth {
-      internal;
-      proxy_pass http://app_servers;
-      proxy_pass_request_body off;
-      proxy_set_header Content-Length "";
-      proxy_set_header X-Terminal-User-ID $terminal_user_id;
-      proxy_set_header X-Real-IP $remote_addr;
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_set_header Cookie $http_cookie;
-    }
-
-    location /remote-desktop/static/fonts/ {
-      proxy_pass http://app_servers;
-      proxy_hide_header Content-Type;
-      add_header Content-Type "font/woff2";
-      add_header Cache-Control "public, max-age=31536000";
-      add_header Access-Control-Allow-Origin "*";
-    }
-    # END CTFD-REMOTE-DESKTOP MANAGED LOCATIONS
-NGINXBLOCK
+cp "$PLUGIN_DIR/nginx.conf" "$SETUP_TMP_DIR/nginx-managed.conf"
 
 fixed_count() {
     needle=$1
@@ -630,7 +569,7 @@ prepare_nginx_config() {
             return 1
         }
     else
-        if grep -Eq 'remote-desktop/(vnc|terminal|static/fonts)' "$conf"; then
+        if grep -Eq 'remote-desktop/(vnc|terminal|static/(fonts|novnc))' "$conf"; then
             err "unmanaged remote-desktop nginx configuration in $label; fresh setup will not replace it"
             return 1
         fi
