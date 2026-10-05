@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import ipaddress
+import math
 import re
 
 from flask import jsonify, request
@@ -13,6 +14,23 @@ _DNS_NAME_RE = re.compile(
     r"^(?=.{1,253}\.?$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$"
 )
+_SIZE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)([kmgt](?:i?b)?|b)?", re.IGNORECASE)
+
+
+def parse_size(value: str | int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"invalid size value {value!r}")
+    match = _SIZE_RE.fullmatch(str(value).strip())
+    if match is None:
+        raise ValueError(f"invalid size value {value!r}")
+    amount_text = match.group(1)
+    amount = float(amount_text) if "." in amount_text else int(amount_text)
+    unit = (match.group(2) or "b").lower()
+    power = 0 if unit == "b" else "kmgt".index(unit[0]) + 1
+    result = amount * (1024**power)
+    if isinstance(result, float) and not math.isfinite(result):
+        raise ValueError(f"invalid size value {value!r}")
+    return int(result)
 
 
 def normalize_public_hostname(value: object) -> str:

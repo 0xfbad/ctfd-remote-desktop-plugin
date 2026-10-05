@@ -20,7 +20,7 @@ import paramiko
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
 from .messages import HOST_UNREACHABLE, SERVER_BUSY
-from .utils import normalize_public_hostname
+from .utils import normalize_public_hostname, parse_size
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +136,6 @@ def normalize_container_state(value: object) -> ContainerState:
     if value in ("exited", "dead", "removing"):
         return "exited"
     return "unknown"
-
-
-def parse_size(s: str | int) -> int:
-    s = str(s).strip().lower()
-    multipliers = {"k": 1024, "m": 1024**2, "g": 1024**3, "gb": 1024**3, "mb": 1024**2, "kb": 1024}
-    for suffix, mult in sorted(multipliers.items(), key=lambda x: -len(x[0])):
-        if s.endswith(suffix):
-            return int(float(s[: -len(suffix)]) * mult)
-    return int(s)
 
 
 def _scan_context_meta(context_name: str | None = None) -> ContextMeta | list[ContextMeta] | None:

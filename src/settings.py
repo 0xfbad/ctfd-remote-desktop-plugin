@@ -6,6 +6,7 @@ import json
 import math
 import re
 
+from .utils import parse_size
 
 SettingValue = bool | int | float | str | None
 
@@ -106,7 +107,6 @@ RESTART_REQUIRED_SETTINGS = frozenset(
 
 _CANONICAL_INT_RE = re.compile(r"0|-?[1-9][0-9]*")
 _FINITE_DECIMAL_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
-_SIZE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)([kmgt]i?b?|b)?", re.IGNORECASE)
 _CAP_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 _CGROUP_RE = re.compile(r"[A-Za-z0-9_.-]+\.slice")
 _NETWORK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -117,32 +117,10 @@ def _has_control_characters(value: str) -> bool:
 
 
 def _parse_size(value: str) -> int:
-    match = _SIZE_RE.fullmatch(value.strip())
-    if match is None:
-        raise SettingsValidationError(f"invalid size value {value!r}")
-    amount = float(match.group(1))
-    if not math.isfinite(amount):
-        raise SettingsValidationError(f"invalid size value {value!r}")
-    unit = (match.group(2) or "b").lower()
-    powers = {
-        "b": 0,
-        "k": 1,
-        "kb": 1,
-        "kib": 1,
-        "m": 2,
-        "mb": 2,
-        "mib": 2,
-        "g": 3,
-        "gb": 3,
-        "gib": 3,
-        "t": 4,
-        "tb": 4,
-        "tib": 4,
-    }
-    result = int(amount * (1024 ** powers[unit]))
-    if result < 0:
-        raise SettingsValidationError(f"invalid size value {value!r}")
-    return result
+    try:
+        return parse_size(value)
+    except ValueError as exc:
+        raise SettingsValidationError(str(exc)) from None
 
 
 def _validate_caps(key: str, value: str, *, allow_empty: bool) -> None:
