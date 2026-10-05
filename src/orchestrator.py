@@ -418,8 +418,14 @@ class Orchestrator:
         context_name: str,
         user_id: int,
         session_uuid: str,
+        worker_lease_uuid: str,
     ) -> bool:
-        from .models import DesktopContainerInfoModel, DesktopDockerContextModel
+        from .models import (
+            DesktopContainerInfoModel,
+            DesktopDockerContextModel,
+            DesktopSessionOperationModel,
+            OP_STOPPING,
+        )
 
         owner_exists = DesktopContainerInfoModel.query.filter(
             DesktopContainerInfoModel.user_id == user_id,
@@ -427,10 +433,20 @@ class Orchestrator:
             DesktopContainerInfoModel.docker_context == context_name,
         ).exists()
 
+        operation_owner_exists = DesktopSessionOperationModel.query.filter(
+            DesktopSessionOperationModel.user_id == user_id,
+            DesktopSessionOperationModel.session_uuid == session_uuid,
+            DesktopSessionOperationModel.worker_lease_uuid == worker_lease_uuid,
+            DesktopSessionOperationModel.state == OP_STOPPING,
+            DesktopSessionOperationModel.docker_context == context_name,
+            DesktopSessionOperationModel.capacity_reserved.is_(True),
+        ).exists()
+
         changed = DesktopDockerContextModel.query.filter(  # match admission by locking the context first
             DesktopDockerContextModel.context_name == context_name,
             DesktopDockerContextModel.active_sessions > 0,  # the audit repairs a zero count without another decrement
             owner_exists,
+            operation_owner_exists,
         ).update(
             {DesktopDockerContextModel.active_sessions: DesktopDockerContextModel.active_sessions - 1},
             synchronize_session=False,

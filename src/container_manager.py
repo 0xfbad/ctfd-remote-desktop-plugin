@@ -7,7 +7,7 @@ import secrets
 import traceback
 import uuid
 from dataclasses import dataclass
-from typing import Callable, TypeVar
+from typing import Callable, TypeGuard, TypeVar
 
 from typing_extensions import TypeIs
 from threading import Lock
@@ -265,12 +265,29 @@ class ContainerManager:
             return "not_found"
         return normalize_container_state(state)
 
-    def _mirror_detected_hold(self, user_id: int, session_uuid: str) -> bool:
+    def _mirror_detected_hold(
+        self,
+        user_id: int,
+        session_uuid: str,
+        expected_worker_uuid: str | None = None,
+        expected_container_id: str | None = None,
+    ) -> bool:
         with self._get_destroy_lock(user_id):
             db.session.rollback()
             operation = self._locked_operation(user_id, create=True)
             current = self._locked_active_row(user_id)
             if current is None or self._session_uuid(current) != session_uuid:
+                db.session.rollback()
+                return False
+            if expected_container_id is not None and str(current.container_id) != expected_container_id:
+                db.session.rollback()
+                return False
+            if expected_worker_uuid is not None and not self._owns_stop(
+                current, operation, session_uuid, expected_worker_uuid, str(current.container_id)
+            ):
+                db.session.rollback()
+                return False
+            if expected_worker_uuid is None and self._row_lifecycle_state(current) == LIFECYCLE_STOPPING:
                 db.session.rollback()
                 return False
             if not self._is_paused(current):
@@ -1215,17 +1232,46 @@ class ContainerManager:
         operation: DesktopSessionOperationModel | None,
         current: DesktopContainerInfoModel | None,
         session_uuid: str,
+        worker_uuid: str,
+        container_id: str,
         reason: str,
         error: str,
-    ) -> None:
-        if self._same_session(current, session_uuid):
-            current.lifecycle_state = LIFECYCLE_CLEANUP_PENDING
-            current.lifecycle_reason = reason
-        if operation is not None and operation.session_uuid == session_uuid:
+    ) -> bool:
+        if not self._owns_stop(current, operation, session_uuid, worker_uuid, container_id):
+            db.session.rollback()
+            return False
+
+        current.lifecycle_state = LIFECYCLE_CLEANUP_PENDING
+        current.lifecycle_reason = reason
+        if operation is not None:
             operation.state = OP_CLEANUP_PENDING
             operation.error = error
             operation.updated_at = time.time()
         db.session.commit()
+        return True
+
+    def _owns_stop(
+        self,
+        current: DesktopContainerInfoModel | None,
+        operation: DesktopSessionOperationModel | None,
+        session_uuid: str,
+        worker_uuid: str,
+        container_id: str,
+    ) -> TypeGuard[DesktopContainerInfoModel]:
+        if not self._same_session(current, session_uuid):
+            return False
+
+        if str(current.container_id) != container_id or self._row_lifecycle_state(current) != LIFECYCLE_STOPPING:
+            return False
+
+        if operation is None:
+            return False
+
+        return (
+            operation.session_uuid == session_uuid
+            and operation.worker_lease_uuid == worker_uuid
+            and self._operation_state(operation) == OP_STOPPING
+        )
 
     def _gate_destroy_state(self, lifecycle_state: str, admin_override: bool) -> ResultDict | None:
         if lifecycle_state == LIFECYCLE_STOPPING:
@@ -1250,17 +1296,20 @@ class ContainerManager:
         reason: str = END_REASON_USER_DESTROYED,
         log_destruction: bool = True,
         expected_session_uuid: str | None = None,
+        recovery_worker_uuid: str | None = None,
+        expected_container_id: str | None = None,
     ) -> ResultDict:
         _user, username = _display_name(user_id)
 
         db.session.rollback()
         # create_container takes the status lock before row locks
-        with self.lock:
-            status = self.creation_status.get(user_id)
-            if status and status.get("status") not in (None, "failed", "ready"):
-                self.creation_status[user_id] = {"status": "cancelled"}
-            else:
-                self.creation_status.pop(user_id, None)
+        if expected_session_uuid is None and recovery_worker_uuid is None and expected_container_id is None:
+            with self.lock:
+                status = self.creation_status.get(user_id)
+                if status and status.get("status") not in (None, "failed", "ready"):
+                    self.creation_status[user_id] = {"status": "cancelled"}
+                else:
+                    self.creation_status.pop(user_id, None)
 
         with self._get_destroy_lock(user_id):
             db.session.rollback()
@@ -1268,6 +1317,13 @@ class ContainerManager:
             row = self._locked_active_row(user_id)
 
             if row is None:
+                if (
+                    expected_session_uuid is not None
+                    or recovery_worker_uuid is not None
+                    or expected_container_id is not None
+                ):
+                    db.session.rollback()
+                    return {"success": False, "error": SESSION_CHANGED}
                 if operation is not None and self._operation_state(operation) in CREATE_OPERATION_STATES:
                     operation.cancel_requested = True
                     operation.state = OP_CANCEL_REQUESTED
@@ -1279,9 +1335,17 @@ class ContainerManager:
             if expected_session_uuid is not None and self._session_uuid(row) != expected_session_uuid:
                 db.session.rollback()
                 return {"success": False, "error": SESSION_CHANGED}
+            if expected_container_id is not None and str(row.container_id) != expected_container_id:
+                db.session.rollback()
+                return {"success": False, "error": SESSION_CHANGED}
+            if recovery_worker_uuid is not None and not self._owns_stop(
+                row, operation, self._session_uuid(row), recovery_worker_uuid, str(row.container_id)
+            ):
+                db.session.rollback()
+                return {"success": False, "error": SESSION_CHANGED}
 
             # stop plus auto_remove would delete the writable layer held as evidence
-            if self._is_paused(row) and reason != END_REASON_ADMIN_KILLED:
+            if self._is_paused(row) and reason != END_REASON_ADMIN_KILLED and recovery_worker_uuid is None:
                 row.lifecycle_state = LIFECYCLE_HELD
                 if operation is not None:
                     operation.state = OP_HELD
@@ -1290,7 +1354,11 @@ class ContainerManager:
                 db.session.commit()
                 return {"success": False, "error": SESSION_SUSPENDED}
 
-            gate = self._gate_destroy_state(self._row_lifecycle_state(row), reason == END_REASON_ADMIN_KILLED)
+            gate = (
+                self._gate_destroy_state(self._row_lifecycle_state(row), reason == END_REASON_ADMIN_KILLED)
+                if recovery_worker_uuid is None
+                else None
+            )
             if gate is not None:
                 return gate
 
@@ -1305,9 +1373,14 @@ class ContainerManager:
         observed_state = self._inspect_container_state(context_name, container_id)
 
         admin_override = reason == END_REASON_ADMIN_KILLED
-        if not admin_override and observed_state == "paused":
+        if not admin_override and (observed_state == "paused" or self._is_paused(row)):
             # an external pause can still race this check
-            self._mirror_detected_hold(user_id, session_uuid)
+            self._mirror_detected_hold(
+                user_id,
+                session_uuid,
+                expected_worker_uuid=recovery_worker_uuid,
+                expected_container_id=container_id,
+            )
             return {"success": False, "error": SESSION_SUSPENDED}
         if not admin_override and observed_state == "unknown":
             db.session.rollback()
@@ -1318,6 +1391,12 @@ class ContainerManager:
             if not self._same_session(current, session_uuid):
                 db.session.rollback()
                 return {"success": False, "error": SESSION_CHANGED}
+            if str(current.container_id) != container_id or (
+                recovery_worker_uuid is not None
+                and not self._owns_stop(current, operation, session_uuid, recovery_worker_uuid, container_id)
+            ):
+                db.session.rollback()
+                return {"success": False, "error": SESSION_CHANGED}
             if not admin_override and (
                 self._is_paused(current) or self._row_lifecycle_state(current) == LIFECYCLE_HELD
             ):
@@ -1325,7 +1404,7 @@ class ContainerManager:
                 return {"success": False, "error": SESSION_SUSPENDED}
 
             lifecycle_state = self._row_lifecycle_state(current)
-            gate = self._gate_destroy_state(lifecycle_state, admin_override)
+            gate = self._gate_destroy_state(lifecycle_state, admin_override) if recovery_worker_uuid is None else None
             if gate is not None:
                 return gate
 
@@ -1339,9 +1418,10 @@ class ContainerManager:
             )
             current.lifecycle_state = LIFECYCLE_STOPPING
             current.lifecycle_reason = reason
+            worker_uuid = recovery_worker_uuid or str(uuid.uuid4())
             if operation is not None:
                 operation.session_uuid = session_uuid
-                operation.worker_lease_uuid = str(uuid.uuid4())
+                operation.worker_lease_uuid = worker_uuid
                 operation.state = OP_STOPPING
                 operation.cancel_requested = False
                 operation.docker_context = context_name
@@ -1377,8 +1457,12 @@ class ContainerManager:
             HostsUnavailableException,
         ) as e:
             # an unknown outcome keeps the row and its reservations, recovery retries the same container
-            operation, current = self._reload_session_rows(user_id, row)
-            self._mark_cleanup_pending(operation, current, session_uuid, reason, str(e))
+            with self._get_destroy_lock(user_id):
+                operation, current = self._reload_session_rows(user_id, row)
+                if not self._mark_cleanup_pending(
+                    operation, current, session_uuid, worker_uuid, container_id, reason, str(e)
+                ):
+                    return {"success": False, "error": SESSION_CHANGED}
             logger.warning(
                 f"stop outcome unknown for {container_name}: context unavailable; retaining the capacity reservation"
             )
@@ -1388,12 +1472,16 @@ class ContainerManager:
             # keep the row because cookie_sid is the only handle for retrying revocation
             with self._get_destroy_lock(user_id):
                 operation, current = self._reload_session_rows(user_id, row)
-                if not self._same_session(current, session_uuid):
-                    db.session.rollback()
+                if not self._mark_cleanup_pending(
+                    operation,
+                    current,
+                    session_uuid,
+                    worker_uuid,
+                    container_id,
+                    reason,
+                    "CTFd session credential revocation pending",
+                ):
                     return {"success": False, "error": SESSION_CHANGED}
-                self._mark_cleanup_pending(
-                    operation, current, session_uuid, reason, "CTFd session credential revocation pending"
-                )
             return {
                 "success": False,
                 "error": CREDENTIAL_REVOCATION_PENDING,
@@ -1407,6 +1495,7 @@ class ContainerManager:
                 context_name,
                 user_id,
                 session_uuid,
+                worker_uuid,
             )
             operation = self._locked_operation(user_id, create=True)
             current = (
@@ -1414,7 +1503,7 @@ class ContainerManager:
                 if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
                 else row
             )
-            if not self._same_session(current, session_uuid):
+            if not self._owns_stop(current, operation, session_uuid, worker_uuid, container_id):
                 db.session.rollback()
                 return {"success": False, "error": SESSION_CHANGED}
             history = history_from_row(current, username, ended_at, reason)
@@ -1431,7 +1520,11 @@ class ContainerManager:
                 operation.requested_reason = None
                 operation.error = None
                 operation.updated_at = ended_at
-            db.session.commit()
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                raise
 
         if log_destruction:
             duration = ended_at - history.started_at
@@ -1725,7 +1818,7 @@ class ContainerManager:
     def _recover_stale_operations(self) -> None:
         try:
             candidates = DesktopSessionOperationModel.query.filter(
-                DesktopSessionOperationModel.state.in_(CREATE_OPERATION_STATES | {OP_CLEANUP_PENDING}),
+                DesktopSessionOperationModel.state.in_(CREATE_OPERATION_STATES | {OP_CLEANUP_PENDING, OP_STOPPING}),
                 DesktopSessionOperationModel.updated_at <= time.time() - self.RECONCILE_SAFETY_AGE_SECONDS,
             ).all()
         except AttributeError:
@@ -1749,18 +1842,56 @@ class ContainerManager:
 
     def _recover_stale_operation(self, candidate: DesktopSessionOperationModel) -> None:
         user_id = int(candidate.user_id)
+        candidate_session_uuid = str(candidate.session_uuid or "")
+        candidate_worker_uuid = candidate.worker_lease_uuid
+        candidate_updated_at = float(candidate.updated_at or 0)
         db.session.rollback()
         operation = self._locked_operation(user_id)
         active = self._locked_active_row(user_id)
-        if active is not None or operation is None:
+        if operation is None:
             db.session.rollback()
             return
         state = self._operation_state(operation)
         updated_at = float(operation.updated_at or 0)
-        if state not in CREATE_OPERATION_STATES | {OP_CLEANUP_PENDING}:
+        if state not in CREATE_OPERATION_STATES | {OP_CLEANUP_PENDING, OP_STOPPING}:
             db.session.rollback()
             return
         if updated_at > time.time() - self.RECONCILE_SAFETY_AGE_SECONDS:
+            db.session.rollback()
+            return
+
+        if active is not None:
+            if (
+                state not in (OP_STOPPING, OP_CLEANUP_PENDING)
+                or self._row_lifecycle_state(active) not in (LIFECYCLE_STOPPING, LIFECYCLE_CLEANUP_PENDING)
+                or str(operation.session_uuid or "") != candidate_session_uuid
+                or operation.worker_lease_uuid != candidate_worker_uuid
+                or updated_at != candidate_updated_at
+                or self._session_uuid(active) != candidate_session_uuid
+                or active.docker_context != operation.docker_context
+                or active.container_name != operation.container_name
+            ):
+                db.session.rollback()
+                return
+
+            takeover_uuid = str(uuid.uuid4())
+            container_id = str(active.container_id)
+            reason = str(operation.requested_reason or active.lifecycle_reason or END_REASON_RECONCILIATION)
+            active.lifecycle_state = LIFECYCLE_STOPPING
+            operation.worker_lease_uuid = takeover_uuid
+            operation.state = OP_STOPPING
+            operation.updated_at = time.time()
+            db.session.commit()
+            self.destroy_container(
+                user_id,
+                reason=reason,
+                expected_session_uuid=candidate_session_uuid,
+                recovery_worker_uuid=takeover_uuid,
+                expected_container_id=container_id,
+            )
+            return
+
+        if state == OP_STOPPING:
             db.session.rollback()
             return
 
