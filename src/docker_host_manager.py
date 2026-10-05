@@ -9,7 +9,7 @@ import time
 import threading
 import logging
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlsplit
 import docker
@@ -40,7 +40,7 @@ HOST_CONCURRENCY = 4
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
 ContainerResult = dict[str, str | dict[str, int]]
-ImageInfo = dict[str, int | str]
+ImageInfo = dict[str, int | float | str]
 ContainerState = Literal["running", "paused", "created", "exited", "not_found", "unknown"]
 ClientKey = tuple[str, int]
 
@@ -1172,17 +1172,21 @@ class DockerHostManager:
                     if last_tag:
                         raw = last_tag[:19]
                 try:
-                    created = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").strftime(
-                        DISPLAY_DATETIME_FORMAT
+                    created_time = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=timezone.utc
                     )
+                    created = created_time.strftime(DISPLAY_DATETIME_FORMAT)
+                    created_at = created_time.timestamp()
                 except (ValueError, AttributeError):
                     created = raw.replace("T", " ")
+                    created_at = 0.0
                 short_id = img.short_id.replace("sha256:", "")
                 contract = _image_contract(img)
                 contract_status = "compatible" if contract == IMAGE_CONTRACT_VERSION else "incompatible"
                 return {
                     "size_mb": size_mb,
                     "created": created,
+                    "created_at": created_at,
                     "id": short_id,
                     "contract": str(contract) if contract is not None else "missing",
                     "contract_status": contract_status,

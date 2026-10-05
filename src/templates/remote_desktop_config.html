@@ -531,18 +531,19 @@
                 '</td></tr>';
         }).join('');
 
-        tbody.addEventListener('click', function(e) {
-            var btn = e.target.closest('[data-action]');
-            if (!btn) return;
-            var action = btn.dataset.action;
-            var id = btn.dataset.id;
-            var name = btn.dataset.name;
-
-            if (action === 'test') testContext(id, name, btn);
-            else if (action === 'edit') showEditModal(btn);
-            else if (action === 'delete') deleteContext(id, name);
-        });
     }
+
+    document.getElementById('rd-contexts-table').addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-action]');
+        if (!btn) return;
+        var action = btn.dataset.action;
+        var id = btn.dataset.id;
+        var name = btn.dataset.name;
+
+        if (action === 'test') testContext(id, name, btn);
+        else if (action === 'edit') showEditModal(btn);
+        else if (action === 'delete') deleteContext(id, name);
+    });
 
     function testContext(id, name, btn) {
         var icon = btn.querySelector('i');
@@ -727,12 +728,20 @@
         if (!confirm('Clear all session history? This resets stats and charts.')) return;
         rdFetch('/remote-desktop/dashboard/api/clear_history', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'CSRF-Token': window.init.csrfNonce }
+            headers: { 'Content-Type': 'application/json', 'CSRF-Token': window.init.csrfNonce },
+            body: JSON.stringify({ confirm: 'DELETE' })
         })
-        .then(function(r) { return r.json(); })
+        .then(function(r) {
+            return r.json().then(function(data) {
+                if (!r.ok || !data.success) throw new Error(data.error || 'Could not clear session history');
+                return data;
+            });
+        })
         .then(function(data) {
-            if (data.success) CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Cleared ' + data.sessions + ' sessions', button: 'OK' });
-            else CTFd.ui.ezq.ezAlert({ title: 'Error', body: data.error || 'Failed', button: 'OK' });
+            CTFd.ui.ezq.ezAlert({ title: 'Success', body: 'Cleared ' + data.sessions + ' sessions', button: 'OK' });
+        })
+        .catch(function(error) {
+            CTFd.ui.ezq.ezAlert({ title: 'Error', body: error.message, button: 'OK' });
         });
     });
 
@@ -768,6 +777,10 @@
     }
 
     function renderMatrix(imgs, ctxs, mx, box) {
+        function createdLabel(info) {
+            return Number(info.created_at) > 0 ? new Date(info.created_at * 1000).toLocaleString() : info.created;
+        }
+
         if (!imgs.length) { box.innerHTML = '<p class="text-muted text-center small">No image configured</p>'; return; }
         if (!ctxs.length) { box.innerHTML = '<p class="text-muted text-center small">No connected contexts</p>'; return; }
 
@@ -777,7 +790,7 @@
                 var e = mx[img] && mx[img][ctx];
                 if (!e || !e.available || !e.info) return;
 
-                if (e.info.contract_status === 'compatible' && (!latest || e.info.created > latest.created)) {
+                if (e.info.contract_status === 'compatible' && (!latest || Number(e.info.created_at || 0) > Number(latest.created_at || 0))) {
                     latest = e.info;
                 }
             });
@@ -800,7 +813,7 @@
                 if (entry && ((entry.info && entry.info.contract_status !== 'compatible') || (entry.available && !entry.info))) {
                     anyIncompatible = true;
                     return '<td class="text-center" style="background:rgba(220,53,69,0.06)">' +
-                        '<i class="fas fa-ban text-danger" title="Incompatible image contract ' + escapeHtml((entry.info && entry.info.contract) || 'missing') + '. Expected contract 2; rebuild or load the current image."></i></td>';
+                        '<i class="fas fa-ban text-danger" title="Incompatible image contract ' + escapeHtml((entry.info && entry.info.contract) || 'missing') + '. Expected contract 3; rebuild or load the current image."></i></td>';
                 }
 
                 if (!entry || !entry.available) {
@@ -810,6 +823,9 @@
                 }
 
                 var info = entry.info;
+                if (!(Number(info.created_at) > 0)) {
+                    return '<td class="text-center"><i class="fas fa-question-circle text-muted" title="Build date unavailable; scan again to compare image dates."></i></td>';
+                }
 
                 var isRef = ref && info.created === ref.created && info.size_mb === ref.size_mb; // independent builds can have different image ids
                 var sizeDiff = ref ? Math.abs(info.size_mb - ref.size_mb) : 0;
@@ -819,16 +835,16 @@
 
                 if (isRef) {
                     return '<td class="text-center">' +
-                        '<i class="fas fa-check-circle text-success" title="Newest build found across contexts. ' + info.size_mb + 'MB, built ' + escapeHtml(info.created) + '"></i></td>';
+                        '<i class="fas fa-check-circle text-success" title="Newest build found across contexts. ' + info.size_mb + 'MB, built ' + escapeHtml(createdLabel(info)) + '"></i></td>';
                 }
 
                 if (isStale) {
                     return '<td class="text-center" style="background:rgba(255,193,7,0.08)">' +
-                        '<i class="fas fa-exclamation-circle text-warning" title="Possibly outdated. This image is ' + info.size_mb + 'MB but the newest build is ' + ref.size_mb + 'MB (' + sizeDiff + 'MB difference). Built ' + escapeHtml(info.created) + '. Consider rebuilding."></i></td>';
+                        '<i class="fas fa-exclamation-circle text-warning" title="Possibly outdated. This image is ' + info.size_mb + 'MB but the newest build is ' + ref.size_mb + 'MB (' + sizeDiff + 'MB difference). Built ' + escapeHtml(createdLabel(info)) + '. Consider rebuilding."></i></td>';
                 }
 
                 return '<td class="text-center">' +
-                    '<i class="fas fa-check-circle text-success" title="Size (' + info.size_mb + 'MB) is consistent with the newest build (' + ref.size_mb + 'MB). Built ' + escapeHtml(info.created) + '"></i></td>';
+                    '<i class="fas fa-check-circle text-success" title="Size (' + info.size_mb + 'MB) is consistent with the newest build (' + ref.size_mb + 'MB). Built ' + escapeHtml(createdLabel(info)) + '"></i></td>';
             }).join('');
 
             var badge = '';

@@ -903,19 +903,23 @@
 			title: 'Clear All Reports',
 			body: 'Delete every submitted report? This cannot be undone.',
 			success: () => {
-				const formData = new FormData();
-				formData.append('nonce', window.init.csrfNonce);
 				fetch('/remote-desktop/dashboard/api/reports/clear', {
 					method: 'POST',
-					headers: { 'X-Requested-With': 'XMLHttpRequest' },
+					headers: {
+						'X-Requested-With': 'XMLHttpRequest',
+						'Content-Type': 'application/json',
+						'CSRF-Token': window.init.csrfNonce
+					},
 					credentials: 'same-origin',
-					body: formData
+					body: JSON.stringify({ confirm: 'DELETE' })
 				})
-				.then(response => response.json())
-				.then(data => {
-					if (data.success) refreshReports();
+				.then(async response => {
+					const data = await response.json();
+					if (!response.ok || !data.success) throw new Error(data.error || 'Could not clear reports');
+					return data;
 				})
-				.catch(error => console.error('Error clearing reports:', error));
+				.then(() => refreshReports())
+				.catch(error => CTFd.ui.ezq.ezAlert({ title: 'Error', body: error.message, button: 'OK' }));
 			}
 		});
 	}
