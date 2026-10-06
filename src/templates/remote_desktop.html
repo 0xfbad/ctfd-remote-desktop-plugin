@@ -34,8 +34,7 @@
         transform: translateY(-100%);
         transition: transform 0.2s ease;
     }
-    /* invisible strip below the hidden navbar, hovering it pulls the navbar down */
-    .navbar::before {
+    .navbar::before { /* hit area bridges the gap below the hidden navbar */
         content: '';
         position: absolute;
         top: 100%;
@@ -44,7 +43,6 @@
         width: 42px;
         height: 9px;
     }
-    /* visible handle hinting that the navbar can be pulled down */
     .navbar::after {
         content: '';
         position: absolute;
@@ -212,10 +210,9 @@
         padding: 24px 16px;
     }
 
-    /* auto margins center the content when it fits and top align it when it overflows */
     .no-session-screen::before,
     .no-session-screen::after { content: ""; }
-    .no-session-screen::before { margin-top: auto; }
+    .no-session-screen::before { margin-top: auto; /* fixed centering would hide the top of overflowing content */ }
     .no-session-screen::after { margin-bottom: auto; }
 
     .start-session-btn {
@@ -541,7 +538,7 @@ function updateTimerDisplay() {
 
 function updateAddTimeButton(showCount) {
     const addTimeBtn = document.getElementById('add-time-btn');
-    if (!addTimeBtn) return;
+    if (!addTimeBtn || addTimeBtn.querySelector('.loading-spinner')) return;
     const hasActiveSession = document.getElementById('vnc-frame') !== null;
     const maxed = continuationsUsed >= maxContinuations;
     addTimeBtn.disabled = !hasActiveSession || maxed;
@@ -549,7 +546,7 @@ function updateAddTimeButton(showCount) {
     if (showCount) {
         addTimeBtn.innerHTML = `<i class="fas fa-check"></i> ${continuationsUsed}/${maxContinuations} used`;
         setTimeout(() => {
-            addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+            updateAddTimeButton();
         }, 1500);
     } else {
         addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
@@ -571,7 +568,7 @@ function checkStatus() {
             startBtn.disabled = false;
             startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
         }
-        showSessionError('session timed out');
+        showSessionError('Readiness could not be confirmed. Refresh to check whether your desktop is ready.');
         return;
     }
 
@@ -617,12 +614,10 @@ function pollCreationStatus() {
 }
 
 function startSession() {
-
     const startBtn = document.getElementById('start-btn');
-    if (startBtn) {
-        startBtn.disabled = true;
-        startBtn.innerHTML = '<span class="loading-spinner"></span> Starting...';
-    }
+    if (!startBtn || startBtn.disabled) return;
+    startBtn.disabled = true;
+    startBtn.innerHTML = '<span class="loading-spinner"></span> Starting...';
 
     const formData = new FormData();
     formData.append('nonce', window.init.csrfNonce);
@@ -633,30 +628,42 @@ function startSession() {
         credentials: 'same-origin',
         body: formData
     })
-    .then(response => response.json().then(data => ({ok: response.ok, data})))
-    .then(({ok, data}) => {
+    .then(response => response.json().then(data => ({
+        ok: response.ok,
+        status: response.status,
+        retryAfter: response.headers.get('Retry-After'),
+        data
+    })))
+    .then(({ok, status, retryAfter, data}) => {
+        if (status === 429) {
+            const delay = Math.max(1, Math.ceil(Number(retryAfter) || 1));
+            hideSessionError();
+            showStatusMessage(`Too many attempts. Try starting again in ${delay} seconds.`, delay * 1000);
+            startBtn.innerHTML = `Wait ${delay} seconds`;
+            setTimeout(() => {
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
+            }, delay * 1000);
+            return;
+        }
+
         if (ok && data.status === 'creating') {
             hideSessionError();
             pollCreationStatus();
-        // these two literals mirror src/messages.py, which is the source of truth
-        } else if (data.error === 'Session creation already in progress') {
+        } else if (data.error === 'Session creation already in progress') { // src/messages.py owns these error literals
             hideSessionError();
             pollCreationStatus();
         } else if (data.error === 'Session already exists') {
             reloadPage();
         } else {
-            if (startBtn) {
-                startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
-            }
+            startBtn.disabled = false;
+            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
             showSessionError(data.error || data.message);
         }
     })
     .catch(error => {
-        if (startBtn) {
-            startBtn.disabled = false;
-            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
-        }
+        startBtn.disabled = false;
+        startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
         console.error('Create session error:', error);
         showSessionError('request failed');
     });
@@ -687,10 +694,9 @@ function stopSession() {
 
 function addTime() {
     const addTimeBtn = document.getElementById('add-time-btn');
-    if (addTimeBtn) {
-        addTimeBtn.disabled = true;
-        addTimeBtn.innerHTML = '<span class="loading-spinner"></span> Adding...';
-    }
+    if (!addTimeBtn || addTimeBtn.disabled) return;
+    addTimeBtn.disabled = true;
+    addTimeBtn.innerHTML = '<span class="loading-spinner"></span> Adding...';
 
     const formData = new FormData();
     formData.append('nonce', window.init.csrfNonce);
@@ -701,17 +707,26 @@ function addTime() {
         credentials: 'same-origin',
         body: formData
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.timer) {
-            timeRemaining = data.timer.time_remaining;
-            continuationsUsed = data.timer.extensions_used;
-            expirationWarningShown = false;
+    .then(response => response.json().then(data => ({ok: response.ok, data})))
+    .then(({ok, data}) => {
+        addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        if (!ok || !data.timer) {
+            showStatusMessage(data.error || data.message || 'Could not extend the session.', 4000);
+            updateAddTimeButton();
+            return;
         }
+        timeRemaining = data.timer.time_remaining;
+        continuationsUsed = data.timer.extensions_used;
+        maxContinuations = data.timer.max_extensions;
+        expirationWarningShown = false;
         updateTimerDisplay();
         updateAddTimeButton(true);
     })
-    .catch(() => { updateAddTimeButton(); });
+    .catch(() => {
+        addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+        showStatusMessage('Could not confirm the extension. Refresh to check your remaining time.', 4000);
+        updateAddTimeButton();
+    });
 }
 
 function updateCountdown() {
@@ -753,15 +768,7 @@ function syncWithServer() {
             }
 
             const stopBtn = document.getElementById('stop-btn');
-            const addTimeBtn = document.getElementById('add-time-btn');
             if (stopBtn) stopBtn.disabled = false;
-            if (addTimeBtn) {
-                addTimeBtn.disabled = continuationsUsed >= data.session.timer.max_extensions;
-            }
-
-            if (!document.getElementById('vnc-frame')) {
-                reloadPage();
-            }
         } else if (!data.session) {
             if (document.getElementById('vnc-frame')) {
                 if (sessionTimer) {
@@ -928,7 +935,6 @@ function syncSendButton() {
     const empty = textarea.value.trim().length === 0;
     sendBtn.disabled = reportSending || empty || reportShowingThanks;
 
-    // the send handler owns the button label while the request is in flight
     if (reportSending) return;
 
     if (reportShowingThanks) {
@@ -1064,8 +1070,7 @@ function allowNavigation() {
 
 function reloadPage() {
     allowNavigation();
-    // remove the frames outright, blanking src queues a navigation that re pops the leave dialog
-    document.querySelectorAll('iframe').forEach(f => {
+    document.querySelectorAll('iframe').forEach(f => { // blanking src triggers another leave prompt
         try { f.contentWindow.onbeforeunload = null; } catch (_) {}
         f.remove();
     });
@@ -1078,10 +1083,9 @@ document.addEventListener('DOMContentLoaded', function() {
         document.documentElement.style.setProperty('--navbar-height', navbar.offsetHeight + 'px');
     }
 
-    // set the placeholder here, newline encoding in the html attribute varies by browser
     const reportTextarea = document.getElementById('report-textarea');
     if (reportTextarea) {
-        reportTextarea.placeholder = REPORT_PLACEHOLDER;
+        reportTextarea.placeholder = REPORT_PLACEHOLDER; // html attribute newlines vary by browser
         syncSendButton();
     }
 

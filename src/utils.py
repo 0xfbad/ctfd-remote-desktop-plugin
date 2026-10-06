@@ -67,7 +67,7 @@ local current = redis.call('INCR', KEYS[1])
 if current == 1 then
     redis.call('EXPIRE', KEYS[1], ARGV[1])
 end
-return current
+return {current, math.max(1, math.ceil(redis.call('PTTL', KEYS[1]) / 1000))}
 """
 
 _RATE_LIMIT_DECR_LUA = """
@@ -79,24 +79,24 @@ return current
 """
 
 
-def _increment_rate_limit(key: str, interval: int) -> int:
+def _increment_rate_limit(key: str, interval: int) -> tuple[int, int]:
     from . import event_bus
 
     client = event_bus._get_publish_client()
     if client is not None:
-        return int(client.eval(_RATE_LIMIT_INCR_LUA, 1, key, interval))
+        current, retry_after = client.eval(_RATE_LIMIT_INCR_LUA, 1, key, interval)
+        return int(current), int(retry_after)
 
-    # no portable atomic increment outside redis, this fallback can undercount under concurrent requests
-    from CTFd.cache import cache
+    from CTFd.cache import cache  # nonredis fallback can undercount concurrent requests
 
     try:
         if cache.add(key, 1, timeout=interval):
-            return 1
+            return 1, interval
     except (AttributeError, NotImplementedError):
         pass
     current = int(cache.get(key) or 0) + 1
     cache.set(key, current, timeout=interval)
-    return current
+    return current, interval
 
 
 def _decrement_rate_limit(key: str, interval: int) -> None:
@@ -111,8 +111,7 @@ def _decrement_rate_limit(key: str, interval: int) -> None:
 
     current = int(cache.get(key) or 0)
     if current > 0:
-        # the cache backend cannot rewrite a value without also restarting its window
-        cache.set(key, current - 1, timeout=interval)
+        cache.set(key, current - 1, timeout=interval)  # this backend cannot preserve the remaining window
 
 
 def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_user", count_4xx=True):
@@ -126,22 +125,22 @@ def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_use
 
             user = get_current_user()
             if user is not None:
-                # keyed on user_id not ip so students behind one egress ip are not throttled together
-                bucket = f"u{user.id}"
+                bucket = f"u{user.id}"  # shared egress must not merge authenticated quotas
             else:
                 bucket = f"ip{get_ip()}"
-            # the effective policy is part of the key so a limit change does not inherit an old bucket
-            key = f"ctfd-remote-desktop:{key_prefix}:{bucket}:{request.endpoint}:{limit}:{interval}"
+            key = f"ctfd-remote-desktop:{key_prefix}:{bucket}:{request.endpoint}:{limit}:{interval}"  # policy changes must not inherit old counters
 
-            if _increment_rate_limit(key, interval) > limit:
+            current, retry_after = _increment_rate_limit(key, interval)
+            if current > limit:
                 resp = jsonify({"code": 429, "message": RATE_LIMITED.format(limit=limit, interval=interval)})
                 resp.status_code = 429
-                resp.headers["Retry-After"] = str(interval)
+                resp.headers["Retry-After"] = str(retry_after)
                 return resp
 
             response = f(*args, **kwargs)
-            # a 4xx burst still occupies budget until the compensating decrements land
-            if not count_4xx and 400 <= _response_status(response) < 500:
+            if (
+                not count_4xx and 400 <= _response_status(response) < 500
+            ):  # concurrent requests can exhaust budget before this refund
                 _decrement_rate_limit(key, interval)
             return response
 
