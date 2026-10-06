@@ -1521,7 +1521,7 @@ class ContainerManager:
             history = history_from_row(current, username, ended_at, reason)
             db.session.add(history)
             db.session.delete(current)
-            if operation is not None and operation.session_uuid == session_uuid:
+            if operation is not None:
                 operation.state = OP_IDLE
                 operation.worker_lease_uuid = None
                 operation.cancel_requested = False
