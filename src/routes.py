@@ -122,6 +122,7 @@ _TERMINAL_ERRORS = frozenset(
         STATE_UNKNOWN,
         CREATE_IN_PROGRESS,
         CREATE_ALREADY_RUNNING,
+        SESSION_ALREADY_EXISTS,
         LIFECYCLE_BUSY,
     }
 )
@@ -235,7 +236,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
     def _timer_dict(
         timer_status: TimerStatusDict,
-    ) -> TimerDict | None:  # keep the shape in sync with container_manager._timer_from_row
+    ) -> TimerDict | None:
         if not timer_status.get("success"):
             return None
         return {
@@ -374,7 +375,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 username=user.name,
                 level="warning",
             )
-            return jsonify({"error": SESSION_ALREADY_EXISTS}), 400
+            return jsonify({"error": SESSION_ALREADY_EXISTS}), 409
 
         creation_status = container_manager.get_creation_status(user.id)
         if creation_status and creation_status.get("status") not in ["failed", "none"]:
@@ -550,9 +551,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans", methods=["GET"])
     @admins_only
     def admin_get_paused_orphans():
-        return jsonify(
-            {"orphans": container_manager.list_paused_orphans()}
-        )  # dashboard escaping preserves exact docker identifiers for removal
+        return jsonify({"orphans": container_manager.list_paused_orphans()})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans/remove", methods=["POST"])
     @admins_only
@@ -1004,7 +1003,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except (ValueError, TypeError):
             return "", 400
         current_user = get_current_user()
-        if current_user.id != user_id:  # admin privilege does not grant access to another desktop
+        if current_user.id != user_id:
             return "", 403
 
         row = DesktopContainerInfoModel.query.filter_by(
@@ -1515,7 +1514,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except SettingsValidationError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        _reload_contexts_everywhere()  # settings changes can invalidate cached host eligibility
+        _reload_contexts_everywhere()
         restart_required = sorted(RESTART_REQUIRED_SETTINGS.intersection(updates))
         response: dict[str, object] = {"success": True}
         if restart_required:
