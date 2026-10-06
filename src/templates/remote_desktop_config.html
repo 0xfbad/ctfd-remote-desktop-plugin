@@ -778,7 +778,7 @@
 
     function renderMatrix(imgs, ctxs, mx, box) {
         function createdLabel(info) {
-            return Number(info.created_at) > 0 ? new Date(info.created_at * 1000).toLocaleString() : info.created;
+            return new Date(info.created_at * 1000).toLocaleString();
         }
 
         if (!imgs.length) { box.innerHTML = '<p class="text-muted text-center small">No image configured</p>'; return; }

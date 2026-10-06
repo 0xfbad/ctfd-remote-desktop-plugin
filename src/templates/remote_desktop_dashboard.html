@@ -916,7 +916,6 @@
 				.then(async response => {
 					const data = await response.json();
 					if (!response.ok || !data.success) throw new Error(data.error || 'Could not clear reports');
-					return data;
 				})
 				.then(() => refreshReports())
 				.catch(error => CTFd.ui.ezq.ezAlert({ title: 'Error', body: error.message, button: 'OK' }));
