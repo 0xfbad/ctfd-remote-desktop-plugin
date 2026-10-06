@@ -1025,9 +1025,11 @@ class ContainerManager:
         if attempt.container_create_started and container_name and context_name:
             try:
                 # auto_remove never fires for a container that was created but never started
-                self.host_manager.force_remove_container(context_name, container_name)
-                stopped_ok = True
-                logger.info(f"removed container {container_name} after creation failure")
+                stopped_ok = self.host_manager.force_remove_container(context_name, container_name)
+                if stopped_ok:
+                    logger.info(f"removed container {container_name} after creation failure")
+                else:
+                    logger.info(f"container {container_name} removal is pending after creation failure")
             except Exception as stop_error:
                 logger.error(f"failed to stop container during cleanup: {stop_error}")
 
@@ -1438,6 +1440,8 @@ class ContainerManager:
 
             cookie_revoked = _revoke_session_cookie(current_app, cookie_sid)
 
+        removal_pending = False
+        stop_error = None
         try:
             if (
                 was_paused
@@ -1445,7 +1449,9 @@ class ContainerManager:
                 or reason == END_REASON_RECONCILIATION
             ):
                 # stop on a frozen container blocks for the full timeout so remove directly
-                self.host_manager.force_remove_container(context_name, container_id)
+                removal_pending = not self.host_manager.force_remove_container(context_name, container_id)
+                if removal_pending:
+                    stop_error = "container removal in progress"
             else:
                 # stop by id so a replacement that reused the name is never touched
                 self.host_manager.stop_container(context_name, container_id)
@@ -1456,16 +1462,22 @@ class ContainerManager:
             OSError,
             HostsUnavailableException,
         ) as e:
+            stop_error = str(e)
+
+        if stop_error is not None:
             # an unknown outcome keeps the row and its reservations, recovery retries the same container
             with self._get_destroy_lock(user_id):
                 operation, current = self._reload_session_rows(user_id, row)
                 if not self._mark_cleanup_pending(
-                    operation, current, session_uuid, worker_uuid, container_id, reason, str(e)
+                    operation, current, session_uuid, worker_uuid, container_id, reason, stop_error
                 ):
                     return {"success": False, "error": SESSION_CHANGED}
-            logger.warning(
-                f"stop outcome unknown for {container_name}: context unavailable; retaining the capacity reservation"
-            )
+            if removal_pending:
+                logger.info(f"container {container_name} removal is pending, retaining the capacity reservation")
+            else:
+                logger.warning(
+                    f"stop outcome unknown for {container_name}: context unavailable; retaining the capacity reservation"
+                )
             return {"success": False, "error": STOP_OUTCOME_UNKNOWN}
 
         if not cookie_revoked:
@@ -1928,8 +1940,9 @@ class ContainerManager:
                     )
                     return
                 else:
-                    self.host_manager.force_remove_container(context_name, container_name)
-                    confirmed_absent = True
+                    confirmed_absent = self.host_manager.force_remove_container(context_name, container_name)
+                    if not confirmed_absent:
+                        self._note_takeover_outcome(user_id, takeover_uuid, "container removal in progress")
             except (
                 docker.errors.DockerException,
                 paramiko.ssh_exception.SSHException,
@@ -2024,7 +2037,9 @@ class ContainerManager:
                 logger.warning(f"reconcile: removing orphan {name} on {ctx_name} (age {int(age)}s)")
                 try:
                     # orphans need no reservation decrement, force removal also covers containers that never started
-                    self.host_manager.force_remove_container(ctx_name, name)
+                    if not self.host_manager.force_remove_container(ctx_name, name):
+                        logger.info(f"reconcile: orphan {name} on {ctx_name} removal is pending")
+                        continue
                     event_logger.log_event(
                         "orphan_reaped",
                         f"reaped orphan container {name} on {ctx_name}",

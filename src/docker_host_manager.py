@@ -972,20 +972,31 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
-    def force_remove_container(self, context_name: str, container_name: str) -> None:
+    def force_remove_container(self, context_name: str, container_name: str) -> bool:
         # stop does nothing to a created container so auto_remove never fires, forced removal covers every state in one call
-        def _do():
+        def _do() -> bool:
             client = self._get_client(context_name)
+            container = None
             try:
                 container = client.containers.get(container_name)
                 container.remove(force=True)
             except docker.errors.NotFound:
                 logger.debug(f"container {container_name} already removed")
+            except docker.errors.APIError as exc:
+                if (
+                    exc.status_code == 409
+                    and container is not None
+                    and exc.explanation == f"removal of container {container.id} is already in progress"
+                ):
+                    return False
+                self._clear_client(context_name)
+                raise
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException):
                 self._clear_client(context_name)
                 raise
             except Exception:
                 raise self._transient_host_failure(context_name)
+            return True
 
         return self._call(context_name, _do)
 
