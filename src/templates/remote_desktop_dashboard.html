@@ -123,6 +123,11 @@
 	.status-expired { color: #dc3545; font-weight: bold; }
 	.status-warning { color: #ffc107; font-weight: bold; }
 
+	.actions-cell {
+		width: 1%;
+		white-space: nowrap;
+	}
+
 	.action-buttons {
 		white-space: nowrap;
 		display: flex;
@@ -326,7 +331,7 @@
 									<th><b>Time Remaining</b></th>
 									<th><b>Extends</b></th>
 									<th><b>Status</b></th>
-									<th><b>Actions</b></th>
+									<th class="actions-cell"><b>Actions</b></th>
 								</tr>
 							</thead>
 							<tbody id="containers-table">
@@ -1124,21 +1129,23 @@
 					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
 					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
 					<td><span class="${statusClass}">${status}</span></td>
-					<td class="action-buttons">
-						${status === 'ACTIVE' || status === 'EXPIRING' ? `
-							<a class="btn btn-sm" href="${window.init.urlRoot}/remote-desktop/dashboard/view/${container.user_id}" target="_blank" rel="noopener" onclick="window.open(this.href, '_blank', 'popup,noopener,width=1280,height=800'); return false;" title="View only" aria-label="View only">
-								<i class="fas fa-eye icon-monitor"></i>
-							</a>
-						` : ''}
-						${pauseBtn}
-						<button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
-							<i class="fas fa-times icon-kill"></i>
-						</button>
-						${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
-							<button class="btn btn-sm" onclick="extendContainer(${container.user_id})" title="Extend">
-								<i class="fas fa-clock icon-extend"></i>
+					<td class="actions-cell">
+						<div class="action-buttons">
+							${status === 'ACTIVE' || status === 'EXPIRING' ? `
+								<a class="btn btn-sm" href="${window.init.urlRoot}/remote-desktop/dashboard/view/${container.user_id}" target="_blank" rel="noopener" onclick="window.open(this.href, '_blank', 'popup,noopener,width=1280,height=800'); return false;" title="View only" aria-label="View only">
+									<i class="fas fa-eye icon-monitor"></i>
+								</a>
+							` : ''}
+							${pauseBtn}
+							<button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
+								<i class="fas fa-times icon-kill"></i>
 							</button>
-						` : ''}
+							${container.timer && container.timer.extensions_used < container.timer.max_extensions ? `
+								<button class="btn btn-sm" onclick="extendContainer(${container.user_id})" title="Extend">
+									<i class="fas fa-clock icon-extend"></i>
+								</button>
+							` : ''}
+						</div>
 					</td>
 				</tr>
 			`;
