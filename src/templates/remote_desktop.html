@@ -553,69 +553,164 @@ function updateAddTimeButton(showCount) {
     }
 }
 
+const creationPoll = {generation: 0, pending: null, active: false};
+const sessionPoll = {generation: 0, pending: null, active: true};
 let pollInterval = null;
-let pollStartTime = null;
-const POLL_TIMEOUT = 120000;
+let pollDeadline = null;
+let readyReloadTimer = null;
+let resumeCreationPolling = false;
+
+function cancelPoll(state) {
+    state.generation++;
+    state.active = false;
+    const pending = state.pending;
+    state.pending = null;
+    if (pending) pending.abort();
+    if (state !== creationPoll) return;
+    clearInterval(pollInterval);
+    clearTimeout(pollDeadline);
+    clearTimeout(readyReloadTimer);
+    pollInterval = pollDeadline = readyReloadTimer = null;
+}
+
+function cancelPolling() {
+    cancelPoll(creationPoll);
+    cancelPoll(sessionPoll);
+}
+
+function pollRequest(state, path, accept) {
+    if (!state.active || state.pending) return;
+    const generation = state.generation;
+    const controller = new AbortController();
+    state.pending = controller;
+    Promise.resolve().then(() => fetch(path, {
+        method: 'GET',
+        headers: {'X-Requested-With': 'XMLHttpRequest'},
+        credentials: 'same-origin',
+        signal: controller.signal
+    }))
+    .then(response => {
+        if (!response.ok) throw new Error('status request failed');
+        return response.json();
+    })
+    .then(data => {
+        if (generation !== state.generation || !state.active) return;
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new Error('invalid status response');
+        }
+        accept(data, generation);
+    })
+    .catch(error => {
+        if (generation === state.generation && error.name !== 'AbortError') {
+            console.error('Status error:', error);
+        }
+    })
+    .finally(() => {
+        if (state.pending === controller) state.pending = null;
+    });
+}
+
+function validTimer(timer) {
+    return timer && typeof timer.active === 'boolean' &&
+        ['time_remaining', 'extensions_used', 'max_extensions'].every(
+            key => Number.isInteger(timer[key]) && timer[key] >= 0
+        );
+}
+
+function validSession(session) {
+    return session && typeof session === 'object' && !Array.isArray(session) &&
+        Number.isFinite(session.created_at) && typeof session.vnc_url === 'string' &&
+        Object.hasOwn(session, 'timer') && (session.timer === null || validTimer(session.timer));
+}
+
+function resetStartButton() {
+    const button = document.getElementById('start-btn');
+    if (!button) return;
+    button.disabled = false;
+    button.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
+}
 
 function checkStatus() {
-    const startBtn = document.getElementById('start-btn');
-    const elapsed = Date.now() - pollStartTime;
-
-    if (elapsed > POLL_TIMEOUT) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-        if (startBtn) {
-            startBtn.disabled = false;
-            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
+    pollRequest(creationPoll, '/remote-desktop/api/creation-status', (data, generation) => {
+        const button = document.getElementById('start-btn');
+        if (['message', 'error', 'hostname'].some(key => Object.hasOwn(data, key) && typeof data[key] !== 'string')) {
+            throw new Error('invalid creation response');
         }
-        showSessionError('Readiness could not be confirmed. Refresh to check whether your desktop is ready.');
-        return;
-    }
-
-    fetch('/remote-desktop/api/creation-status', {
-        method: 'GET',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        credentials: 'same-origin'
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.status === 'ready' && data.session) {
+        if (data.status === 'ready') {
+            if (!validSession(data.session)) throw new Error('invalid ready session');
+            creationPoll.active = false;
             clearInterval(pollInterval);
-            pollInterval = null;
-
-            if (startBtn) {
-                startBtn.innerHTML = '<span class="loading-spinner"></span> Loading...';
-            }
-            setTimeout(() => { reloadPage(); }, 1000);
-        } else if (data.status === 'failed') {
-            clearInterval(pollInterval);
-            pollInterval = null;
-            if (startBtn) {
-                startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
-            }
-
-            showSessionError(data.error || data.message);
-        } else {
-            const message = data.message || 'Creating container...';
-
-            if (startBtn) {
-                startBtn.innerHTML = `<span class="loading-spinner"></span> ${message}`;
-            }
+            clearTimeout(pollDeadline);
+            pollInterval = pollDeadline = null;
+            if (button) button.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            readyReloadTimer = setTimeout(() => {
+                readyReloadTimer = null;
+                if (generation === creationPoll.generation) reloadPage();
+            }, 1000);
+            return;
         }
-    })
-    .catch(error => { console.error('Poll error:', error); });
+        if (data.status === 'failed' || data.status === 'cancelled') {
+            cancelPoll(creationPoll);
+            resetStartButton();
+            showSessionError(typeof data.error === 'string' ? data.error : data.message);
+            return;
+        }
+        if (!['none', 'queued', 'selecting', 'reserved', 'creating', 'waiting_ready', 'cancel_requested', 'cleanup_pending', 'selecting_host', 'starting_container', 'waiting_vnc'].includes(data.status)) {
+            throw new Error('invalid creation status');
+        }
+        if (button) {
+            button.innerHTML = '<span class="loading-spinner"></span> ';
+            button.append(document.createTextNode(typeof data.message === 'string' ? data.message : 'Creating container...'));
+        }
+    });
 }
 
 function pollCreationStatus() {
-    pollStartTime = Date.now();
-    checkStatus();
+    cancelPoll(creationPoll);
+    creationPoll.active = true;
+    const generation = creationPoll.generation;
+    pollDeadline = setTimeout(() => {
+        if (generation !== creationPoll.generation) return;
+        cancelPoll(creationPoll);
+        resetStartButton();
+        showSessionError('Readiness could not be confirmed. Refresh to check whether your desktop is ready.');
+    }, 120000);
     pollInterval = setInterval(checkStatus, 2000);
+    checkStatus();
+}
+
+function syncWithServer() {
+    pollRequest(sessionPoll, '/remote-desktop/api/status', data => {
+        if (!Object.hasOwn(data, 'session')) throw new Error('session field missing');
+        if (data.session === null) {
+            if (!document.getElementById('vnc-frame')) return;
+            cancelPoll(sessionPoll);
+            clearInterval(sessionTimer);
+            sessionTimer = null;
+            reloadPage();
+            return;
+        }
+        if (!validSession(data.session)) throw new Error('invalid session');
+        const timer = data.session.timer;
+        if (timer === null) return;
+        timeRemaining = timer.time_remaining;
+        continuationsUsed = timer.extensions_used;
+        maxContinuations = timer.max_extensions;
+        if (timeRemaining > 300) expirationWarningShown = false;
+        updateTimerDisplay();
+        updateAddTimeButton();
+        if (!sessionTimer && timer.active && timeRemaining > 0) {
+            sessionTimer = setInterval(updateCountdown, 1000);
+        }
+        const stopButton = document.getElementById('stop-btn');
+        if (stopButton) stopButton.disabled = false;
+    });
 }
 
 function startSession() {
     const startBtn = document.getElementById('start-btn');
     if (!startBtn || startBtn.disabled) return;
+    cancelPolling();
     startBtn.disabled = true;
     startBtn.innerHTML = '<span class="loading-spinner"></span> Starting...';
 
@@ -671,6 +766,7 @@ function startSession() {
 
 function stopSession() {
     if (!confirm('Are you sure you want to stop your session?')) return;
+    cancelPolling();
 
     const stopBtn = document.getElementById('stop-btn');
     if (stopBtn) {
@@ -744,43 +840,6 @@ function updateCountdown() {
     }
 }
 
-
-function syncWithServer() {
-    fetch('/remote-desktop/api/status', {
-        method: 'GET',
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        credentials: 'same-origin'
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.session && data.session.timer) {
-            timeRemaining = data.session.timer.time_remaining;
-            continuationsUsed = data.session.timer.extensions_used;
-            maxContinuations = data.session.timer.max_extensions;
-
-            if (timeRemaining > 300) expirationWarningShown = false;
-
-            updateTimerDisplay();
-            updateAddTimeButton();
-
-            if (!sessionTimer && data.session.timer.active && timeRemaining > 0) {
-                sessionTimer = setInterval(updateCountdown, 1000);
-            }
-
-            const stopBtn = document.getElementById('stop-btn');
-            if (stopBtn) stopBtn.disabled = false;
-        } else if (!data.session) {
-            if (document.getElementById('vnc-frame')) {
-                if (sessionTimer) {
-                    clearInterval(sessionTimer);
-                    sessionTimer = null;
-                }
-                reloadPage();
-            }
-        }
-    })
-    .catch(error => { console.error('Sync error:', error); });
-}
 
 function switchMode(mode, tabEl) {
     document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
@@ -1077,6 +1136,22 @@ function reloadPage() {
     window.location.href = window.location.pathname + window.location.search;
 }
 
+window.addEventListener('pagehide', () => {
+    resumeCreationPolling = creationPoll.active || readyReloadTimer !== null;
+    cancelPolling();
+});
+
+window.addEventListener('pageshow', event => {
+    if (!event.persisted) return;
+    sessionPoll.active = true;
+    if (resumeCreationPolling) {
+        resumeCreationPolling = false;
+        pollCreationStatus();
+    } else if (document.getElementById('vnc-frame')) {
+        syncWithServer();
+    }
+});
+
 document.addEventListener('DOMContentLoaded', function() {
     const navbar = document.querySelector('.navbar');
     if (navbar) {
@@ -1102,7 +1177,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (startBtn) {
         startBtn.disabled = true;
         const message = creationStatus.message || 'Creating container...';
-        startBtn.innerHTML = `<span class="loading-spinner"></span>${message}`;
+        startBtn.innerHTML = '<span class="loading-spinner"></span>';
+        startBtn.append(document.createTextNode(message));
     }
 
     showStatusMessage(creationStatus.message || 'Creating container...', 0);
