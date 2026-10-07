@@ -237,24 +237,12 @@ def register_routes(blueprint: Blueprint, request_timezone: Callable[[], datetim
     def command_summary():
         query = _query()
         total = query.count()
-        states = (
-            DesktopContainerInfoModel.query.filter_by(lifecycle_state=LIFECYCLE_ACTIVE, paused_at=None)
-            .join(Users, DesktopContainerInfoModel.user_id == Users.id)
-            .outerjoin(
-                DesktopCommandCursorModel,
-                DesktopContainerInfoModel.session_uuid == DesktopCommandCursorModel.session_uuid,
-            )
-            .filter(Users.hidden.is_(False))
-            .with_entities(DesktopCommandCursorModel.status)
-            .all()
-        )
         return jsonify(
             {
                 "total_commands": total,
                 "failed_commands": query.filter(DesktopRecordedCommandModel.exit_code != 0).count(),
                 "unique_commands": query.with_entities(DesktopRecordedCommandModel.command).distinct().count(),
                 "unique_tools": query.with_entities(DesktopRecordedCommandModel.tool).distinct().count(),
-                "coverage": dict(collections.Counter(status or "unknown" for (status,) in states)),
             }
         )
 

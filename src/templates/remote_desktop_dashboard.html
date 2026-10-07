@@ -40,8 +40,13 @@
 		margin-bottom: 0;
 	}
 
-	.table-sm td, .table-sm th {
+	.table-sm > tbody > tr > td,
+	.table-sm > thead > tr > th {
 		padding: .4rem .5rem;
+	}
+
+	.form-select {
+		background-image: var(--bs-form-select-bg-img);
 	}
 
 	.table tbody tr,
@@ -429,7 +434,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Usage Heatmap <span class="cfg-help" data-tip="Session starts by hour and day of week. Spot peak usage windows for capacity planning.">?</span></h3>
-					<select class="form-control form-control-sm" style="width: auto;" onchange="refreshHeatmap(this.value)" id="heatmap-period">
+					<select class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshHeatmap(this.value)" id="heatmap-period">
 						<option value="week" selected>Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -447,7 +452,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Top Users <span class="cfg-help" data-tip="Ranked by total desktop time. Identify power users or accounts consuming disproportionate resources.">?</span></h3>
-					<select id="period-top-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshTopUsers()">
+					<select id="period-top-users" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshTopUsers()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -466,7 +471,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Session Duration Distribution <span class="cfg-help" data-tip="How long sessions typically last. If most are very short, your timeout may be too aggressive. If most hit the max, users probably need more time.">?</span></h3>
-					<select id="period-duration-dist" class="form-control form-control-sm" style="width: auto;" onchange="refreshDurationDist()">
+					<select id="period-duration-dist" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshDurationDist()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -481,7 +486,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Session End Reasons <span class="cfg-help" data-tip="Why sessions ended: expired, user-closed, or admin-killed. A high expired count means users may need longer timers or more extensions.">?</span></h3>
-					<select id="period-end-reasons" class="form-control form-control-sm" style="width: auto;" onchange="refreshEndReasons()">
+					<select id="period-end-reasons" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshEndReasons()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -499,7 +504,7 @@
 			<div class="card">
 				<div class="card-header">
 					<h3 class="card-title">Per-Host Breakdown <span class="cfg-help" data-tip="Session distribution across Docker hosts. Check if load balancing weights are working or if one host is taking all the traffic.">?</span></h3>
-					<select id="period-per-host" class="form-control form-control-sm" style="width: auto;" onchange="refreshPerHost()">
+					<select id="period-per-host" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshPerHost()">
 						<option value="week">Past Week</option>
 						<option value="month">Past Month</option>
 						<option value="all">All Time</option>
@@ -517,30 +522,29 @@
 		<div class="row mb-3">
 			<div class="col-md-12">
 				<h2>Command Logs</h2>
-				<p id="command-coverage" class="text-muted small"></p>
 			</div>
 		</div>
 
 		<div class="row">
 			<div class="col-md-4">
-				<div class="card stat-card bg-light">
-					<div class="card-body text-center py-3">
+				<div class="card bg-light">
+					<div class="card-body text-center py-2 px-2">
 						<h4 id="stat-total-commands" class="mb-0">0</h4>
-						<small class="text-muted">Recorded Commands</small>
+						<small class="text-muted">Total Commands</small>
 					</div>
 				</div>
 			</div>
 			<div class="col-md-4">
-				<div class="card stat-card bg-light">
-					<div class="card-body text-center py-3">
+				<div class="card bg-light">
+					<div class="card-body text-center py-2 px-2">
 						<h4 id="stat-unique-tools" class="mb-0">0</h4>
 						<small class="text-muted">Unique Tools</small>
 					</div>
 				</div>
 			</div>
 			<div class="col-md-4">
-				<div class="card stat-card bg-light">
-					<div class="card-body text-center py-3">
+				<div class="card bg-light">
+					<div class="card-body text-center py-2 px-2">
 						<h4 id="stat-unique-commands" class="mb-0">0</h4>
 						<small class="text-muted">Unique Commands</small>
 					</div>
@@ -551,7 +555,7 @@
 		<div class="row">
 			<div class="col-md-12">
 				<div class="card">
-					<div class="card-header">
+					<div class="card-header py-2 px-3">
 						<h3 class="card-title">Command Feed</h3>
 					</div>
 					<div class="card-body">
@@ -580,9 +584,9 @@
 		<div class="row">
 			<div class="col-md-12">
 				<div class="card">
-					<div class="card-header">
+					<div class="card-header py-2 px-3">
 						<h3 class="card-title">Per-User Commands</h3>
-						<select id="period-cmd-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshCommandUsers()">
+						<select id="period-cmd-users" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshCommandUsers()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
@@ -610,9 +614,9 @@
 		<div class="row">
 			<div class="col-md-6">
 				<div class="card">
-					<div class="card-header">
+					<div class="card-header py-2 px-3">
 						<h3 class="card-title">Top Tools</h3>
-						<select id="period-cmd-tools" class="form-control form-control-sm" style="width: auto;" onchange="refreshCommandTools()">
+						<select id="period-cmd-tools" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshCommandTools()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
@@ -625,9 +629,9 @@
 			</div>
 			<div class="col-md-6">
 				<div class="card">
-					<div class="card-header">
+					<div class="card-header py-2 px-3">
 						<h3 class="card-title">Command Activity</h3>
-						<select id="period-cmd-heatmap" class="form-control form-control-sm" style="width: auto;" onchange="refreshCommandHeatmap()">
+						<select id="period-cmd-heatmap" class="form-select form-select-sm w-auto py-1 pe-4" onchange="refreshCommandHeatmap()">
 							<option value="week">Past Week</option>
 							<option value="month">Past Month</option>
 							<option value="all">All Time</option>
@@ -1517,15 +1521,10 @@
 			document.getElementById('stat-total-commands').textContent = data.total_commands.toLocaleString();
 			document.getElementById('stat-unique-tools').textContent = data.unique_tools.toLocaleString();
 			document.getElementById('stat-unique-commands').textContent = data.unique_commands.toLocaleString();
-			const coverage = data.coverage;
-			document.getElementById('command-coverage').textContent = Object.keys(coverage).length
-				? `Available: ${coverage.recording || 0} · Unavailable: ${(coverage.unknown || 0) + (coverage.unavailable || 0)} · Incomplete: ${coverage.discontinuous || 0}`
-				: 'No active sessions';
 		} catch (error) {
 			['stat-total-commands', 'stat-unique-tools', 'stat-unique-commands'].forEach(id => {
 				document.getElementById(id).textContent = '—';
 			});
-			document.getElementById('command-coverage').textContent = 'Unavailable';
 		}
 	}
 
@@ -1536,7 +1535,7 @@
 			feed.innerHTML = data.logs.map(log => `<tr>
 				<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
 				<td class="log-user">${userLink(log)}</td>
-				<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
+				<td class="cell-clip" title="${log.command}"><code class="text-body">${log.command}</code></td>
 				<td><span class="badge ${log.exit_code === 0 ? 'bg-success' : 'bg-danger'}">${log.exit_code}</span></td>
 			</tr>`).join('') || '<tr><td colspan="4" class="text-center text-muted">No commands yet</td></tr>';
 		} catch (error) {
@@ -1661,10 +1660,10 @@
 			if (userId !== modal.dataset.userId || String(offset) !== tbody.dataset.offset) return;
 			tbody.innerHTML = data.logs.map(log => `<tr>
 				<td class="text-nowrap">${escapeHtml(formatTimestamp(log.timestamp))}</td>
-				<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
+				<td class="cell-clip" title="${log.command}"><code class="text-body">${log.command}</code></td>
 				<td class="${log.exit_code === 0 ? 'text-success' : 'text-danger'}">${log.exit_code}</td>
 				<td>${log.duration_ms === null ? '—' : `${log.duration_ms / 1000}s`}</td>
-				<td class="cell-clip-sm" title="${log.cwd}">${log.cwd}</td>
+				<td class="cell-clip-sm" title="${log.cwd}"><code class="text-body">${log.cwd}</code></td>
 			</tr>`).join('') || '<tr><td colspan="5" class="text-center text-muted">No commands</td></tr>';
 			document.getElementById('cmd-history-info').textContent = data.total ? `Showing ${offset + 1}–${offset + data.logs.length} of ${data.total}` : '0 recorded';
 			previous.disabled = offset === 0;
