@@ -1126,7 +1126,7 @@
 					<td><span class="${statusClass}">${status}</span></td>
 					<td class="action-buttons">
 						${status === 'ACTIVE' || status === 'EXPIRING' ? `
-							<a class="btn btn-sm" href="${window.init.urlRoot}/remote-desktop/dashboard/view/${container.user_id}" target="_blank" rel="noopener" title="View only" aria-label="View only">
+							<a class="btn btn-sm" href="${window.init.urlRoot}/remote-desktop/dashboard/view/${container.user_id}" target="_blank" rel="noopener" onclick="window.open(this.href, '_blank', 'popup,noopener,width=1280,height=800'); return false;" title="View only" aria-label="View only">
 								<i class="fas fa-eye icon-monitor"></i>
 							</a>
 						` : ''}

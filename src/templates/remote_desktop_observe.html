@@ -1,21 +1,17 @@
-{% extends "admin/base.html" %}
-
-{% block page_title %}{{ target_name }} - Remote Desktop{% endblock %}
-
-{% block content %}
-<div class="container-fluid mt-5 pt-4 px-3">
-    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
-        <div>
-            <h1 class="h4 mb-1">{{ target_name }}'s desktop</h1>
-            <p id="view-status" class="text-muted mb-0" role="status">Connecting, view only</p>
-        </div>
-        <a class="btn btn-outline-secondary" href="{{ url_for('remote_desktop.admin_dashboard') }}">Back to dashboard</a>
-    </div>
-    <div id="desktop-view" class="border rounded overflow-hidden" style="height: calc(100dvh - 13rem); min-height: 20rem;"></div>
-</div>
-{% endblock %}
-
-{% block scripts %}
+<!DOCTYPE html>
+<html data-bs-theme="dark" data-default-theme="dark">
+<head>
+    {% from "core/macros/page-title.html" import render_page_title with context %}
+    <title>{{ render_page_title(target_name ~ " - Remote Desktop") }}</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="shortcut icon" href="{{ Configs.ctf_small_icon }}" type="image/x-icon">
+    {{ Assets.css("assets/scss/main.scss", theme="core") }}
+    {{ Assets.js("assets/js/color_mode_switcher.js", theme="core", type=None) }}
+</head>
+<body class="overflow-hidden">
+<p id="view-status" class="position-fixed top-0 start-0 p-2 bg-body" role="status">Connecting…</p>
+<div id="desktop-view" role="main" aria-label="{{ target_name }}'s desktop" style="height: 100dvh;"></div>
 <script type="module">
     import RFB from {{ rfb_module | tojson }};
 
@@ -30,13 +26,16 @@
     rfb.scaleViewport = true;
 
     rfb.addEventListener('connect', () => {
-        status.textContent = 'Connected, view only';
+        status.hidden = true;
     });
     rfb.addEventListener('disconnect', () => {
-        status.textContent = 'Session disconnected';
+        status.hidden = false;
+        status.textContent = 'Disconnected';
     });
     rfb.addEventListener('securityfailure', () => {
-        status.textContent = 'Could not authenticate this session, refresh to try again';
+        status.hidden = false;
+        status.textContent = 'Authentication failed';
     });
 </script>
-{% endblock %}
+</body>
+</html>
