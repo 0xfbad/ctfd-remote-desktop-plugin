@@ -17,8 +17,6 @@ def _schema_bootstrap_lock_name(database_url: str) -> str:
 
 
 def prepare_database(app: Any) -> None:
-    """creates the schema for a fresh deployment, existing tables are never mutated
-    a mismatch fails closed in validate_database_schema"""
     database_url = app.config.get("SQLALCHEMY_DATABASE_URI")
     if not isinstance(database_url, str):
         app.db.create_all()  # test app doubles set no SQLALCHEMY_DATABASE_URI, production always does
@@ -33,9 +31,10 @@ def prepare_database(app: Any) -> None:
 
     lock_name = _schema_bootstrap_lock_name(database_url)
     with app.db.engine.connect() as lock_connection:
-        # workers without preload build the app at once, the lock keeps them off one check then create
         acquired = lock_connection.execute(
-            text("SELECT GET_LOCK(:lock_name, 60)"),
+            text(
+                "SELECT GET_LOCK(:lock_name, 60)"
+            ),  # workers build apps concurrently and must not race schema creation
             {"lock_name": lock_name},
         ).scalar()
         if acquired != 1:
@@ -51,8 +50,7 @@ def prepare_database(app: Any) -> None:
                     {"lock_name": lock_name},
                 ).scalar()
             except BaseException:
-                # a failed RELEASE_LOCK may still hold the lock, invalidate discards the connection
-                lock_connection.invalidate()
+                lock_connection.invalidate()  # a failed RELEASE_LOCK may still hold the lock
                 raise
 
             if released != 1:
@@ -138,6 +136,28 @@ def validate_database_schema(app: Any) -> None:
             "content",
         },
         "desktop_settings": {"key", "value"},
+        "desktop_recorded_commands": {
+            "id",
+            "user_id",
+            "session_uuid",
+            "byte_offset",
+            "timestamp",
+            "command",
+            "tool",
+            "exit_code",
+            "duration_ms",
+            "cwd",
+            "tty",
+        },
+        "desktop_command_cursors": {
+            "session_uuid",
+            "user_id",
+            "container_id",
+            "byte_offset",
+            "journal_id",
+            "last_read_at",
+            "status",
+        },
         "desktop_plugin_metadata": {"key", "value"},
         "desktop_event_log": {
             "id",
@@ -164,8 +184,29 @@ def validate_database_schema(app: Any) -> None:
         if unexpected:
             problems.append(f"{table} has unexpected columns {', '.join(unexpected)}")
 
-    # fresh install bootstrap has no repair path, a same named incompatible table must fail here not mid session
     column_contracts: dict[str, dict[str, tuple[bool, tuple[str, ...], int | None]]] = {
+        "desktop_recorded_commands": {
+            "id": (False, ("int",), None),
+            "user_id": (False, ("int",), None),
+            "session_uuid": (False, ("char", "string"), 36),
+            "byte_offset": (False, ("int",), None),
+            "timestamp": (False, ("float", "double", "real"), None),
+            "command": (False, ("text",), None),
+            "tool": (False, ("text",), None),
+            "exit_code": (False, ("int",), None),
+            "duration_ms": (True, ("int",), None),
+            "cwd": (False, ("text",), None),
+            "tty": (False, ("text",), None),
+        },
+        "desktop_command_cursors": {
+            "session_uuid": (False, ("char", "string"), 36),
+            "user_id": (False, ("int",), None),
+            "container_id": (False, ("char", "string"), 512),
+            "byte_offset": (False, ("int",), None),
+            "journal_id": (True, ("char", "string"), 128),
+            "last_read_at": (True, ("float", "double", "real"), None),
+            "status": (False, ("char", "string"), 32),
+        },
         "desktop_docker_contexts": {
             "id": (False, ("int",), None),
             "context_name": (False, ("char", "string"), 512),
@@ -275,6 +316,7 @@ def validate_database_schema(app: Any) -> None:
                 problems.append(f"{table}.{column_name} must have length {length}")
 
     expected_uniques = {
+        "desktop_recorded_commands": (("session_uuid", "byte_offset"),),
         "desktop_docker_contexts": (("context_name",),),
         "desktop_container_info": (("user_id",), ("session_uuid",)),
         "desktop_session_history": (("session_uuid",),),
@@ -295,6 +337,8 @@ def validate_database_schema(app: Any) -> None:
                 problems.append(f"{table} missing UNIQUE{columns}")
 
     expected_primary_keys = {
+        "desktop_recorded_commands": ("id",),
+        "desktop_command_cursors": ("session_uuid",),
         "desktop_docker_contexts": ("id",),
         "desktop_container_info": ("container_id",),
         "desktop_session_history": ("id",),
@@ -312,6 +356,8 @@ def validate_database_schema(app: Any) -> None:
             problems.append(f"{table} must have PRIMARY KEY{expected_columns}")
 
     for table in (
+        "desktop_recorded_commands",
+        "desktop_command_cursors",
         "desktop_container_info",
         "desktop_session_operations",
         "desktop_session_history",

@@ -27,15 +27,15 @@ from . import workspace_context
 from .database import prepare_database as _prepare_database
 from .database import validate_database_schema as _validate_database_schema  # noqa: F401
 
-# must precede the instance import below, that import rebinds the package attribute event_logger
-from . import event_logger as event_logger_module
+from . import (
+    event_logger as event_logger_module,
+)  # the instance import below rebinds the package attribute event_logger
 from .event_logger import event_logger
 
 logger = logging.getLogger(__name__)
 
 _scheduler_state_lock = threading.Lock()
-# named locks and file locks are connection scoped, the owner must stay alive for the worker life
-_scheduler_lock_connection = None
+_scheduler_lock_connection = None  # named locks are connection scoped so the owner must survive for the worker life
 _scheduler_lock_fd = None
 _scheduler_lock_name: str | None = None
 _scheduler_release_registered = False
@@ -130,8 +130,9 @@ def _claim_mariadb_scheduler_leader(app: Flask) -> bool:
         _register_scheduler_release()
         return True
     except Exception as exc:
-        # the server may have granted GET_LOCK before the error surfaced, a pooled close keeps it
-        _invalidate_scheduler_connection(connection, exc)
+        _invalidate_scheduler_connection(
+            connection, exc
+        )  # GET_LOCK may succeed before the error and a pooled close keeps it
         raise
 
 
@@ -187,7 +188,6 @@ def _claim_scheduler_leader(app: Flask) -> bool:
 
 
 def _gunicorn_master_preload_active(frame=None) -> bool:
-    """stack inspection covers default file and module gunicorn configs without parsing them again"""
     current = frame if frame is not None else sys._getframe(1)
     while current is not None:
         if current.f_globals.get("__name__") == "gunicorn.arbiter" and current.f_code.co_name == "setup":
@@ -258,8 +258,7 @@ def _seed_local_context() -> None:
         db.session.commit()
         logger.info("seeded local docker context")
     except IntegrityError:
-        # another first boot worker can pass the empty table check before this one commits
-        db.session.rollback()
+        db.session.rollback()  # another worker can pass the empty table check before the first commit
         if DesktopDockerContextModel.query.filter_by(context_name=LOCAL_CONTEXT_NAME).first() is None:
             raise
 
@@ -270,7 +269,6 @@ def _reconcile_containers(
     orchestrator: Orchestrator,
     container_manager: ContainerManager | None = None,
 ) -> None:
-    """leader only, concurrent reconciles would race row deletes and corrupt active_sessions"""
     from CTFd.models import db
     from .models import (
         DesktopContainerInfoModel,
@@ -304,8 +302,10 @@ def _reconcile_containers(
             kept += 1
             continue
 
-        # a worker may have died after persisting the teardown, retry even if the object still runs
-        if lifecycle_state in (LIFECYCLE_STOPPING, LIFECYCLE_CLEANUP_PENDING):
+        if lifecycle_state in (
+            LIFECYCLE_STOPPING,
+            LIFECYCLE_CLEANUP_PENDING,
+        ):  # a worker may die after persisting teardown while the object still runs
             reason = lifecycle_reason
         else:
             try:
@@ -315,14 +315,14 @@ def _reconcile_containers(
                 paramiko.ssh_exception.SSHException,
                 EOFError,
                 OSError,
-                # a slow host raises this for every call, deleting rows orphans live sessions
-                HostsUnavailableException,
+                HostsUnavailableException,  # deleting rows on slow host failures orphans live sessions
             ):
                 kept += 1
                 continue
             except Exception:
-                # an unknown failure is not proof the container is gone, deleting the row orphans it
-                logger.warning(f"reconcile: could not verify {container_id}; retaining row", exc_info=True)
+                logger.warning(
+                    f"reconcile: could not verify {container_id}; retaining row", exc_info=True
+                )  # an unknown failure does not prove the object is gone
                 kept += 1
                 continue
 
@@ -332,20 +332,18 @@ def _reconcile_containers(
 
             reason = END_REASON_RECONCILIATION
 
-        # the reconcile now runs against live traffic, fence every destroy so a recreated session survives
         result = container_manager.destroy_container(
             user_id,
             reason=reason,
             log_destruction=True,
-            expected_session_uuid=session_uuid,
+            expected_session_uuid=session_uuid,  # live traffic can recreate the session during reconciliation
         )
         if result.get("success"):
             removed += 1
         else:
             kept += 1
 
-    # counts in flight reservations too, a row only sync would over admit mid restart
-    orchestrator.audit_counts()
+    orchestrator.audit_counts()  # a row only sync omits in flight reservations and can over admit during restart
 
     if removed or kept:
         logger.info(f"reconciled containers on startup: {kept} recovered, {removed} stale records removed")
@@ -356,8 +354,6 @@ def load(app: Flask) -> None:
 
     _prepare_database(app)
 
-    # only when serving HTTP, not CLI commands where scheduler threads prevent exit
-    # only the serving path defers the probe, because only it starts a scheduler that can complete it
     _serving = (
         "gunicorn" in sys.modules or os.environ.get("WERKZEUG_RUN_MAIN") or (len(sys.argv) > 1 and sys.argv[1] == "run")
     )
@@ -368,7 +364,7 @@ def load(app: Flask) -> None:
     with app.app_context():
         _seed_defaults()
         _seed_local_context()
-        orchestrator.load_from_db(probe=not _serving)
+        orchestrator.load_from_db(probe=not _serving)  # cli commands have no scheduler to complete a deferred probe
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
     workspace_context.install(host_manager)
@@ -386,7 +382,6 @@ def load(app: Flask) -> None:
     app.register_blueprint(remote_desktop_bp)
     register_user_page_menu_bar("Remote Desktop", "/remote-desktop")
 
-    # registered in overridden_templates so admin config can include it without the folder name
     config_tpl = os.path.join(os.path.dirname(__file__), "templates", "remote_desktop_config.html")
     with open(config_tpl) as f:
         app.overridden_templates["remote_desktop_config.html"] = f.read()
@@ -395,8 +390,7 @@ def load(app: Flask) -> None:
         logger.info("remote desktop plugin loaded (scheduler skipped, CLI mode)")
         return
 
-    # queues are process local so each worker drains only the events it originated
-    event_logger_module.start_persistence_drainer(app)
+    event_logger_module.start_persistence_drainer(app)  # process local queues need a drainer in each worker
     atexit.register(event_logger_module.stop_persistence_drainer)
 
     from .models import get_setting
@@ -423,20 +417,22 @@ def load(app: Flask) -> None:
     def _cleanup_tick() -> None:
         nonlocal _startup_reconciled
         if not _startup_reconciled:
-            # the leader reconciles once per process, a worker promoted later still gets a startup pass
-            _reconcile_containers(app, host_manager, orchestrator, container_manager)
+            _reconcile_containers(
+                app, host_manager, orchestrator, container_manager
+            )  # promotion must give the new leader a startup pass
             _startup_reconciled = True
         container_manager.periodic_cleanup()
 
     def _health_tick() -> None:
-        # every worker probes, a follower that never ran health_check served frozen boot health forever
         leader = False
         try:
             leader = _claim_scheduler_leader(app)
         except Exception:
             logger.warning("scheduler leadership check failed during health check", exc_info=True)
         try:
-            orchestrator.health_check(log_events=leader)
+            orchestrator.health_check(
+                log_events=leader
+            )  # followers need probes to update their process local boot health
         finally:
             orchestrator.note_initial_probe_done()
 
@@ -471,6 +467,17 @@ def load(app: Flask) -> None:
         id="pause_watch",
     )
 
+    from .command_logs import collect_all as collect_command_logs
+
+    scheduler.add_job(
+        func=_with_app_ctx(lambda: collect_command_logs(host_manager)),
+        trigger="interval",
+        seconds=30,
+        misfire_grace_time=30,
+        coalesce=True,
+        id="command_logs",
+    )
+
     def _prune_event_log() -> None:
         days = get_setting("retention_days")
         try:
@@ -498,7 +505,6 @@ def load(app: Flask) -> None:
         except Exception:
             pass  # shutdown raises gevent.exceptions.BlockingSwitchOutError with no active greenlet
 
-    # only the scheduler stops at exit, a routine worker restart must preserve student sessions
-    atexit.register(_safe_shutdown_scheduler)
+    atexit.register(_safe_shutdown_scheduler)  # a routine worker restart must preserve student sessions
 
     logger.info("remote desktop plugin loaded (automatic scheduler contender)")

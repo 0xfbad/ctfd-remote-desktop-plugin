@@ -57,6 +57,7 @@ from .messages import (
     STATE_UNKNOWN,
 )
 from .utils import normalize_public_hostname, ratelimit_per_user
+from .command_logs import register_routes as register_command_routes
 
 logger = logging.getLogger(__name__)
 
@@ -1621,4 +1622,5 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
             return jsonify({"error": "persistent event log unavailable"}), 503
         return jsonify({"events": events})
 
+    register_command_routes(remote_desktop_bp, _request_tz)
     return remote_desktop_bp

@@ -109,7 +109,9 @@ class DesktopContainerInfoModel(db.Model):
     extensions_used = db.Column(db.Integer, default=0)
     max_extensions = db.Column(db.Integer, default=3)
     cookie_sid = db.Column(db.String(128), nullable=True)  # null leaves no autologin cache entry to revoke
+
     paused_at = db.Column(db.Float(precision=53), nullable=True)  # paused layers survive cleanup as evidence
+
     session_uuid = db.Column(db.String(36), nullable=False)  # exists before docker creation and survives teardown
     lifecycle_state = db.Column(
         db.String(32), nullable=False, default=LIFECYCLE_ACTIVE, server_default=LIFECYCLE_ACTIVE
@@ -180,6 +182,34 @@ def history_from_row(
         container_name=row.container_name,
         session_uuid=row.session_uuid,
     )
+
+
+class DesktopRecordedCommandModel(db.Model):
+    __tablename__ = "desktop_recorded_commands"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False, index=True)
+    session_uuid = db.Column(db.String(36), nullable=False)
+    byte_offset = db.Column(db.BigInteger, nullable=False)
+    timestamp = db.Column(db.Float(precision=53), nullable=False, index=True)
+    command = db.Column(db.Text, nullable=False)
+    tool = db.Column(db.Text, nullable=False)
+    exit_code = db.Column(db.Integer, nullable=False)
+    duration_ms = db.Column(db.BigInteger, nullable=True)
+    cwd = db.Column(db.Text, nullable=False)
+    tty = db.Column(db.Text, nullable=False)
+
+    __table_args__ = (db.UniqueConstraint("session_uuid", "byte_offset", name="uq_desktop_recorded_commands_offset"),)
+
+
+class DesktopCommandCursorModel(db.Model):
+    __tablename__ = "desktop_command_cursors"
+    session_uuid = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.Integer, nullable=False)
+    container_id = db.Column(db.String(512), nullable=False)
+    byte_offset = db.Column(db.BigInteger, nullable=False, default=0, server_default="0")
+    journal_id = db.Column(db.String(128), nullable=True)
+    last_read_at = db.Column(db.Float(precision=53), nullable=True)
+    status = db.Column(db.String(32), nullable=False, default="unknown", server_default="unknown")
 
 
 class DesktopReportModel(db.Model):

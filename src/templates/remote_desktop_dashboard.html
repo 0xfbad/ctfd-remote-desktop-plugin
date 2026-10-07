@@ -507,6 +507,167 @@
 		</div>
 	</div>
 
+	<div id="cmd-log-section">
+		<hr>
+		<div class="row mb-3">
+			<div class="col-md-12">
+				<h2>Command Logs</h2>
+				<p id="command-coverage" class="text-muted small"></p>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-4">
+				<div class="card stat-card bg-light">
+					<div class="card-body text-center py-3">
+						<h4 id="stat-total-commands" class="mb-0">0</h4>
+						<small class="text-muted">Recorded Commands</small>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="card stat-card bg-light">
+					<div class="card-body text-center py-3">
+						<h4 id="stat-unique-tools" class="mb-0">0</h4>
+						<small class="text-muted">Unique Tools</small>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-4">
+				<div class="card stat-card bg-light">
+					<div class="card-body text-center py-3">
+						<h4 id="stat-unique-commands" class="mb-0">0</h4>
+						<small class="text-muted">Unique Commands</small>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-12">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Command Feed</h3>
+					</div>
+					<div class="card-body">
+						<div class="table-responsive log-wrap">
+							<table class="table table-striped table-sm border">
+								<thead>
+									<tr>
+										<th><b>Time</b></th>
+										<th><b>User</b></th>
+										<th><b>Command</b></th>
+										<th><b>Exit</b></th>
+									</tr>
+								</thead>
+								<tbody id="cmd-feed">
+									<tr id="cmd-feed-empty">
+										<td colspan="4" class="text-center text-muted">No commands yet</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-12">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Per-User Commands</h3>
+						<select id="period-cmd-users" class="form-control form-control-sm" style="width: auto;" onchange="refreshCommandUsers()">
+							<option value="week">Past Week</option>
+							<option value="month">Past Month</option>
+							<option value="all">All Time</option>
+						</select>
+					</div>
+					<div class="card-body">
+						<div class="table-responsive log-wrap">
+							<table class="table table-striped table-sm border">
+								<thead>
+									<tr>
+										<th><b>User</b></th>
+										<th><b>Total</b></th>
+										<th><b>Avg/Session</b></th>
+										<th><b>Unique Tools</b></th>
+									</tr>
+								</thead>
+								<tbody id="cmd-users-table"></tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="row">
+			<div class="col-md-6">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Top Tools</h3>
+						<select id="period-cmd-tools" class="form-control form-control-sm" style="width: auto;" onchange="refreshCommandTools()">
+							<option value="week">Past Week</option>
+							<option value="month">Past Month</option>
+							<option value="all">All Time</option>
+						</select>
+					</div>
+					<div class="card-body">
+						<div class="chart-container" id="chart-top-tools"></div>
+					</div>
+				</div>
+			</div>
+			<div class="col-md-6">
+				<div class="card">
+					<div class="card-header">
+						<h3 class="card-title">Command Activity</h3>
+						<select id="period-cmd-heatmap" class="form-control form-control-sm" style="width: auto;" onchange="refreshCommandHeatmap()">
+							<option value="week">Past Week</option>
+							<option value="month">Past Month</option>
+							<option value="all">All Time</option>
+						</select>
+					</div>
+					<div class="card-body">
+						<div class="chart-container" id="chart-cmd-heatmap"></div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+
+	<div class="modal fade" id="cmdHistoryModal" tabindex="-1">
+		<div class="modal-dialog modal-xl">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title">Command History: <span id="cmd-history-username"></span></h5>
+					<button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+				</div>
+				<div class="modal-body p-0">
+					<div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+						<table class="table table-striped table-sm mb-0">
+							<thead style="position: sticky; top: 0;">
+								<tr>
+									<th>Time</th>
+									<th>Command</th>
+									<th>Exit</th>
+									<th>Duration</th>
+									<th>CWD</th>
+								</tr>
+							</thead>
+							<tbody id="cmd-history-table"></tbody>
+						</table>
+					</div>
+				</div>
+				<div class="modal-footer">
+					<span class="text-muted mr-auto" id="cmd-history-info"></span>
+					<button type="button" class="btn btn-outline-secondary" id="cmd-history-prev" onclick="refreshCommandHistory(-1)">Prev</button>
+					<button type="button" class="btn btn-outline-secondary" id="cmd-history-next" onclick="refreshCommandHistory(1)">Next</button>
+					<button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
 </div>
 
 {% endblock %}
@@ -576,7 +737,7 @@
 		}
 		const flags = _userFlags[uid] || obj;
 		const name = obj.username || `User ${parseInt(uid)}`;
-		return `<a href="/admin/users/${parseInt(uid)}">${name}</a>${userBadges(flags)}`;
+		return `<a href="${window.init.urlRoot}/admin/users/${parseInt(uid)}">${name}</a>${userBadges(flags)}`;
 	}
 
 	const EVENT_BADGE_CLASS = {
@@ -755,6 +916,7 @@
 		refreshPausedOrphans();
 		refreshSummaryStats();
 		refreshReports();
+		refreshCommandStats();
 	}
 
 	function refreshPausedOrphans() {
@@ -1097,9 +1259,11 @@
 	let endReasonsChart = null;
 	let perHostChart = null;
 	let heatmapChart = null;
+	let topToolsChart = null;
+	let cmdHeatmapChart = null;
 
 	function initCharts() {
-		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host'].forEach(id => {
+		['chart-top-users', 'chart-duration-dist', 'chart-end-reasons', 'chart-per-host', 'chart-top-tools', 'chart-cmd-heatmap'].forEach(id => {
 			const el = document.getElementById(id);
 			if (!el) return;
 			const chart = echarts.init(el);
@@ -1107,6 +1271,8 @@
 			else if (id === 'chart-duration-dist') durationDistChart = chart;
 			else if (id === 'chart-end-reasons') endReasonsChart = chart;
 			else if (id === 'chart-per-host') perHostChart = chart;
+			else if (id === 'chart-top-tools') topToolsChart = chart;
+			else if (id === 'chart-cmd-heatmap') cmdHeatmapChart = chart;
 		});
 	}
 
@@ -1329,6 +1495,181 @@
 		});
 	}
 
+	async function commandData(suffix) {
+		const response = await fetch(`${window.init.urlRoot}/remote-desktop/dashboard/api/command-logs${suffix}`, {
+			headers: { 'X-Requested-With': 'XMLHttpRequest' },
+			credentials: 'same-origin'
+		});
+		if (!response.ok) throw new Error('Recorded commands are unavailable');
+		return response.json();
+	}
+
+	async function refreshCommandSummary() {
+		try {
+			const data = await commandData('/stats/summary');
+			document.getElementById('stat-total-commands').textContent = data.total_commands.toLocaleString();
+			document.getElementById('stat-unique-tools').textContent = data.unique_tools.toLocaleString();
+			document.getElementById('stat-unique-commands').textContent = data.unique_commands.toLocaleString();
+			const coverage = data.coverage;
+			document.getElementById('command-coverage').textContent = Object.keys(coverage).length
+				? `Available: ${coverage.recording || 0} · Unavailable: ${(coverage.unknown || 0) + (coverage.unavailable || 0)} · Incomplete: ${coverage.discontinuous || 0}`
+				: 'No active sessions';
+		} catch (error) {
+			['stat-total-commands', 'stat-unique-tools', 'stat-unique-commands'].forEach(id => {
+				document.getElementById(id).textContent = '—';
+			});
+			document.getElementById('command-coverage').textContent = 'Unavailable';
+		}
+	}
+
+	async function refreshCommandFeed() {
+		const feed = document.getElementById('cmd-feed');
+		try {
+			const data = await commandData('?limit=50');
+			feed.innerHTML = data.logs.map(log => `<tr>
+				<td class="log-time">${escapeHtml(formatTimestamp(log.timestamp))}</td>
+				<td class="log-user">${userLink(log)}</td>
+				<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
+				<td><span class="badge ${log.exit_code === 0 ? 'bg-success' : 'bg-danger'}">${log.exit_code}</span></td>
+			</tr>`).join('') || '<tr><td colspan="4" class="text-center text-muted">No commands yet</td></tr>';
+		} catch (error) {
+			feed.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Unavailable</td></tr>';
+		}
+	}
+
+	async function refreshCommandUsers() {
+		const period = getPeriod('period-cmd-users');
+		const tbody = document.getElementById('cmd-users-table');
+		try {
+			const data = await commandData(`/stats/per-user?period=${period}`);
+			if (period !== getPeriod('period-cmd-users')) return;
+			tbody.innerHTML = data.users.map(user => `<tr>
+				<td class="log-user">${userLink(user)}</td>
+				<td><a href="#cmdHistoryModal" class="cmd-history-link" data-userid="${user.user_id}">${user.total_commands.toLocaleString()}</a></td>
+				<td>${user.avg_per_session}</td>
+				<td>${user.unique_tools}</td>
+			</tr>`).join('') || '<tr><td colspan="4" class="text-center text-muted">No command data</td></tr>';
+		} catch (error) {
+			if (period !== getPeriod('period-cmd-users')) return;
+			tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Unavailable</td></tr>';
+		}
+	}
+
+	async function refreshCommandTools() {
+		const period = getPeriod('period-cmd-tools');
+		if (!topToolsChart) return;
+		try {
+			const data = await commandData(`/stats/tools?period=${period}`);
+			if (period !== getPeriod('period-cmd-tools')) return;
+			const tools = data.tools.slice(0, 20).reverse();
+			topToolsChart.setOption({
+				title: tools.length ? { text: '' } : { text: 'No data yet', left: 'center', top: 'center' },
+				tooltip: {
+					trigger: 'axis',
+					axisPointer: { type: 'shadow' },
+					formatter: params => {
+						const tool = tools[params[0].dataIndex];
+						return `${tool.tool}<br>${tool.count} uses${tool.errors ? `<br>${tool.errors} errors` : ''}`;
+					}
+				},
+				toolbox: { feature: { saveAsImage: {} } },
+				grid: { left: 120, right: 20, top: 30, bottom: 40 },
+				xAxis: { type: 'value', name: 'Uses', nameLocation: 'middle', nameGap: 25 },
+				yAxis: { type: 'category', data: tools.map(tool => tool.tool) },
+				series: [{ type: 'bar', data: tools.map(tool => tool.count) }]
+			}, true);
+		} catch (error) {
+			if (period !== getPeriod('period-cmd-tools')) return;
+			topToolsChart.setOption({ title: { text: 'Unavailable', left: 'center', top: 'center' } }, true);
+		}
+	}
+
+	async function refreshCommandHeatmap() {
+		const period = getPeriod('period-cmd-heatmap');
+		if (!cmdHeatmapChart) return;
+		const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+		try {
+			const data = await commandData(`/stats/heatmap?period=${period}&tz=${encodeURIComponent(timezone)}`);
+			if (period !== getPeriod('period-cmd-heatmap')) return;
+			const hours = Array.from({ length: 24 }, (_, hour) => (hour % 12 || 12) + (hour < 12 ? ' AM' : ' PM'));
+			cmdHeatmapChart.setOption({
+				title: data.data.length ? { text: '' } : { text: 'No data yet', left: 'center', top: 'center' },
+				tooltip: {
+					position: 'top',
+					formatter: point => `${data.days[point.data[0]]} ${hours[point.data[1]]}<br>${point.data[2].toLocaleString()} commands`
+				},
+				grid: { left: 50, right: 30, top: 10, bottom: 40 },
+				xAxis: { type: 'category', data: data.days, splitArea: { show: true } },
+				yAxis: { type: 'category', data: hours, splitArea: { show: true }, inverse: true },
+				visualMap: {
+					min: 0,
+					max: data.data.reduce((maximum, point) => Math.max(maximum, point[2]), 1),
+					dimension: 2,
+					calculable: true,
+					orient: 'horizontal',
+					left: 'center',
+					bottom: 0,
+					itemWidth: 10,
+					itemHeight: 80,
+					inRange: { color: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'] }
+				},
+				series: [{ type: 'heatmap', data: data.data }]
+			}, true);
+		} catch (error) {
+			if (period !== getPeriod('period-cmd-heatmap')) return;
+			cmdHeatmapChart.setOption({ title: { text: 'Unavailable', left: 'center', top: 'center' } }, true);
+		}
+	}
+
+	function refreshCommandStats() {
+		refreshCommandSummary();
+		refreshCommandFeed();
+		refreshCommandUsers();
+		refreshCommandTools();
+		refreshCommandHeatmap();
+	}
+
+	function showCommandHistory(userId, username) {
+		const modal = document.getElementById('cmdHistoryModal');
+		modal.dataset.userId = String(userId);
+		document.getElementById('cmd-history-table').dataset.offset = '0';
+		document.getElementById('cmd-history-username').innerHTML = `<a href="${window.init.urlRoot}/admin/users/${userId}">${escapeHtml(username)}</a>`;
+		refreshCommandHistory();
+		$(modal).modal('show');
+	}
+
+	async function refreshCommandHistory(direction = 0) {
+		const modal = document.getElementById('cmdHistoryModal');
+		const userId = modal.dataset.userId;
+		const tbody = document.getElementById('cmd-history-table');
+		const offset = Math.max(0, Number(tbody.dataset.offset || 0) + direction * 100);
+		tbody.dataset.offset = String(offset);
+		const previous = document.getElementById('cmd-history-prev');
+		const next = document.getElementById('cmd-history-next');
+		previous.disabled = next.disabled = true;
+		tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">Loading…</td></tr>';
+		document.getElementById('cmd-history-info').textContent = '';
+		try {
+			const data = await commandData(`?user_id=${userId}&limit=100&offset=${offset}`);
+			if (userId !== modal.dataset.userId || String(offset) !== tbody.dataset.offset) return;
+			tbody.innerHTML = data.logs.map(log => `<tr>
+				<td class="text-nowrap">${escapeHtml(formatTimestamp(log.timestamp))}</td>
+				<td class="cell-clip" title="${log.command}"><code>${log.command}</code></td>
+				<td class="${log.exit_code === 0 ? 'text-success' : 'text-danger'}">${log.exit_code}</td>
+				<td>${log.duration_ms === null ? '—' : `${log.duration_ms / 1000}s`}</td>
+				<td class="cell-clip-sm" title="${log.cwd}">${log.cwd}</td>
+			</tr>`).join('') || '<tr><td colspan="5" class="text-center text-muted">No commands</td></tr>';
+			document.getElementById('cmd-history-info').textContent = data.total ? `Showing ${offset + 1}–${offset + data.logs.length} of ${data.total}` : '0 recorded';
+			previous.disabled = offset === 0;
+			next.disabled = offset + data.logs.length >= data.total;
+		} catch (error) {
+			if (userId !== modal.dataset.userId || String(offset) !== tbody.dataset.offset) return;
+			tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">Unavailable</td></tr>';
+			document.getElementById('cmd-history-info').textContent = 'Unavailable';
+			previous.disabled = offset === 0;
+		}
+	}
+
 	function refreshStats() {
 		refreshSummaryStats();
 		refreshTopUsers();
@@ -1345,7 +1686,7 @@
 	}
 
 	window.addEventListener('resize', function() {
-		[topUsersChart, durationDistChart, endReasonsChart, perHostChart, heatmapChart].forEach(c => {
+		[topUsersChart, durationDistChart, endReasonsChart, perHostChart, heatmapChart, topToolsChart, cmdHeatmapChart].forEach(c => {
 			if (c) c.resize();
 		});
 	});
@@ -1364,7 +1705,17 @@
 			refreshAll();
 			initCharts();
 			refreshStats();
+			refreshCommandTools();
+			refreshCommandHeatmap();
 			startAutoRefresh();
+		});
+
+		document.getElementById('cmd-users-table').addEventListener('click', event => {
+			const link = event.target.closest('.cmd-history-link');
+			if (!link) return;
+			event.preventDefault();
+			const username = link.closest('tr').querySelector('.log-user a').textContent;
+			showCommandHistory(Number(link.dataset.userid), username);
 		});
 
 		document.getElementById('reports-tbody').addEventListener('click', function(e) {
