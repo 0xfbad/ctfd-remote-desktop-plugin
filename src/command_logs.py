@@ -30,7 +30,15 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 JOURNAL_PATH = "/var/log/.session-init/data.jsonl"
-_READ_JOURNAL = """import base64,json,os,stat,sys
+COLLECTOR_SOCKET_PATH = "/run/.session-init.sock"
+_READ_JOURNAL = """import base64,json,os,socket,stat,sys
+capture_available = False
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as probe:
+        probe.connect(sys.argv[3])
+        capture_available = True
+except OSError:
+    pass
 try:
     descriptor = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with os.fdopen(descriptor, 'rb') as stream:
@@ -39,7 +47,7 @@ try:
             raise ValueError('command journal is not a regular file')
         offset = int(sys.argv[2])
         stream.seek(offset)
-        print(json.dumps({'identity': f'{info.st_dev}:{info.st_ino}', 'size': info.st_size,
+        print(json.dumps({'capture_available': capture_available, 'identity': f'{info.st_dev}:{info.st_ino}', 'size': info.st_size,
                           'data': base64.b64encode(stream.read(1024 * 1024)).decode('ascii')}))
 except FileNotFoundError:
     print('null')
@@ -128,7 +136,7 @@ def collect_session(host_manager, user_id: int, session_uuid: str, context: str,
     db.session.rollback()
     try:
         code, output = host_manager.exec_in_container(
-            context, container_id, ["python3", "-c", _READ_JOURNAL, JOURNAL_PATH, str(offset)]
+            context, container_id, ["python3", "-c", _READ_JOURNAL, JOURNAL_PATH, str(offset), COLLECTOR_SOCKET_PATH]
         )
         result = json.loads(output) if code == 0 and output else None
         payload = base64.b64decode(result["data"], validate=True) if result is not None else b""
@@ -159,7 +167,7 @@ def collect_session(host_manager, user_id: int, session_uuid: str, context: str,
     cursor.byte_offset = next_offset
     cursor.journal_id = journal_id
     cursor.last_read_at = time.time()
-    cursor.status = "recording"
+    cursor.status = "recording" if result.get("capture_available") is True else "unavailable"
     db.session.commit()
 
 

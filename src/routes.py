@@ -19,6 +19,8 @@ from .container_manager import ContainerManager, ContainerInfoDict, TimerDict, T
 from .orchestrator import Orchestrator
 from .event_logger import event_logger, get_persisted_events, EventDict
 from .models import (
+    DesktopCommandCursorModel,
+    DesktopContainerInfoModel,
     user_flags,
     username_or_fallback,
     SETTING_DEFAULTS,
@@ -403,7 +405,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         try:
             result = container_manager.create_container(
                 user.id, container_url, extra_hosts, client_ip=get_ip()
-            )  # get_ip applies TRUSTED_PROXIES
+            )  # trusted proxies must determine the client ip
         except HostsUnavailableException as err:
             return jsonify({"error": str(err)}), 503
 
@@ -548,6 +550,28 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @admins_only
     def admin_get_containers():
         containers = container_manager.get_all_containers()
+        if not containers:
+            return jsonify({"containers": []})
+        cursors = (
+            db.session.query(
+                DesktopContainerInfoModel.user_id,
+                DesktopContainerInfoModel.container_id,
+                DesktopCommandCursorModel.status,
+            )
+            .outerjoin(
+                DesktopCommandCursorModel,
+                (DesktopCommandCursorModel.session_uuid == DesktopContainerInfoModel.session_uuid)
+                & (DesktopCommandCursorModel.container_id == DesktopContainerInfoModel.container_id)
+                & (DesktopCommandCursorModel.user_id == DesktopContainerInfoModel.user_id),
+            )
+            .filter(DesktopContainerInfoModel.user_id.in_([container["user_id"] for container in containers]))
+            .all()
+        )
+        recording_by_container = {(user_id, container_id): status for user_id, container_id, status in cursors}
+        for container in containers:
+            container["recording_status"] = (
+                recording_by_container.get((container["user_id"], container["container_id"])) or "unknown"
+            )
         return jsonify({"containers": containers})
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/paused-orphans", methods=["GET"])
@@ -1078,7 +1102,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         @wraps(fn)
         def wrapper(*args, **kwargs):
             if not authed():
-                return "", 401  # auth_request treats login redirects as server errors
+                return "", 401  # proxy authorization rejects login redirects as server errors
             return fn(*args, **kwargs)
 
         return wrapper

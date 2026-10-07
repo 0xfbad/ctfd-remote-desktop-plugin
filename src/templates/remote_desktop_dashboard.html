@@ -801,7 +801,7 @@
 			case 'session_extended':
 				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
 			case 'session_error':
-				return event.message; // event.message arrives escaped from event_logger.log_event
+				return event.message; // the event logger escapes this message
 			case 'admin_action': {
 					if (m.target_id && (m.target_is_admin || m.target_is_hidden || m.target_is_banned)) {
 						_userFlags[m.target_id] = {is_admin: m.target_is_admin, is_hidden: m.target_is_hidden, is_banned: m.target_is_banned};
@@ -939,8 +939,7 @@
 	}
 
 	function updatePausedOrphansTable(orphans) {
-		// orphan identity fields arrive unescaped so they post back exact, escape at each insertion
-		pausedOrphans = orphans;
+		pausedOrphans = orphans; // removal requests need the original identity fields
 		const section = document.getElementById('paused-orphans-section');
 		const tbody = document.getElementById('paused-orphans-table');
 		if (!orphans.length) {
@@ -1093,6 +1092,13 @@
 		});
 	}
 
+	const recordingStates = {
+		recording: {icon: 'fa-circle', color: 'text-success', label: 'Command recording available'},
+		unavailable: {icon: 'fa-exclamation-circle', color: 'text-warning', label: 'Command recording unavailable'},
+		discontinuous: {icon: 'fa-exclamation-triangle', color: 'text-warning', label: 'Command history incomplete'},
+		unknown: {icon: 'fa-question-circle', color: 'text-muted', label: 'Command recording not checked'}
+	};
+
 	function updateContainersTable(containers) {
 		const tbody = document.getElementById('containers-table');
 
@@ -1117,6 +1123,9 @@
 						  timeRemaining <= 0 ? 'EXPIRED' :
 						  timeRemaining < 300 ? 'EXPIRING' : 'ACTIVE';
 
+			const recording = Object.hasOwn(recordingStates, container.recording_status)
+				? recordingStates[container.recording_status] : recordingStates.unknown;
+
 			const pauseBtn = container.paused
 				? `<button class="btn btn-sm" onclick="unpauseContainer(${container.user_id})" title="Unpause (releases the evidence hold, credits the frozen time)">
 						<i class="fas fa-play icon-extend"></i>
@@ -1132,7 +1141,7 @@
 					<td>${container.docker_context || ''}</td>
 					<td class="time-remaining ${statusClass}">${formatTime(timeRemaining)}</td>
 					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
-					<td><span class="${statusClass}">${status}</span></td>
+					<td><span class="${statusClass}">${status}</span> <i class="fas ${recording.icon} ${recording.color}" title="${recording.label}" aria-label="${recording.label}"></i></td>
 					<td class="actions-cell">
 						<div class="action-buttons">
 							${status === 'ACTIVE' || status === 'EXPIRING' ? `
