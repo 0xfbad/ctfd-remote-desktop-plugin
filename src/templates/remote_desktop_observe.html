@@ -1,0 +1,42 @@
+{% extends "admin/base.html" %}
+
+{% block page_title %}{{ target_name }} - Remote Desktop{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-5 pt-4 px-3">
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+        <div>
+            <h1 class="h4 mb-1">{{ target_name }}'s desktop</h1>
+            <p id="view-status" class="text-muted mb-0" role="status">Connecting, view only</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="{{ url_for('remote_desktop.admin_dashboard') }}">Back to dashboard</a>
+    </div>
+    <div id="desktop-view" class="border rounded overflow-hidden" style="height: calc(100dvh - 13rem); min-height: 20rem;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="module">
+    import RFB from {{ rfb_module | tojson }};
+
+    const status = document.getElementById('view-status');
+    const socket = new URL({{ websocket_path | tojson }}, window.location.href);
+    socket.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+    const rfb = new RFB(document.getElementById('desktop-view'), socket.href, {
+        credentials: { password: {{ password | tojson }} },
+    });
+    rfb.viewOnly = true;
+    rfb.scaleViewport = true;
+
+    rfb.addEventListener('connect', () => {
+        status.textContent = 'Connected, view only';
+    });
+    rfb.addEventListener('disconnect', () => {
+        status.textContent = 'Session disconnected';
+    });
+    rfb.addEventListener('securityfailure', () => {
+        status.textContent = 'Could not authenticate this session, refresh to try again';
+    });
+</script>
+{% endblock %}

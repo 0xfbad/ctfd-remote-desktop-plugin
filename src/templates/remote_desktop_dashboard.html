@@ -310,7 +310,7 @@
 		<div class="col-md-12">
 			<div class="card">
 				<div class="card-header">
-					<h3 class="card-title">Active Sessions <span class="cfg-help" data-tip="Currently running desktop containers. Kill or extend individual sessions, or purge all at once during incidents.">?</span></h3>
+					<h3 class="card-title">Active Sessions <span class="cfg-help" data-tip="Currently running desktop containers. View sessions without sending input, kill or extend individual sessions, or purge all at once during incidents.">?</span></h3>
 					<button class="btn btn-danger btn-sm" id="purge-all-btn" onclick="killAllSessions()">
 						<i class="fas fa-trash"></i> Purge All
 					</button>
@@ -631,8 +631,7 @@
 			case 'session_extended':
 				return m.extensions_used !== undefined ? `${m.extensions_used}/${m.max_extensions} extensions` : '';
 			case 'session_error':
-				// event.message is escaped in event_logger.log_event, new call sites must keep that
-				return event.message;
+				return event.message; // event.message arrives escaped from event_logger.log_event
 			case 'admin_action': {
 					if (m.target_id && (m.target_is_admin || m.target_is_hidden || m.target_is_banned)) {
 						_userFlags[m.target_id] = {is_admin: m.target_is_admin, is_hidden: m.target_is_hidden, is_banned: m.target_is_banned};
@@ -964,6 +963,11 @@
 					<td>${container.timer ? `${container.timer.extensions_used}/${container.timer.max_extensions}` : '-'}</td>
 					<td><span class="${statusClass}">${status}</span></td>
 					<td class="action-buttons">
+						${status === 'ACTIVE' || status === 'EXPIRING' ? `
+							<a class="btn btn-sm" href="${window.init.urlRoot}/remote-desktop/dashboard/view/${container.user_id}" target="_blank" rel="noopener" title="View only" aria-label="View only">
+								<i class="fas fa-eye icon-monitor"></i>
+							</a>
+						` : ''}
 						${pauseBtn}
 						<button class="btn btn-sm" onclick="killContainer(${container.user_id})" title="Kill">
 							<i class="fas fa-times icon-kill"></i>

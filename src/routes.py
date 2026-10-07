@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TypedDict, TypeGuard
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context
+from flask import Blueprint, request, jsonify, render_template, Response, stream_with_context, url_for
 from CTFd.models import db, Users
 from CTFd.utils.decorators import authed_only, admins_only
 from CTFd.utils.user import authed, get_current_user, is_admin, is_verified, get_ip
@@ -24,6 +24,7 @@ from .models import (
     SETTING_DEFAULTS,
     END_REASON_RECONCILIATION,
     END_REASON_ADMIN_KILLED,
+    NOVNC_VERSION,
     _esc,
 )
 from .docker_host_manager import (
@@ -620,12 +621,41 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         return jsonify({"success": True})
 
-    @remote_desktop_bp.route("/remote-desktop/dashboard/api/peek", methods=["POST"])
+    @remote_desktop_bp.route("/remote-desktop/dashboard/view/<int:user_id>", methods=["GET"])
     @admins_only
-    def admin_peek_session():
-        return jsonify(
-            {"error": "Cross-user session monitoring is disabled"}
-        ), 403  # cross user terminal assets remain untrusted on the admin origin
+    def admin_peek_session(user_id: int):
+        from .models import DesktopContainerInfoModel, LIFECYCLE_ACTIVE
+
+        row = DesktopContainerInfoModel.query.filter_by(user_id=user_id).first()
+        if not row or row.lifecycle_state != LIFECYCLE_ACTIVE or row.paused_at is not None or not row.timer_started:
+            return jsonify({"error": "No active desktop available to view"}), 404
+
+        target_user = Users.query.filter_by(id=user_id).first()
+        if not target_user:
+            return jsonify({"error": "User not found"}), 404
+
+        admin_user = get_current_user()
+        _log_admin_target_action(
+            admin_user,
+            f"admin {admin_user.name} viewing session for {target_user.name}",
+            "peek",
+            user_id,
+            target_user.name,
+            target_user,
+            level="info",
+        )
+
+        response = Response(
+            render_template(
+                "remote_desktop_observe.html",
+                target_name=target_user.name,
+                password=row.vnc_password,
+                websocket_path=f"{request.script_root}/remote-desktop/vnc/{user_id}/websockify",
+                rfb_module=url_for("remote_desktop.static", filename=f"novnc/{NOVNC_VERSION}/core/rfb.js"),
+            )
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @remote_desktop_bp.route("/remote-desktop/dashboard/api/extend", methods=["POST"])
     @admins_only
@@ -991,6 +1021,8 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         host_header: str,
         port_header: str,
         authorization_header: str | None = None,
+        *,
+        allow_admin: bool = False,
     ) -> Response | tuple[str, int]:
         from .models import DesktopContainerInfoModel, LIFECYCLE_ACTIVE
 
@@ -1003,7 +1035,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         except (ValueError, TypeError):
             return "", 400
         current_user = get_current_user()
-        if current_user.id != user_id:
+        if current_user.id != user_id and not (allow_admin and is_admin()):
             return "", 403
 
         row = DesktopContainerInfoModel.query.filter_by(
@@ -1053,7 +1085,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
     @remote_desktop_bp.route("/remote-desktop/vnc/auth", methods=["GET"])
     @_subrequest_authed
     def vnc_auth():
-        return _proxy_auth("X-VNC-User-ID", "novnc_port", "X-VNC-Host", "X-VNC-Port")
+        return _proxy_auth("X-VNC-User-ID", "novnc_port", "X-VNC-Host", "X-VNC-Port", allow_admin=True)
 
     @remote_desktop_bp.route("/remote-desktop/terminal/auth", methods=["GET"])
     @_subrequest_authed
