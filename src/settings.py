@@ -62,8 +62,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "initial_duration": _spec(3600, minimum=60, maximum=604800),
     "extension_duration": _spec(1800, minimum=0, maximum=604800),
     "max_extensions": _spec(3, minimum=0, maximum=100),
-    # 0.5s poll, 420 attempts covers the 150s worst case startup gate plus a minute of headroom
-    "vnc_ready_attempts": _spec(420, minimum=1, maximum=3600),
+    "vnc_ready_attempts": _spec(420, minimum=1, maximum=3600),  # startup can take 150s, polling adds 60s of headroom
     "http_request_timeout": _spec(3, minimum=1, maximum=120),
     "cleanup_interval": _spec(300, minimum=5, maximum=86400, restart_required=True),
     "pids_limit": _spec(4096, minimum=64, maximum=1048576),
@@ -72,7 +71,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "require_verified": _spec(True),
     "cap_drop": _spec("ALL", max_length=512),
     "cap_add": _spec(
-        "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE,SYS_CHROOT",
+        "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE,SYS_CHROOT,KILL",
         max_length=512,
         allow_empty=True,
     ),
@@ -92,10 +91,10 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "nofile_hard": _spec(1048576, minimum=0, maximum=1048576),
     "cgroup_parent": _spec("", max_length=128, allow_empty=True),
     "capacity_ram_fraction": _spec(0.7, minimum=0.01, maximum=1.0),
-    # the value column is TEXT, a longer blob would be rejected or truncated by the database
-    "image_cache": _spec("", max_length=60000, allow_empty=True, public=False),
-    # this row is the cross worker mutex, every settings write locks it first
-    "_settings_revision": _spec(1, minimum=1, maximum=2147483647, public=False),
+    "image_cache": _spec(
+        "", max_length=60000, allow_empty=True, public=False
+    ),  # the database text column limits diagnostic blobs
+    "_settings_revision": _spec(1, minimum=1, maximum=2147483647, public=False),  # every settings write locks this row
 }
 
 SETTING_DEFAULTS: dict[str, SettingValue] = {key: spec.default for key, spec in SETTING_SPECS.items() if spec.public}

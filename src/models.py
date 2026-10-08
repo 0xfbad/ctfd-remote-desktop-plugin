@@ -327,12 +327,19 @@ def initialize_settings() -> None:
             schema_version = int(str(schema_row.value)) if schema_row is not None else 1
         except (TypeError, ValueError) as exc:
             raise SettingsValidationError("invalid settings schema version") from exc
-        if schema_version < 1 or schema_version > 2:
+        if schema_version < 1 or schema_version > 3:
             raise SettingsValidationError("unsupported settings schema version")
         public_profile_migrated = False
         if schema_version < 2:
             public_profile_migrated = _migrate_v1_defaults(effective, by_key)
-            schema_version = 2
+
+        if schema_version < 3:
+            if effective["cap_add"] == (
+                "CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_RAW,NET_BIND_SERVICE,AUDIT_WRITE,SYS_CHROOT"
+            ):
+                effective["cap_add"] = SETTING_DEFAULTS["cap_add"]
+                public_profile_migrated = True
+            schema_version = 3
 
         for key, value in effective.items():
             canonical = serialize_setting(key, value)
