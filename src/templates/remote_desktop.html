@@ -559,6 +559,7 @@ let pollInterval = null;
 let pollDeadline = null;
 let readyReloadTimer = null;
 let resumeCreationPolling = false;
+let retryUntil = 0;
 
 function cancelPoll(state) {
     state.generation++;
@@ -583,6 +584,7 @@ function pollRequest(state, path, accept) {
     const generation = state.generation;
     const controller = new AbortController();
     state.pending = controller;
+    const responseDeadline = state === creationPoll ? setTimeout(() => controller.abort(), 10000) : null;
     Promise.resolve().then(() => fetch(path, {
         method: 'GET',
         headers: {'X-Requested-With': 'XMLHttpRequest'},
@@ -606,6 +608,7 @@ function pollRequest(state, path, accept) {
         }
     })
     .finally(() => {
+        clearTimeout(responseDeadline);
         if (state.pending === controller) state.pending = null;
     });
 }
@@ -624,10 +627,24 @@ function validSession(session) {
 }
 
 function resetStartButton() {
+    retryUntil = 0;
     const button = document.getElementById('start-btn');
     if (!button) return;
     button.disabled = false;
     button.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
+}
+
+function scheduleStartCooldown() {
+    const remaining = retryUntil - Date.now();
+    if (remaining <= 0) {
+        resetStartButton();
+        return;
+    }
+    const generation = creationPoll.generation;
+    pollDeadline = setTimeout(() => {
+        pollDeadline = null;
+        if (generation === creationPoll.generation) resetStartButton();
+    }, remaining);
 }
 
 function checkStatus() {
@@ -711,6 +728,11 @@ function startSession() {
     const startBtn = document.getElementById('start-btn');
     if (!startBtn || startBtn.disabled) return;
     cancelPolling();
+    creationPoll.active = true;
+    const generation = creationPoll.generation;
+    const controller = new AbortController();
+    creationPoll.pending = controller;
+    const responseDeadline = setTimeout(() => controller.abort(), 10000);
     startBtn.disabled = true;
     startBtn.innerHTML = '<span class="loading-spinner"></span> Starting...';
 
@@ -721,26 +743,38 @@ function startSession() {
         method: 'POST',
         headers: { 'X-Requested-With': 'XMLHttpRequest' },
         credentials: 'same-origin',
-        body: formData
+        body: formData,
+        signal: controller.signal
     })
-    .then(response => response.json().then(data => ({
+    .then(response => response.json().catch(error => {
+        if (response.status === 403 || response.status === 429) return null;
+        throw error;
+    }).then(data => ({
         ok: response.ok,
         status: response.status,
         retryAfter: response.headers.get('Retry-After'),
         data
     })))
     .then(({ok, status, retryAfter, data}) => {
+        if (generation !== creationPoll.generation || creationPoll.pending !== controller) return;
+        clearTimeout(responseDeadline);
         if (status === 429) {
+            creationPoll.active = false;
             const delay = Math.max(1, Math.ceil(Number(retryAfter) || 1));
+            retryUntil = Date.now() + delay * 1000;
             hideSessionError();
             showStatusMessage(`Too many attempts. Try starting again in ${delay} seconds.`, delay * 1000);
             startBtn.innerHTML = `Wait ${delay} seconds`;
-            setTimeout(() => {
-                startBtn.disabled = false;
-                startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
-            }, delay * 1000);
+            scheduleStartCooldown();
             return;
         }
+        if (status === 403) {
+            creationPoll.active = false;
+            resetStartButton();
+            showSessionError(data && (data.error || data.message) || 'Start request was denied.');
+            return;
+        }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid create response');
 
         if (ok && data.status === 'creating') {
             hideSessionError();
@@ -749,18 +783,25 @@ function startSession() {
             hideSessionError();
             pollCreationStatus();
         } else if (data.error === 'Session already exists') {
+            creationPoll.active = false;
             reloadPage();
-        } else {
-            startBtn.disabled = false;
-            startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
+        } else if (data.error || data.message) {
+            creationPoll.active = false;
+            resetStartButton();
             showSessionError(data.error || data.message);
+        } else {
+            throw new Error('invalid create response');
         }
     })
     .catch(error => {
-        startBtn.disabled = false;
-        startBtn.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
-        console.error('Create session error:', error);
-        showSessionError('request failed');
+        if (generation !== creationPoll.generation || creationPoll.pending !== controller) return;
+        if (error.name !== 'AbortError') console.error('Create session error:', error);
+        hideSessionError();
+        pollCreationStatus();
+    })
+    .finally(() => {
+        clearTimeout(responseDeadline);
+        if (creationPoll.pending === controller) creationPoll.pending = null;
     });
 }
 
@@ -1144,7 +1185,9 @@ window.addEventListener('pagehide', () => {
 window.addEventListener('pageshow', event => {
     if (!event.persisted) return;
     sessionPoll.active = true;
-    if (resumeCreationPolling) {
+    if (retryUntil) {
+        scheduleStartCooldown();
+    } else if (resumeCreationPolling) {
         resumeCreationPolling = false;
         pollCreationStatus();
     } else if (document.getElementById('vnc-frame')) {
