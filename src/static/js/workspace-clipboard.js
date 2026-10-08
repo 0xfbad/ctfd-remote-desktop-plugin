@@ -1,6 +1,5 @@
 export function sendShortcut(rfb, code, keysym, shift = false) {
-    // the pinned keyboard ledger records forwarded modifiers, dom flags can arrive without their keydown
-    const held = rfb._keyboard?._keyDownList;
+    const held = rfb._keyboard?._keyDownList; // the pinned keyboard ledger records forwarded modifiers, dom flags can arrive without their keydown
     if (!held || rfb.viewOnly) return false;
 
     const meta = Object.entries(held).filter(([code]) => code === 'MetaLeft' || code === 'MetaRight');
@@ -37,34 +36,38 @@ async function writeClipboard(text, fallback) {
     }
 }
 
-function terminalCopy() {
+export function terminalClipboard() {
     document.addEventListener('keydown', event => {
-        if (!event.ctrlKey || !event.shiftKey || event.code !== 'KeyC') return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (!event.isTrusted || !activeOwner()) return;
-        const text = window.term?.getSelection();
-        if (!text) return;
+        const copy = event.code === 'KeyC' && !event.altKey && (event.ctrlKey || event.metaKey);
+        const term = window.term;
+        if (!event.isTrusted || !activeOwner() || !term?.element?.contains(document.activeElement)) return;
 
-        void writeClipboard(text, value => {
-            if (!activeOwner()) return;
-            const field = document.createElement('textarea');
-            field.value = value;
-            field.setAttribute('aria-label', 'Copy selected text');
-            field.style.cssText = 'position:fixed;top:8px;left:8px;width:80%;z-index:9999';
-            document.body.append(field);
-            field.focus();
-            field.select();
-            field.addEventListener('blur', () => field.remove(), {once: true});
-            document.execCommand('copy');
-        });
+        if (event.code === 'KeyV' && !event.altKey && (event.ctrlKey || event.metaKey)) {
+            event.stopImmediatePropagation();
+            return;
+        }
+
+        if (copy && event.ctrlKey && event.shiftKey) event.preventDefault();
+        const text = copy && term.getSelection();
+        if (!text) return;
+        event.stopImmediatePropagation();
+        if (!event.ctrlKey || !event.shiftKey || document.execCommand('copy')) return;
+
+        const field = document.createElement('textarea');
+        field.value = text;
+        field.setAttribute('aria-label', 'Copy selected text');
+        field.style.cssText = 'position:fixed;top:8px;left:8px;width:80%;z-index:9999';
+        document.body.append(field);
+        field.focus();
+        field.select();
+        field.addEventListener('blur', () => field.remove(), {once: true});
+        document.execCommand('copy');
     }, true);
 }
 
 export function desktopClipboard(UI) {
     let bound = null;
-    let remoteText = null;
-    let copyIntent = null;
+    let pendingCopy = null;
     let pendingPaste = null;
     const field = document.getElementById('noVNC_clipboard_text');
 
@@ -73,8 +76,12 @@ export function desktopClipboard(UI) {
     }
 
     function clearIntent() {
-        copyIntent = null;
+        const pending = pendingCopy;
+        pendingCopy = null;
         pendingPaste = null;
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pending.reject(new Error('copy canceled'));
     }
 
     function fallback(text, rfb = UI.rfb) {
@@ -85,31 +92,57 @@ export function desktopClipboard(UI) {
         field.select();
     }
 
-    function receive(event) {
-        if (this !== UI.rfb) return;
-        remoteText = event.detail.text;
-        const intent = copyIntent;
-        copyIntent = null;
-        // primary selections also emit clipboard events, only a copy gesture may write to the host
-        if (intent === this && owner(this)
-            && navigator.userActivation?.isActive) {
-            void writeClipboard(remoteText, text => fallback(text, this));
+    function startCopy(rfb) {
+        clearIntent();
+        let resolve;
+        let reject;
+        const text = new Promise((yes, no) => {resolve = yes; reject = no;});
+        const pending = {rfb, resolve, reject, timer: null};
+        pendingCopy = pending;
+        pending.timer = setTimeout(() => {
+            if (pendingCopy === pending) clearIntent();
+        }, 2000);
+        function currentText(value) {
+            if (pendingCopy !== pending || !owner(rfb)) throw new Error('copy canceled');
+            return value;
         }
+
+        let write;
+        try {
+            if (typeof ClipboardItem === 'function' && navigator.clipboard?.write) {
+                const blob = text.then(value => new Blob([currentText(value)], {type: 'text/plain'}));
+                void blob.catch(() => {});
+                write = navigator.clipboard.write([new ClipboardItem({'text/plain': blob})]); // webkit requires starting the write in the copy gesture before the guest response arrives
+            } else {
+                write = text.then(value => navigator.clipboard.writeText(currentText(value)));
+            }
+        } catch (error) {
+            write = Promise.reject(error);
+        }
+
+        void Promise.all([text, Promise.resolve(write).then(() => true, () => false)]).then(([value, written]) => {
+            if (pendingCopy !== pending) return;
+            pendingCopy = null;
+            clearTimeout(pending.timer);
+            if (!written) fallback(value, rfb);
+        }, () => {});
     }
 
-    function disconnected() {
-        clearIntent();
-        remoteText = null;
+    function receive(event) {
+        const pending = pendingCopy;
+        if (this !== UI.rfb || !pending || pending.rfb !== this || !owner(this)) return; // primary selections also emit clipboard events, only a copy gesture may write to the host
+        clearTimeout(pending.timer);
+        pending.resolve(event.detail.text);
     }
 
     function bind() {
         if (bound === UI.rfb) return;
         bound?.removeEventListener('clipboard', receive);
-        bound?.removeEventListener('disconnect', disconnected);
+        bound?.removeEventListener('disconnect', clearIntent);
         bound = UI.rfb;
-        disconnected();
+        clearIntent();
         bound?.addEventListener('clipboard', receive);
-        bound?.addEventListener('disconnect', disconnected);
+        bound?.addEventListener('disconnect', clearIntent);
     }
 
     new MutationObserver(bind).observe(document.getElementById('noVNC_container'), {childList: true});
@@ -117,27 +150,24 @@ export function desktopClipboard(UI) {
 
     document.addEventListener('keydown', event => {
         const copy = event.code === 'KeyC' && !event.altKey
-            && ((event.ctrlKey && event.shiftKey) || event.metaKey);
+            && (event.ctrlKey || event.metaKey);
         if (copy && event.ctrlKey && event.shiftKey) event.preventDefault();
         if (!owner() || document.activeElement !== UI.rfb._canvas || !event.isTrusted) return;
 
         if (copy) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            pendingPaste = null;
             const rfb = UI.rfb;
-            copyIntent = remoteText === null ? rfb : null;
-            if (remoteText !== null) void writeClipboard(remoteText, text => fallback(text, rfb));
+            startCopy(rfb);
             sendShortcut(rfb, 'KeyC', event.shiftKey ? 0x43 : 0x63, event.shiftKey);
             return;
         }
 
         const paste = event.code === 'KeyV' && !event.altKey && (event.ctrlKey || event.metaKey);
         if (paste) {
-            copyIntent = null;
+            clearIntent();
             pendingPaste = {rfb: UI.rfb, shift: event.shiftKey};
-            // allow the browser paste event, suppress the guest chord until its clipboard is announced
-            event.stopImmediatePropagation();
+            event.stopImmediatePropagation(); // allow the browser paste event, suppress the guest chord until its clipboard is announced
             return;
         }
 
@@ -168,7 +198,10 @@ export function desktopClipboard(UI) {
     for (const [label, action] of [
         ['Copy', () => {
             const rfb = UI.rfb;
-            if (owner(rfb)) void writeClipboard(field.value, text => fallback(text, rfb));
+            if (!owner(rfb)) return;
+            field.focus();
+            field.select();
+            if (!document.execCommand('copy')) void writeClipboard(field.value, text => fallback(text, rfb));
         }],
         ['Paste to desktop', () => {
             if (!owner()) return;
@@ -189,9 +222,8 @@ export function desktopClipboard(UI) {
 }
 
 const frameId = window.frameElement?.id;
-if (frameId === 'terminal-frame') terminalCopy();
+if (frameId === 'terminal-frame') terminalClipboard();
 if (frameId === 'vnc-frame') {
-    // import in the frame realm so the connected singleton is reused
-    const {default: UI} = await import(new URL('app/ui.js', location.href));
+    const {default: UI} = await import(new URL('app/ui.js', location.href)); // import in the frame realm so the connected singleton is reused
     desktopClipboard(UI);
 }

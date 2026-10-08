@@ -6,7 +6,7 @@ for (const id of ['vnc-frame', 'terminal-frame']) {
 
     const install = () => {
         const page = frame.contentDocument;
-        if (!page || page.URL === 'about:blank' || page.getElementById('workspace-clipboard-bridge')) return;
+        if (!page?.head || page.URL === 'about:blank' || page.getElementById('workspace-clipboard-bridge')) return;
         const script = page.createElement('script');
         script.id = 'workspace-clipboard-bridge';
         script.type = 'module';
