@@ -379,9 +379,9 @@
 {% elif container_info %}
 <div class="workspace-container" id="workspace-container">
     <div class="workspace-content" id="workspace-content">
-        <iframe id="vnc-frame" class="vnc-frame" src="{{ vnc_url }}" allow="fullscreen"></iframe>
+        <iframe id="vnc-frame" class="vnc-frame" src="{{ vnc_url }}" allow="fullscreen; clipboard-write"></iframe>
         {% if terminal_url %}
-        <iframe id="terminal-frame" class="vnc-frame hidden" src="" allow="fullscreen"></iframe>
+        <iframe id="terminal-frame" class="vnc-frame hidden" src="" allow="fullscreen; clipboard-write"></iframe>
         {% endif %}
         {% if ssh_info %}
         <div id="ssh-panel" class="ssh-panel hidden">
@@ -1232,4 +1232,5 @@ document.addEventListener('DOMContentLoaded', function() {
     {% endif %}
 });
 </script>
+<script type="module" src="{{ url_for('remote_desktop.static', filename='js/workspace-input.js') }}"></script>
 {% endblock %}
