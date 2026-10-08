@@ -38,7 +38,7 @@ async function writeClipboard(text, fallback) {
 
 export function terminalClipboard() {
     document.addEventListener('keydown', event => {
-        const copy = event.code === 'KeyC' && !event.altKey && (event.ctrlKey || event.metaKey);
+        const copy = event.code === 'KeyC' && !event.altKey && event.ctrlKey && event.shiftKey;
         const term = window.term;
         if (!event.isTrusted || !activeOwner() || !term?.element?.contains(document.activeElement)) return;
 
@@ -47,11 +47,12 @@ export function terminalClipboard() {
             return;
         }
 
-        if (copy && event.ctrlKey && event.shiftKey) event.preventDefault();
-        const text = copy && term.getSelection();
+        if (!copy) return;
+        event.preventDefault();
+        const text = term.getSelection();
         if (!text) return;
         event.stopImmediatePropagation();
-        if (!event.ctrlKey || !event.shiftKey || document.execCommand('copy')) return;
+        if (document.execCommand('copy')) return;
 
         const field = document.createElement('textarea');
         field.value = text;
@@ -140,6 +141,11 @@ export function desktopClipboard(UI) {
         bound?.removeEventListener('clipboard', receive);
         bound?.removeEventListener('disconnect', clearIntent);
         bound = UI.rfb;
+        if (bound) {
+            bound._canvas.contentEditable = 'true';
+            bound._canvas.addEventListener('beforeinput', event => event.preventDefault());
+            bound._canvas.addEventListener('paste', event => event.preventDefault());
+        }
         clearIntent();
         bound?.addEventListener('clipboard', receive);
         bound?.addEventListener('disconnect', clearIntent);
@@ -149,17 +155,25 @@ export function desktopClipboard(UI) {
     bind();
 
     document.addEventListener('keydown', event => {
-        const copy = event.code === 'KeyC' && !event.altKey
-            && (event.ctrlKey || event.metaKey);
-        if (copy && event.ctrlKey && event.shiftKey) event.preventDefault();
-        if (!owner() || document.activeElement !== UI.rfb._canvas || !event.isTrusted) return;
+        const copy = event.code === 'KeyC' && !event.altKey && event.ctrlKey && event.shiftKey;
+        if (copy) event.preventDefault();
+        if (!owner() || !event.isTrusted) return;
+
+        if (copy && document.activeElement === field
+            && field.selectionStart !== field.selectionEnd) {
+            const selected = field.value.slice(field.selectionStart, field.selectionEnd);
+            event.stopImmediatePropagation();
+            if (!document.execCommand('copy')) void writeClipboard(selected, () => {});
+            return;
+        }
+
+        if (document.activeElement !== UI.rfb._canvas) return;
 
         if (copy) {
-            event.preventDefault();
             event.stopImmediatePropagation();
             const rfb = UI.rfb;
             startCopy(rfb);
-            sendShortcut(rfb, 'KeyC', event.shiftKey ? 0x43 : 0x63, event.shiftKey);
+            sendShortcut(rfb, 'KeyC', 0x43, true);
             return;
         }
 

@@ -149,11 +149,13 @@ function clipboardFixture(t, {terminal = false, denied = false, missingItem = fa
     let doc;
     function node() {
         return {
-            style: {}, value: '', children: [], events: new Map(), classList: {contains: () => false},
+            style: {}, value: '', selectionStart: 0, selectionEnd: 0,
+            children: [], events: new Map(), classList: {contains: () => false},
             append(...children) {this.children.push(...children);},
             after(...following) {this.following = following;},
             setAttribute() {}, addEventListener(name, callback) {this.events.set(name, callback);}, remove() {},
-            focus() {doc.activeElement = this;}, select() {},
+            focus() {doc.activeElement = this;},
+            select() {this.selectionStart = 0; this.selectionEnd = this.value.length;},
         };
     }
     const canvas = node();
@@ -168,7 +170,8 @@ function clipboardFixture(t, {terminal = false, denied = false, missingItem = fa
         addEventListener: (name, callback) => handlers.set(name, callback),
         execCommand(command) {
             calls.push(command);
-            if (commandOK) writes.push(this.activeElement === canvas ? selection : this.activeElement.value);
+            if (commandOK) writes.push(this.activeElement === canvas ? selection
+                : this.activeElement.value.slice(this.activeElement.selectionStart, this.activeElement.selectionEnd));
             return commandOK;
         },
     };
@@ -231,8 +234,20 @@ function clipboardFixture(t, {terminal = false, denied = false, missingItem = fa
         event.detail = {text: value};
         target.dispatchEvent(event);
     }
+    function paste(value, {target = canvas, types = ['text/plain'], isTrusted = true} = {}) {
+        const event = {target, isTrusted, clipboardData: {types, getData: () => value},
+            prevented: false, stopped: false,
+            preventDefault() {this.prevented = true;}, stopImmediatePropagation() {this.stopped = true;}};
+        handlers.get('paste')?.(event);
+        if (!event.stopped) target.events.get('paste')?.(event);
+        if (!event.prevented) {
+            if (target === canvas) target.children.push({textContent: value});
+            else target.value += value;
+        }
+        return event;
+    }
     return {UI, rfb, doc, frame, canvas, container, field, handlers, timers, observers, writes, fallbacks, calls,
-        key, receive, select: value => {selection = value;},
+        key, receive, paste, select: value => {selection = value;},
         expire: () => {for (const timer of [...timers.values()]) timer.callback();},
         advance: milliseconds => {
             now += milliseconds;
@@ -245,15 +260,14 @@ async function settle() {
     for (let i = 0; i < 16; i++) await Promise.resolve();
 }
 
-test('terminal selected copy uses native dispatch while unselected Ctrl+C remains an interrupt', t => {
+test('terminal plain Ctrl+C remains upstream input with and without a selection', t => {
     const f = clipboardFixture(t, {terminal: true});
-    let event = f.key('KeyC', {ctrlKey: true});
-    assert.equal(event.stopped || event.prevented, false);
-    f.select(text);
-    for (const flags of [{ctrlKey: true}, {metaKey: true}]) {
-        event = f.key('KeyC', flags);
-        assert.equal(event.stopped, true);
-        assert.equal(event.prevented, false);
+    for (const selection of ['', text]) {
+        f.select(selection);
+        for (const flags of [{ctrlKey: true}, {metaKey: true}]) {
+            const event = f.key('KeyC', flags);
+            assert.equal(event.stopped || event.prevented, false);
+        }
     }
     assert.deepEqual(f.calls, []);
     assert.deepEqual(f.writes, []);
@@ -292,12 +306,51 @@ test('terminal failed synchronous copy exposes selected text in a focused fallba
     assert.deepEqual(f.calls, ['copy', 'copy']);
 });
 
+test('desktop plain Ctrl+C and Meta+C remain guest defaults without host clipboard intent', async t => {
+    const f = clipboardFixture(t);
+    for (const flags of [{ctrlKey: true}, {metaKey: true}]) {
+        const event = f.key('KeyC', flags);
+        assert.equal(event.prevented || event.stopped, false);
+        f.receive(text);
+        await settle();
+    }
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.rfb.keys, []);
+    assert.equal(f.timers.size, 0);
+
+    f.rfb._keyboard._sendKeyEvent(0xffe3, 'ControlLeft', true);
+    f.rfb.keys = [];
+    f.rfb._keyboard._handleKeyDown(Object.assign(new Event('keydown'), {
+        code: 'KeyC', key: 'c', ctrlKey: true, getModifierState: () => false,
+    }));
+    f.rfb._keyboard._handleKeyUp(Object.assign(new Event('keyup'), {code: 'KeyC'}));
+    assert.deepEqual(f.rfb.keys, [[0x63, 'KeyC', true], [0x63, 'KeyC', false]]);
+    assert.deepEqual(f.rfb._keyboard._keyDownList, {ControlLeft: 0xffe3});
+    f.rfb._keyboard._handleKeyUp(Object.assign(new Event('keyup'), {code: 'ControlLeft'}));
+    assert.deepEqual(f.rfb._keyboard._keyDownList, {});
+});
+
+test('desktop plain Ctrl+C cancels a pending host copy without replacing it', async t => {
+    const f = clipboardFixture(t);
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
+    const calls = f.calls.length;
+    const event = f.key('KeyC', {ctrlKey: true});
+    f.receive(text);
+    await settle();
+    assert.equal(event.prevented || event.stopped, false);
+    assert.equal(f.calls.length, calls);
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.fallbacks, []);
+    assert.equal(f.timers.size, 0);
+});
+
 test('desktop write starts in the gesture and uses only a fresh response including repeated and empty copies', async t => {
     const f = clipboardFixture(t);
     f.receive('stale prior selection');
     for (const value of [text, text, '']) {
         const before = f.writes.length;
-        f.key('KeyC', {ctrlKey: true});
+        f.key('KeyC', {ctrlKey: true, shiftKey: true});
         assert.equal(f.calls.at(-1).duringKey, true);
         await settle();
         assert.equal(f.writes.length, before);
@@ -313,7 +366,7 @@ test('desktop write starts in the gesture and uses only a fresh response includi
 
 test('first response stops the guest deadline while delayed browser permission completes', async t => {
     const f = clipboardFixture(t, {delayCompletion: true});
-    f.key('KeyC', {metaKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.receive(text);
     await settle();
     assert.equal(f.timers.size, 0);
@@ -328,7 +381,7 @@ test('first response stops the guest deadline while delayed browser permission c
 for (const options of [{denied: true}, {throws: true}, {missingAPI: true}]) {
     test(`desktop unavailable clipboard ${JSON.stringify(options)} waits for fresh text before fallback`, async t => {
         const f = clipboardFixture(t, options);
-        f.key('KeyC', {ctrlKey: true});
+        f.key('KeyC', {ctrlKey: true, shiftKey: true});
         await settle();
         assert.deepEqual(f.fallbacks, []);
         f.receive(text);
@@ -342,7 +395,7 @@ for (const options of [{denied: true}, {throws: true}, {missingAPI: true}]) {
 test('desktop missing ClipboardItem uses fresh writeText without exporting prior selections', async t => {
     const f = clipboardFixture(t, {missingItem: true});
     f.receive('old');
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     assert.deepEqual(f.writes, []);
     f.receive(text);
     await settle();
@@ -353,7 +406,7 @@ test('desktop missing ClipboardItem uses fresh writeText without exporting prior
 for (const missingItem of [false, true]) {
     test(`desktop cancellation after response prevents deferred data fulfillment ${missingItem ? 'writeText' : 'ClipboardItem'}`, async t => {
         const f = clipboardFixture(t, {missingItem});
-        f.key('KeyC', {ctrlKey: true});
+        f.key('KeyC', {ctrlKey: true, shiftKey: true});
         f.receive(text);
         f.handlers.get('blur')();
         await settle();
@@ -365,12 +418,12 @@ for (const missingItem of [false, true]) {
 
 test('desktop delayed guest response succeeds before the deadline and remains canceled after it', async t => {
     const f = clipboardFixture(t);
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.advance(1500);
     f.receive(text);
     await settle();
     assert.deepEqual(f.writes, [text]);
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.advance(2500);
     f.receive('late response');
     await settle();
@@ -382,7 +435,7 @@ test('desktop delayed guest response succeeds before the deadline and remains ca
 for (const cancel of ['blur', 'pointerdown', 'contextmenu', 'disconnect', 'deadline', 'next-input', 'mode']) {
     test(`desktop ${cancel} cancels pending copies without exporting later selections`, async t => {
         const f = clipboardFixture(t);
-        f.key('KeyC', {ctrlKey: true});
+        f.key('KeyC', {ctrlKey: true, shiftKey: true});
         if (cancel === 'disconnect') f.rfb.dispatchEvent(new Event('disconnect'));
         else if (cancel === 'deadline') f.expire();
         else if (cancel === 'next-input') f.key('KeyA');
@@ -398,7 +451,7 @@ for (const cancel of ['blur', 'pointerdown', 'contextmenu', 'disconnect', 'deadl
 
 test('desktop replacing a denied copy suppresses old fallback and copies only the first fresh response', async t => {
     const f = clipboardFixture(t, {denied: true});
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.receive(text);
     f.receive('later unrelated selection');
@@ -414,7 +467,7 @@ for (const state of ['hidden', 'unfocused', 'readOnly', 'disconnected', 'untrust
         else if (state === 'unfocused') f.doc.focused = false;
         else if (state === 'readOnly') f.rfb._viewOnly = true;
         else if (state === 'disconnected') f.UI.connected = false;
-        f.key('KeyC', {ctrlKey: true, isTrusted: state !== 'untrusted'});
+        f.key('KeyC', {ctrlKey: true, shiftKey: true, isTrusted: state !== 'untrusted'});
         f.receive(text);
         await settle();
         assert.deepEqual(f.calls, []);
@@ -425,7 +478,7 @@ for (const state of ['hidden', 'unfocused', 'readOnly', 'disconnected', 'untrust
 
 test('desktop reconnect removes old listeners and binds copy to the replacement owner', async t => {
     const f = clipboardFixture(t);
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     const replacement = client();
     replacement._canvas = f.canvas;
     f.UI.rfb = replacement;
@@ -434,7 +487,7 @@ test('desktop reconnect removes old listeners and binds copy to the replacement 
     await settle();
     assert.deepEqual(f.writes, []);
     assert.equal(f.rfb._listeners.get('clipboard').size, 0);
-    f.key('KeyC', {metaKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.receive(text, replacement);
     await settle();
     assert.deepEqual(f.writes, [text]);
@@ -453,6 +506,81 @@ test('desktop clipboard paste preserves exact text and one repaired chord withou
     assert.equal(f.rfb.keys.some(key => key[1] === 'Enter'), false);
 });
 
+test('desktop canvas remains focused and normal typing reaches the pinned keyboard without DOM edits', t => {
+    const f = clipboardFixture(t);
+    assert.equal(f.canvas.contentEditable, 'true');
+    assert.equal(f.doc.activeElement, f.canvas);
+    assert.equal(f.field.contentEditable, undefined);
+    const event = f.key('KeyA');
+    assert.equal(event.prevented || event.stopped, false);
+    const guestEvent = Object.assign(new Event('keydown', {cancelable: true}), {
+        code: 'KeyA', key: 'a', getModifierState: () => false,
+    });
+    f.rfb._keyboard._handleKeyDown(guestEvent);
+    f.rfb._keyboard._handleKeyUp(Object.assign(new Event('keyup'), {code: 'KeyA'}));
+    assert.equal(guestEvent.defaultPrevented, true);
+    assert.deepEqual(f.rfb.keys, [[0x61, 'KeyA', true], [0x61, 'KeyA', false]]);
+    let prevented = false;
+    f.canvas.events.get('beforeinput')?.({inputType: 'insertText', data: 'a', preventDefault() {prevented = true;}});
+    if (!prevented) f.canvas.children.push({textContent: 'a'});
+    assert.equal(prevented, true);
+    assert.deepEqual(f.canvas.children, []);
+});
+
+test('desktop editable canvas Shift+V transfers once and leaves held modifiers for their physical releases', t => {
+    const f = clipboardFixture(t);
+    f.rfb._keyboard._sendKeyEvent(0xffe3, 'ControlLeft', true);
+    f.rfb._keyboard._sendKeyEvent(0xffe1, 'ShiftLeft', true);
+    f.rfb.keys = [];
+    const key = f.key('KeyV', {ctrlKey: true, shiftKey: true});
+    assert.equal(key.prevented, false);
+    assert.equal(key.stopped, true);
+    const event = f.paste(text);
+    assert.equal(event.prevented && event.stopped, true);
+    assert.equal(f.rfb._clipboardText, text);
+    assert.deepEqual(f.rfb.keys, [[0x56, 'KeyV', true], [0x56, 'KeyV', false]]);
+    assert.equal(f.doc.activeElement, f.canvas);
+    assert.deepEqual(f.canvas.children, []);
+    for (const code of ['ShiftLeft', 'ControlLeft']) {
+        f.rfb._keyboard._handleKeyUp(Object.assign(new Event('keyup'), {code}));
+    }
+    assert.deepEqual(f.rfb._keyboard._keyDownList, {});
+});
+
+for (const state of ['no intent', 'readOnly', 'hidden', 'unfocused', 'disconnected', 'untrusted', 'nontext', 'stale connection']) {
+    test(`desktop ${state} paste cannot insert canvas DOM or send clipboard and keys`, t => {
+        const f = clipboardFixture(t);
+        if (state !== 'no intent') f.key('KeyV', {ctrlKey: true, shiftKey: true});
+        if (state === 'readOnly') f.rfb._viewOnly = true;
+        else if (state === 'hidden') f.frame.hidden = true;
+        else if (state === 'unfocused') f.doc.focused = false;
+        else if (state === 'disconnected') f.UI.connected = false;
+        else if (state === 'stale connection') {
+            const replacement = client();
+            replacement._canvas = f.canvas;
+            f.UI.rfb = replacement;
+            f.observers.find(observer => observer.target === f.container).callback();
+        }
+        const event = f.paste(text, {isTrusted: state !== 'untrusted', types: state === 'nontext' ? ['image/png'] : ['text/plain']});
+        assert.equal(event.prevented, true);
+        assert.deepEqual(f.canvas.children, []);
+        assert.deepEqual(f.rfb._sock.bytes, []);
+        assert.deepEqual(f.rfb.keys, []);
+        assert.deepEqual(f.writes, []);
+        assert.equal(f.doc.activeElement, f.canvas);
+    });
+}
+
+test('desktop shared field native paste retains its default insertion without guest clipboard transfer', t => {
+    const f = clipboardFixture(t);
+    f.field.focus();
+    const event = f.paste(text, {target: f.field});
+    assert.equal(event.prevented || event.stopped, false);
+    assert.equal(f.field.value, text);
+    assert.deepEqual(f.rfb._sock.bytes, []);
+    assert.deepEqual(f.canvas.children, []);
+});
+
 test('desktop explicit Copy button works without async clipboard and requires the active owner', t => {
     const f = clipboardFixture(t, {missingAPI: true});
     f.field.value = text;
@@ -466,11 +594,80 @@ test('desktop explicit Copy button works without async clipboard and requires th
     assert.deepEqual(f.calls, ['copy']);
 });
 
+test('desktop shared field Shift+C copies only the selected Unicode range without guest input', t => {
+    const f = clipboardFixture(t, {missingAPI: true});
+    f.field.value = `before ${text} after`;
+    f.field.selectionStart = 7;
+    f.field.selectionEnd = 7 + text.length;
+    f.field.focus();
+    const event = f.key('KeyC', {ctrlKey: true, shiftKey: true});
+    assert.equal(event.prevented && event.stopped, true);
+    assert.deepEqual(f.calls, ['copy']);
+    assert.deepEqual(f.writes, [text]);
+    assert.equal(f.field.value, `before ${text} after`);
+    assert.deepEqual(f.rfb.keys, []);
+    assert.equal(f.timers.size, 0);
+});
+
+test('desktop shared field retains native plain copy and does not copy an empty range', t => {
+    const f = clipboardFixture(t);
+    f.field.value = text;
+    f.field.focus();
+    for (const flags of [{ctrlKey: true}, {metaKey: true}]) {
+        const event = f.key('KeyC', flags);
+        assert.equal(event.prevented || event.stopped, false);
+    }
+    const event = f.key('KeyC', {ctrlKey: true, shiftKey: true});
+    assert.equal(event.prevented, true);
+    assert.equal(event.stopped, false);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.rfb.keys, []);
+});
+
+for (const state of ['hidden', 'unfocused', 'readOnly', 'disconnected', 'untrusted']) {
+    test(`desktop shared field ${state} cannot copy a selection`, t => {
+        const f = clipboardFixture(t);
+        f.field.value = text;
+        f.field.focus();
+        f.field.select();
+        if (state === 'hidden') f.frame.hidden = true;
+        else if (state === 'unfocused') f.doc.focused = false;
+        else if (state === 'readOnly') f.rfb._viewOnly = true;
+        else if (state === 'disconnected') f.UI.connected = false;
+        f.key('KeyC', {ctrlKey: true, shiftKey: true, isTrusted: state !== 'untrusted'});
+        assert.deepEqual(f.calls, []);
+        assert.deepEqual(f.writes, []);
+        assert.deepEqual(f.rfb.keys, []);
+        assert.equal(f.timers.size, 0);
+    });
+}
+
+for (const denied of [false, true]) {
+    test(`desktop shared field failed native copy preserves content and range with ${denied ? 'denied' : 'allowed'} async clipboard`, async t => {
+        const f = clipboardFixture(t, {commandOK: false, denied});
+        f.field.value = `before ${text} after`;
+        f.field.selectionStart = 7;
+        f.field.selectionEnd = 7 + text.length;
+        f.field.focus();
+        f.key('KeyC', {ctrlKey: true, shiftKey: true});
+        await settle();
+        assert.deepEqual(f.writes, denied ? [] : [text]);
+        assert.deepEqual(f.calls, ['copy', {api: 'writeText', duringKey: true}]);
+        assert.equal(f.field.value, `before ${text} after`);
+        assert.equal(f.field.selectionStart, 7);
+        assert.equal(f.field.selectionEnd, 7 + text.length);
+        assert.deepEqual(f.fallbacks, []);
+        assert.deepEqual(f.rfb.keys, []);
+        assert.equal(f.timers.size, 0);
+    });
+}
+
 test('desktop replacing a copy after response but before fulfillment cannot write old text', async t => {
     const f = clipboardFixture(t);
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.receive('old response');
-    f.key('KeyC', {ctrlKey: true});
+    f.key('KeyC', {ctrlKey: true, shiftKey: true});
     f.receive(text);
     await settle();
     assert.deepEqual(f.writes, [text]);
