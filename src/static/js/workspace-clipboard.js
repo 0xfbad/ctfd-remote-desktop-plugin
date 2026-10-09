@@ -70,6 +70,7 @@ export function desktopClipboard(UI) {
     let bound = null;
     let pendingCopy = null;
     let pendingPaste = null;
+    let preferGuestClipboard = false;
     const field = document.getElementById('noVNC_clipboard_text');
 
     function owner(rfb = UI.rfb) {
@@ -83,6 +84,11 @@ export function desktopClipboard(UI) {
         if (!pending) return;
         clearTimeout(pending.timer);
         pending.reject(new Error('copy canceled'));
+    }
+
+    function resetClipboardPreference() {
+        preferGuestClipboard = false;
+        clearIntent();
     }
 
     function fallback(text, rfb = UI.rfb) {
@@ -130,8 +136,10 @@ export function desktopClipboard(UI) {
     }
 
     function receive(event) {
+        if (this !== UI.rfb || !owner(this)) return;
+        preferGuestClipboard = true; // the desktop server filters primary selections
         const pending = pendingCopy;
-        if (this !== UI.rfb || !pending || pending.rfb !== this || !owner(this)) return; // primary selections also emit clipboard events, only a copy gesture may write to the host
+        if (!pending || pending.rfb !== this) return;
         clearTimeout(pending.timer);
         pending.resolve(event.detail.text);
     }
@@ -139,16 +147,16 @@ export function desktopClipboard(UI) {
     function bind() {
         if (bound === UI.rfb) return;
         bound?.removeEventListener('clipboard', receive);
-        bound?.removeEventListener('disconnect', clearIntent);
+        bound?.removeEventListener('disconnect', resetClipboardPreference);
         bound = UI.rfb;
         if (bound) {
             bound._canvas.contentEditable = 'true';
             bound._canvas.addEventListener('beforeinput', event => event.preventDefault());
             bound._canvas.addEventListener('paste', event => event.preventDefault());
         }
-        clearIntent();
+        resetClipboardPreference();
         bound?.addEventListener('clipboard', receive);
-        bound?.addEventListener('disconnect', clearIntent);
+        bound?.addEventListener('disconnect', resetClipboardPreference);
     }
 
     new MutationObserver(bind).observe(document.getElementById('noVNC_container'), {childList: true});
@@ -180,6 +188,12 @@ export function desktopClipboard(UI) {
         const paste = event.code === 'KeyV' && !event.altKey && (event.ctrlKey || event.metaKey);
         if (paste) {
             clearIntent();
+            if (preferGuestClipboard) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                sendShortcut(UI.rfb, 'KeyV', event.shiftKey ? 0x56 : 0x76, event.shiftKey);
+                return;
+            }
             pendingPaste = {rfb: UI.rfb, shift: event.shiftKey};
             event.stopImmediatePropagation(); // allow the browser paste event, suppress the guest chord until its clipboard is announced
             return;
@@ -194,9 +208,15 @@ export function desktopClipboard(UI) {
         const pending = pendingPaste;
         pendingPaste = null;
         if (!pending || !event.isTrusted || !owner(pending.rfb)
-            || document.activeElement !== pending.rfb._canvas
-            || !event.clipboardData?.types.includes('text/plain')) return;
+            || document.activeElement !== pending.rfb._canvas) return;
 
+        if (preferGuestClipboard) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            sendShortcut(pending.rfb, 'KeyV', pending.shift ? 0x56 : 0x76, pending.shift);
+            return;
+        }
+        if (!event.clipboardData?.types.includes('text/plain')) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         pasteText(pending.rfb, event.clipboardData.getData('text/plain'), pending.shift);
@@ -204,8 +224,8 @@ export function desktopClipboard(UI) {
 
     document.addEventListener('pointerdown', clearIntent, true);
     document.addEventListener('contextmenu', clearIntent, true);
-    window.addEventListener('blur', clearIntent);
-    new MutationObserver(clearIntent).observe(window.frameElement, {attributes: true, attributeFilter: ['class']});
+    window.addEventListener('blur', resetClipboardPreference);
+    new MutationObserver(resetClipboardPreference).observe(window.frameElement, {attributes: true, attributeFilter: ['class']});
 
     const controls = document.createElement('div');
     controls.style.marginTop = '8px';
@@ -219,7 +239,7 @@ export function desktopClipboard(UI) {
         }],
         ['Paste to desktop', () => {
             if (!owner()) return;
-            clearIntent();
+            resetClipboardPreference();
             pasteText(UI.rfb, field.value);
             UI.closeClipboardPanel();
             UI.rfb.focus();

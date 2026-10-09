@@ -18,7 +18,7 @@ Object.defineProperty(globalThis, 'navigator', {
 globalThis.document = {documentElement: {}, body: element(), createElement: element};
 globalThis.MutationObserver = class { observe() {} disconnect() {} };
 
-const {desktopClipboard, pasteText, sendShortcut, terminalClipboard} = await import('../src/static/js/workspace-clipboard.js');
+const {desktopClipboard, pasteText, sendShortcut, terminalClipboard} = await import(process.env.WORKSPACE_CLIPBOARD_SOURCE || '../src/static/js/workspace-clipboard.js');
 const {default: RFB} = await import('../src/static/novnc/869e3dcb0d8de7f5/core/rfb.js');
 const {default: Keyboard} = await import('../src/static/novnc/869e3dcb0d8de7f5/core/input/keyboard.js');
 
@@ -718,4 +718,191 @@ test('workspace loader installs into already loaded frames exactly once', () => 
         item.listeners.get('load')();
         assert.equal(item.scripts.length, 1);
     }
+});
+
+function observedFixture(t, options = {}) {
+    const f = clipboardFixture(t, options);
+    f.announcements = [];
+    f.observe = rfb => {
+        const original = rfb.clipboardPasteFrom.bind(rfb);
+        rfb.clipboardPasteFrom = value => {f.announcements.push(value); original(value);};
+    };
+    f.observe(f.rfb);
+    return f;
+}
+
+function assertPaste(f, flags, host, {guestOwned = false, target = f.UI.rfb} = {}) {
+    const before = target.keys.filter(key => key[1] === 'KeyV' && key[2]).length;
+    const announcements = f.announcements.length;
+    const key = f.key('KeyV', flags);
+    assert.equal(key.stopped, true);
+    assert.equal(key.prevented, guestOwned);
+    const event = f.paste(host);
+    assert.equal(event.prevented, true);
+    assert.equal(target.keys.filter(key => key[1] === 'KeyV' && key[2]).length, before + 1);
+    assert.equal(target.keys.some(key => key[1] === 'Enter'), false);
+    assert.equal(f.announcements.length, announcements + (guestOwned ? 0 : 1));
+    if (!guestOwned) assert.equal(f.announcements.at(-1), host);
+}
+
+for (const flags of [{ctrlKey: true}, {ctrlKey: true, shiftKey: true}, {metaKey: true}]) {
+    test(`plain guest copy followed by ${JSON.stringify(flags)} preserves guest clipboard`, async t => {
+        const f = observedFixture(t);
+        const copy = f.key('KeyC', {ctrlKey: true});
+        assert.equal(copy.prevented || copy.stopped, false);
+        f.receive('guest synthetic command');
+        await settle();
+        assert.deepEqual(f.writes, []);
+        assert.deepEqual(f.calls, []);
+        assert.equal(f.timers.size, 0);
+        assertPaste(f, flags, 'host stale synthetic value', {guestOwned: true});
+    });
+}
+
+for (const guest of [text, '']) {
+    test(`repeated guest pastes retain ownership including ${guest === '' ? 'empty' : 'Unicode whitespace'} clipboard`, t => {
+        const f = observedFixture(t);
+        f.receive(guest);
+        for (let n = 0; n < 3; n++) {
+            assertPaste(f, {ctrlKey: true, shiftKey: true}, `host stale ${n}`, {guestOwned: true});
+        }
+        assert.deepEqual(f.writes, []);
+    });
+}
+
+for (const activity of ['typing', 'pointerdown', 'contextmenu']) {
+    test(`guest ownership survives ordinary ${activity}`, t => {
+        const f = observedFixture(t);
+        f.receive('guest');
+        if (activity === 'typing') f.key('KeyA');
+        else f.handlers.get(activity)();
+        assertPaste(f, {ctrlKey: true, shiftKey: true}, 'host', {guestOwned: true});
+    });
+}
+
+for (const lifecycle of ['blur', 'disconnect', 'hide', 'hide then show in one batch', 'rebind']) {
+    test(`${lifecycle} clears guest ownership before the next host paste`, t => {
+        const f = observedFixture(t);
+        f.receive('guest');
+        if (lifecycle === 'blur') f.handlers.get('blur')();
+        else if (lifecycle === 'disconnect') f.rfb.dispatchEvent(new Event('disconnect'));
+        else if (lifecycle === 'hide') {
+            f.frame.hidden = true;
+            f.observers.find(observer => observer.target === f.frame).callback([{oldValue: 'vnc-frame'}]);
+            f.frame.hidden = false;
+        } else if (lifecycle === 'hide then show in one batch') {
+            f.observers.find(observer => observer.target === f.frame).callback([{oldValue: 'vnc-frame'}, {oldValue: 'vnc-frame hidden'}]);
+        } else {
+            const replacement = client();
+            replacement._canvas = f.canvas;
+            f.observe(replacement);
+            f.UI.rfb = replacement;
+            f.observers.find(observer => observer.target === f.container).callback();
+            f.receive('late old RFB value', f.rfb);
+        }
+        assertPaste(f, {ctrlKey: true, shiftKey: true}, 'fresh host text');
+        assert.deepEqual(f.writes, []);
+    });
+}
+
+for (const invalid of ['hidden', 'unfocused', 'readOnly', 'disconnected', 'stale RFB']) {
+    test(`clipboard data from ${invalid} cannot acquire guest ownership`, t => {
+        const f = observedFixture(t);
+        if (invalid === 'hidden') f.frame.hidden = true;
+        else if (invalid === 'unfocused') f.doc.focused = false;
+        else if (invalid === 'readOnly') f.rfb._viewOnly = true;
+        else if (invalid === 'disconnected') f.UI.connected = false;
+        const sender = invalid === 'stale RFB' ? client() : f.rfb;
+        f.receive('ignored guest', sender);
+        f.frame.hidden = false;
+        f.doc.focused = true;
+        f.rfb._viewOnly = false;
+        f.UI.connected = true;
+        assertPaste(f, {ctrlKey: true}, 'host wins');
+    });
+}
+
+test(`guest update between host paste keydown and paste event supersedes stale host announcement`, t => {
+    const f = observedFixture(t);
+    const key = f.key('KeyV', {ctrlKey: true, shiftKey: true});
+    assert.equal(key.prevented, false);
+    assert.equal(key.stopped, true);
+    f.receive('new guest text');
+    const event = f.paste('stale host text');
+    assert.equal(event.prevented && event.stopped, true);
+    assert.deepEqual(f.announcements, []);
+    assert.equal(f.rfb.keys.filter(key => key[1] === 'KeyV' && key[2]).length, 1);
+});
+
+for (const missing of [false, true]) {
+    test(`guest update before ${missing ? 'missing' : 'nontext'} host paste data still forwards fresh guest paste`, t => {
+        const f = observedFixture(t);
+        f.key('KeyV', {ctrlKey: true, shiftKey: true});
+        f.receive('fresh guest command');
+        if (missing) {
+            f.handlers.get('paste')({isTrusted: true, clipboardData: undefined,
+                preventDefault() {}, stopImmediatePropagation() {}});
+        } else f.paste('unused host image', {types: ['image/png']});
+        assert.deepEqual(f.announcements, []);
+        assert.equal(f.rfb.keys.filter(key => key[1] === 'KeyV' && key[2]).length, 1);
+    });
+}
+
+test(`delayed host paste after ownership clear cannot announce or add a second V chord`, t => {
+    const f = observedFixture(t);
+    f.receive('guest');
+    f.key('KeyV', {ctrlKey: true, shiftKey: true});
+    f.handlers.get('blur')();
+    const before = f.rfb.keys.length;
+    f.paste('late host');
+    assert.deepEqual(f.announcements, []);
+    assert.equal(f.rfb.keys.length, before);
+});
+
+for (const options of [{denied: true}, {missingAPI: true}]) {
+    test(`failed explicit host write still keeps actual guest copy for guest paste ${JSON.stringify(options)}`, async t => {
+        const f = observedFixture(t, options);
+        f.key('KeyC', {ctrlKey: true, shiftKey: true});
+        f.receive(text);
+        await settle();
+        assert.deepEqual(f.writes, []);
+        assert.deepEqual(f.fallbacks, [text]);
+        f.canvas.focus();
+        assertPaste(f, {ctrlKey: true, shiftKey: true}, 'stale host despite denied write', {guestOwned: true});
+    });
+}
+
+test(`explicit panel import takes host ownership and permits the next host shortcut`, t => {
+    const f = observedFixture(t);
+    f.receive('guest');
+    f.UI.closeClipboardPanel = () => {};
+    f.field.value = 'explicit host value';
+    f.field.focus();
+    const button = f.field.following[0].children.find(child => child.textContent === 'Paste to desktop');
+    button.events.get('click')();
+    assert.deepEqual(f.announcements, ['explicit host value']);
+    f.canvas.focus();
+    assertPaste(f, {ctrlKey: true}, 'new host value');
+});
+
+test(`plain terminal interrupt creates no host intent and next paste imports host normally`, t => {
+    const f = observedFixture(t);
+    const event = f.key('KeyC', {ctrlKey: true});
+    assert.equal(event.prevented || event.stopped, false);
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.timers.size, 0);
+    assertPaste(f, {ctrlKey: true, shiftKey: true}, 'fresh host');
+});
+
+test(`physical modifiers survive guest paste and release with no duplicate chord`, t => {
+    const f = observedFixture(t);
+    f.receive('guest');
+    f.rfb._keyboard._sendKeyEvent(0xffe4, 'ControlRight', true);
+    f.rfb._keyboard._sendKeyEvent(0xffe2, 'ShiftRight', true);
+    f.rfb.keys = [];
+    assertPaste(f, {ctrlKey: true, shiftKey: true}, 'host', {guestOwned: true});
+    assert.deepEqual(f.rfb.keys, [[0x56, 'KeyV', true], [0x56, 'KeyV', false]]);
+    for (const code of ['ShiftRight', 'ControlRight']) f.rfb._keyboard._handleKeyUp(Object.assign(new Event('keyup'), {code}));
+    assert.deepEqual(f.rfb._keyboard._keyDownList, {});
 });
