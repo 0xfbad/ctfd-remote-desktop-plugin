@@ -1,0 +1,46 @@
+{
+  "upstream": {
+    "repository": "https://github.com/moby/moby",
+    "version": "docker-v29.8.1",
+    "commit": "464cd50c3d9e92877d56940ea160de6fca7bea23",
+    "path": "vendor/github.com/moby/profiles/seccomp/default.json",
+    "url": "https://raw.githubusercontent.com/moby/moby/464cd50c3d9e92877d56940ea160de6fca7bea23/vendor/github.com/moby/profiles/seccomp/default.json",
+    "sha256": "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
+    "canonical_sha256": "9da637d2ab0a204fcbd91bd88f1be9e004a3acab61c571a9f5b8870e588a17d2",
+    "module": "github.com/moby/profiles/seccomp",
+    "module_version": "v0.2.3",
+    "module_commit": "836ae4d37ef2ec995c77c99fc55f5b5f3af3a897"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "url": "https://raw.githubusercontent.com/moby/moby/464cd50c3d9e92877d56940ea160de6fca7bea23/vendor/github.com/moby/profiles/seccomp/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "readonly_paths": {
+    "path": "daemon/pkg/oci/defaults.go",
+    "url": "https://github.com/moby/moby/blob/464cd50c3d9e92877d56940ea160de6fca7bea23/daemon/pkg/oci/defaults.go#L106-L112",
+    "defaults": [
+      "/proc/bus",
+      "/proc/fs",
+      "/proc/irq",
+      "/proc/sys",
+      "/proc/sysrq-trigger"
+    ]
+  },
+  "profile": {
+    "path": "workspace-quota.json",
+    "sha256": "63405c81b33f692155cd10d177e48239d891ed2ffb4f9f065f984dde768e3616",
+    "blocked_ioctl_type_nr": [
+      "0x5820",
+      "0x6602"
+    ],
+    "ioctl_argument_index": 1,
+    "ioctl_allow_rule_count": 28,
+    "upstream_ioctl_rule_index": 0,
+    "upstream_ioctl_name_index": 123,
+    "changes": [
+      "Replace the unconditional ioctl allow with masked prefix allows excluding filesystem attribute setters.",
+      "Leave file_setattr denied by the upstream default action."
+    ]
+  }
+}

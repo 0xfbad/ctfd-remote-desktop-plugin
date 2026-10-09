@@ -10,6 +10,7 @@ import threading
 import logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from functools import partial
 from typing import Literal
 from urllib.parse import urlsplit
 import docker
@@ -20,6 +21,7 @@ import paramiko
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
 from .messages import HOST_UNREACHABLE, SERVER_BUSY
+from .quota_security import run_quota_container, workspace_quota_seccomp
 from .utils import normalize_public_hostname, parse_size
 
 logger = logging.getLogger(__name__)
@@ -34,8 +36,8 @@ LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
 
-DEFAULT_CLIENT_TIMEOUT = 10  # seconds of docker sdk http read time, the ssh connect phase is bounded separately
-CLIENT_FAILURE_COOLDOWN = 60  # seconds a failed connect is remembered so one dead host costs one connect
+DEFAULT_CLIENT_TIMEOUT = 10  # ssh connect has a separate deadline
+CLIENT_FAILURE_COOLDOWN = 60
 HOST_CONCURRENCY = 4
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
 DiscoveredContext = dict[str, str]
@@ -65,7 +67,7 @@ def _install_bounded_ssh_adapter() -> None:
         try:
             from docker.api import client as api_client
         except (ImportError, AttributeError):
-            return  # unit tests stub docker without this module, the pinned dependency always has it
+            return  # test stubs omit the adapter module
         original_adapter = api_client.SSHHTTPAdapter
         if getattr(original_adapter, "_ctfd_bounded_connect", False):
             _SSH_ADAPTER_PATCHED = True
@@ -455,7 +457,7 @@ class DockerHostManager:
     def _sweep_owned_stale_entries_locked(
         self, current_thread: threading.Thread, to_close: list[docker.DockerClient]
     ) -> None:
-        # sweep every stale key this thread owns, otherwise each retired context leaks one ssh transport
+        # retired contexts otherwise keep their ssh transports open
         owned_stale_keys = [
             cached_key
             for cached_key in self._clients
@@ -598,7 +600,7 @@ class DockerHostManager:
         return sem
 
     def release_semaphore(self, semaphore: threading.BoundedSemaphore | str | None) -> None:
-        # legacy names remain accepted, callers must release the acquired object to survive reloads
+        # callers must release the acquired object to survive reloads
         if isinstance(semaphore, str):
             with self._lock:
                 sem = self._semaphores.get(semaphore)
@@ -705,7 +707,7 @@ class DockerHostManager:
             raise ValueError("max_concurrent_creates must be an integer")
 
         with self._lock:
-            # only a vanished or moved context invalidates its cooldown, clearing all of them costs one connect each
+            # clearing unchanged cooldowns would retry every unavailable host
             unchanged = {name for name, url in new_configs.items() if self._context_configs.get(name) == url}
             self._client_failures = {
                 name: until
@@ -755,7 +757,7 @@ class DockerHostManager:
         if not url:
             return False
 
-        # fresh client, a cached paramiko transport wedges on dead tcp sockets past the health check interval
+        # cached paramiko transports can wait on dead sockets beyond the health check interval
         reachable = ping_endpoint(url, timeout=3)
 
         with self._lock:
@@ -763,7 +765,6 @@ class DockerHostManager:
             if endpoint_is_current:
                 if reachable:
                     self._connected_contexts.add(context_name)
-                    # a failed ping never arms the cooldown, one flap must not fast fail teardown of live sessions
                     self._client_failures.pop(context_name, None)
                 else:
                     self._connected_contexts.discard(context_name)
@@ -771,6 +772,7 @@ class DockerHostManager:
             return False
         if reachable:
             return True
+        # a failed ping must not delay teardown of live sessions
         self._clear_client(context_name)
         return False
 
@@ -802,6 +804,7 @@ class DockerHostManager:
         if storage_limit:
             parse_size(storage_limit)
             extra_kwargs["storage_opt"] = {"size": storage_limit}
+            extra_kwargs["security_opt"] = [workspace_quota_seccomp()]
 
         log_max_size = str(effective_profile["log_max_size"] or "").strip()
         if log_max_size:
@@ -885,10 +888,11 @@ class DockerHostManager:
 
             last_err: Exception | None = None
             container = None
+            run_container = partial(run_quota_container, client) if storage_limit else client.containers.run
             for _ in range(50):
                 port_bindings = {p: _sysrand.randint(40000, 59999) for p in ports}
                 try:
-                    container = client.containers.run(
+                    container = run_container(
                         resolved_image_id,
                         name=name,
                         hostname=container_hostname,
@@ -973,12 +977,12 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def force_remove_container(self, context_name: str, container_name: str) -> bool:
-        # stop does nothing to a created container so auto_remove never fires, forced removal covers every state in one call
         def _do() -> bool:
             client = self._get_client(context_name)
             container = None
             try:
                 container = client.containers.get(container_name)
+                # auto_remove never fires for created containers that have not started
                 container.remove(force=True)
             except docker.errors.NotFound:
                 logger.debug(f"container {container_name} already removed")
