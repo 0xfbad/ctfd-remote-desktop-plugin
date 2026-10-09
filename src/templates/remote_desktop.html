@@ -391,18 +391,20 @@
                         <h5 class="card-title mb-1"><i class="fas fa-terminal me-2"></i>SSH Connection</h5>
                         <p class="text-muted small mb-4">Run this in a terminal on your machine (not inside the desktop)</p>
                         <div class="mb-3">
-                            <label class="form-label small">Command</label>
+                            <label class="form-label small" for="ssh-cmd">Command</label>
                             <div class="input-group">
                                 <input type="text" class="form-control font-monospace" id="ssh-cmd" value="ssh {{ ssh_info.username }}@{{ ssh_info.host }} -p {{ ssh_info.port }}" readonly>
-                                <button class="btn btn-outline-secondary" onclick="copyField('ssh-cmd', this)" title="Copy"><i class="fas fa-copy"></i></button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="copyField('ssh-cmd', this)" title="Copy" aria-label="Copy command"><i class="fas fa-copy"></i></button>
                             </div>
+                            <div id="ssh-cmd-copy-status" class="text-muted small mt-1" role="status" hidden></div>
                         </div>
                         <div class="mb-0">
-                            <label class="form-label small">Password</label>
+                            <label class="form-label small" for="ssh-pass">Password</label>
                             <div class="input-group">
                                 <input type="text" class="form-control font-monospace" id="ssh-pass" value="{{ ssh_info.password }}" readonly>
-                                <button class="btn btn-outline-secondary" onclick="copyField('ssh-pass', this)" title="Copy"><i class="fas fa-copy"></i></button>
+                                <button type="button" class="btn btn-outline-secondary" onclick="copyField('ssh-pass', this)" title="Copy" aria-label="Copy password"><i class="fas fa-copy"></i></button>
                             </div>
+                            <div id="ssh-pass-copy-status" class="text-muted small mt-1" role="status" hidden></div>
                         </div>
                     </div>
                 </div>
@@ -1147,12 +1149,66 @@ document.addEventListener('keydown', function(e) {
 
 function copyField(elementId, btn) {
     const el = document.getElementById(elementId);
-    if (!el) return;
-    const text = el.value || el.textContent;
-    navigator.clipboard.writeText(text.trim()).then(() => {
+    if (!el || btn.disabled) return;
+    const panel = document.getElementById('ssh-panel');
+    const status = document.getElementById(elementId + '-copy-status');
+    const text = el.value;
+    btn.disabled = true;
+    if (panel) panel.copyField = el;
+    if (btn._copyResetTimer) clearTimeout(btn._copyResetTimer);
+    btn.innerHTML = '<i class="fas fa-copy"></i>';
+    btn.title = 'Copy';
+    status.hidden = true;
+    status.textContent = '';
+
+    function current() {
+        return el.isConnected && btn.isConnected && panel?.isConnected
+            && !panel.classList.contains('hidden') && panel.getClientRects().length > 0;
+    }
+
+    function currentCopy() {
+        return current() && panel.copyField === el;
+    }
+
+    function copied() {
+        btn.disabled = false;
+        if (!currentCopy()) return;
         btn.innerHTML = '<i class="fas fa-check"></i>';
-        setTimeout(() => { btn.innerHTML = '<i class="fas fa-copy"></i>'; }, 1500);
-    });
+        btn.title = 'Copied';
+        status.hidden = true;
+        btn._copyResetTimer = setTimeout(() => {
+            if (!current()) return;
+            btn.innerHTML = '<i class="fas fa-copy"></i>';
+            btn.title = 'Copy';
+        }, 1500);
+    }
+
+    function fallback() {
+        if (!currentCopy()) {
+            btn.disabled = false;
+            return;
+        }
+        let success = false;
+        try {
+            el.focus();
+            el.select();
+            success = document.execCommand('copy');
+        } catch (error) {}
+
+        btn.disabled = false;
+        if (success) {
+            copied();
+            return;
+        }
+        status.textContent = 'Press Ctrl+C to copy';
+        status.hidden = false;
+    }
+
+    try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            Promise.resolve(navigator.clipboard.writeText(text)).then(copied, fallback);
+        } else fallback();
+    } catch (error) { fallback(); }
 }
 
 
