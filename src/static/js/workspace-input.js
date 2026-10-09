@@ -21,3 +21,14 @@ for (const id of ['vnc-frame', 'terminal-frame']) {
 document.addEventListener('keydown', event => {
     if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') event.preventDefault();
 }, true);
+
+document.addEventListener('click', event => {
+    if (!(event.detail > 0)) return;
+
+    const mode = event.target.closest('.mode-tab.active')?.dataset.mode;
+    if (mode === 'terminal') document.getElementById('terminal-frame')?.contentWindow?.term?.focus();
+    if (mode === 'desktop') {
+        document.getElementById('vnc-frame')?.contentDocument
+            ?.querySelector('#noVNC_container canvas')?.focus({preventScroll: true});
+    }
+});
