@@ -805,6 +805,7 @@ class DockerHostManager:
             parse_size(storage_limit)
             extra_kwargs["storage_opt"] = {"size": storage_limit}
             extra_kwargs["security_opt"] = [workspace_quota_seccomp()]
+            extra_kwargs["tmpfs"] = {"/run": "rw,exec,nosuid,nodev,size=64m,mode=0755"}
 
         log_max_size = str(effective_profile["log_max_size"] or "").strip()
         if log_max_size:

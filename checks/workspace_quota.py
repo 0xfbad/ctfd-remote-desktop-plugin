@@ -53,6 +53,7 @@ def check_container_requests(loader, source):
         host_config = {
             "PortBindings": {"5000/sctp": [{"HostPort": "45000"}], "53/udp": [], "22/tcp": []},
             "StorageOpt": {"size": "20g"},
+            "Tmpfs": {"/run": "rw,exec,nosuid,nodev,size=64m,mode=0755"},
         }
         if network == "desktop-network":
             host_config.update(MaskedPaths=["/proc/kcore"], ReadonlyRootfs=False)
@@ -60,7 +61,12 @@ def check_container_requests(loader, source):
         client.api.create_host_config.return_value = host_config
         client.api.create_container.return_value = {"Id": "created-container"}
         ports = {22: 40022, "53/udp": 40053, "5000/sctp": 45000}
-        options = {"auto_remove": True, "init": True, "storage_opt": {"size": "20g"}}
+        options = {
+            "auto_remove": True,
+            "init": True,
+            "storage_opt": {"size": "20g"},
+            "tmpfs": {"/run": "rw,exec,nosuid,nodev,size=64m,mode=0755"},
+        }
         container = loader.run_quota_container(
             client,
             "sha256:desktop",
