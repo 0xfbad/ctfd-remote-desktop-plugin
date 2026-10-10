@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {runInNewContext} from 'node:vm';
 
-const source = readFileSync(new URL('../src/static/js/workspace-input.js', import.meta.url), 'utf8');
+const source = readFileSync(process.env.WORKSPACE_INPUT_SOURCE || new URL('../src/static/js/workspace-input.js', import.meta.url), 'utf8');
 
 function fixture({missingFrame, missingClient, transitional = false} = {}) {
     const calls = [];
@@ -24,6 +24,7 @@ function fixture({missingFrame, missingClient, transitional = false} = {}) {
             },
         };
         const frame = {
+            focus(options) { calls.push({target: `${mode}-frame`, preventScroll: options?.preventScroll}); },
             contentWindow: {term: missingClient === mode || transitional ? undefined : term},
             contentDocument: page,
             addEventListener() {},
@@ -70,15 +71,23 @@ test('keyboard and programmatic activation preserve navigation and other control
     assert.deepEqual(f.calls, []);
 });
 
-test('missing or loading clients do not throw or queue a later focus change', () => {
-    for (const state of [{missingFrame: 'terminal'}, {missingClient: 'terminal'}, {transitional: true}]) {
-        const f = fixture(state);
-        assert.doesNotThrow(() => f.click('terminal'));
+test('pointer activation reserves a loading frame and missing frames remain safe', () => {
+    for (const mode of ['terminal', 'desktop']) {
+        for (const state of [{missingClient: mode}, {transitional: true}]) {
+            const f = fixture(state);
+            assert.doesNotThrow(() => f.click(mode));
+            assert.deepEqual(f.calls, [{target: `${mode}-frame`, preventScroll: true}]);
+        }
+        const f = fixture({missingFrame: mode});
+        assert.doesNotThrow(() => f.click(mode));
         assert.deepEqual(f.calls, []);
     }
-    for (const state of [{missingFrame: 'desktop'}, {missingClient: 'desktop'}, {transitional: true}]) {
-        const f = fixture(state);
-        assert.doesNotThrow(() => f.click('desktop'));
+});
+
+test('keyboard activation does not reserve a loading client frame', () => {
+    for (const mode of ['terminal', 'desktop']) {
+        const f = fixture({missingClient: mode});
+        f.click(mode, {detail: 0});
         assert.deepEqual(f.calls, []);
     }
 });

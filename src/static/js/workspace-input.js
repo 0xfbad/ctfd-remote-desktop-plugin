@@ -26,9 +26,15 @@ document.addEventListener('click', event => {
     if (!(event.detail > 0)) return;
 
     const mode = event.target.closest('.mode-tab.active')?.dataset.mode;
-    if (mode === 'terminal') document.getElementById('terminal-frame')?.contentWindow?.term?.focus();
+    if (mode === 'terminal') {
+        const frame = document.getElementById('terminal-frame');
+        const term = frame?.contentWindow?.term;
+        if (term) term.focus();
+        else frame?.focus({preventScroll: true});
+    }
     if (mode === 'desktop') {
-        document.getElementById('vnc-frame')?.contentDocument
-            ?.querySelector('#noVNC_container canvas')?.focus({preventScroll: true});
+        const frame = document.getElementById('vnc-frame');
+        (frame?.contentDocument?.querySelector('#noVNC_container canvas') ?? frame)
+            ?.focus({preventScroll: true});
     }
 });

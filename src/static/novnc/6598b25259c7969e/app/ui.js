@@ -443,7 +443,9 @@ const UI = {
             UI.disableSetting('repeaterID');
 
             // Hide the controlbar after 2 seconds
-            UI.closeControlbarTimeout = setTimeout(UI.closeControlbar, 2000);
+            UI.closeControlbarTimeout = setTimeout(() => {
+                if (UI.shouldAutoFocus()) UI.closeControlbar();
+            }, 2000);
         } else {
             UI.enableSetting('encrypt');
             UI.enableSetting('shared');
@@ -1141,7 +1143,18 @@ const UI = {
         UI.openConnectPanel();
     },
 
+    shouldAutoFocus() {
+        const frame = window.frameElement;
+        if (frame?.id !== 'vnc-frame') return true;
+
+        const page = parent.document;
+        return frame.getClientRects().length > 0 && page.hasFocus()
+            && (page.activeElement === frame || page.activeElement === page.body)
+            && (document.activeElement === document.body || document.activeElement === UI.rfb?._canvas);
+    },
+
     connectFinished(e) {
+        const focus = UI.shouldAutoFocus();
         UI.connected = true;
         UI.inhibitReconnect = false;
 
@@ -1155,7 +1168,7 @@ const UI = {
         UI.updateVisualState('connected');
 
         // Do this last because it can only be used on rendered elements
-        UI.rfb.focus();
+        if (focus) UI.rfb.focus();
     },
 
     disconnectFinished(e) {

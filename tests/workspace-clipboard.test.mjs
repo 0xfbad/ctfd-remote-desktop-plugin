@@ -19,8 +19,8 @@ globalThis.document = {documentElement: {}, body: element(), createElement: elem
 globalThis.MutationObserver = class { observe() {} disconnect() {} };
 
 const {desktopClipboard, pasteText, sendShortcut, terminalClipboard} = await import(process.env.WORKSPACE_CLIPBOARD_SOURCE || '../src/static/js/workspace-clipboard.js');
-const {default: RFB} = await import('../src/static/novnc/869e3dcb0d8de7f5/core/rfb.js');
-const {default: Keyboard} = await import('../src/static/novnc/869e3dcb0d8de7f5/core/input/keyboard.js');
+const {default: RFB} = await import('../src/static/novnc/6598b25259c7969e/core/rfb.js');
+const {default: Keyboard} = await import('../src/static/novnc/6598b25259c7969e/core/input/keyboard.js');
 
 function client(held = []) {
     const rfb = Object.create(RFB.prototype);

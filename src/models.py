@@ -53,7 +53,7 @@ CREATE_OPERATION_STATES = frozenset(
     }
 )
 
-NOVNC_VERSION = "869e3dcb0d8de7f5"
+NOVNC_VERSION = "6598b25259c7969e"
 VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true&host="
 
 

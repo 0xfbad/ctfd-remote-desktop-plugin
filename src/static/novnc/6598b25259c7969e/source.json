@@ -3,7 +3,7 @@
   "debian_package": "novnc 1:1.6.0-2",
   "image": "sha256:3f3fa19e5701acb5783420897a57c8e5c85107df489491d011b7c04f0383abc8",
   "modifications": {
-    "app/ui.js": "retain pre-1672 reconnect behavior by making the reconnect branch an else if"
+    "app/ui.js": "retain pre-1672 reconnect behavior by making the reconnect branch an else if, guard connect completion and automatic controlbar close by visible workspace keyboard ownership"
   },
   "content_hash": "sha256 of sorted relative path, newline, file sha256, newline, truncated to 16 hex characters",
   "debian_archive": "https://deb.debian.org/debian/pool/main/n/novnc/novnc_1.6.0-2_all.deb",
