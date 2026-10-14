@@ -554,7 +554,6 @@ class Orchestrator:
                 self._initial_probe.set()  # later reloads must not restart the initial wait
 
     def _count_committed_sessions(self) -> tuple[dict[str, int], Counter[str], dict[str, set[str]], bool]:
-        from CTFd.models import db
         from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
 
         counters = {c.context_name: int(c.active_sessions or 0) for c in DesktopDockerContextModel.query.all()}
@@ -597,7 +596,6 @@ class Orchestrator:
             if not already_counted:
                 db_counts[context_name] += 1
 
-        db.session.rollback()
         return counters, db_counts, known_names, ambiguous_reservation
 
     def _observe_host_counts(
@@ -617,32 +615,60 @@ class Orchestrator:
             for entry in listing:
                 listed_name = entry.get("name")
                 labels = entry.get("labels")
-                if listed_name and isinstance(labels, dict) and labels.get(SESSION_LABEL_MANAGED) == "true":
-                    live_names.add(str(listed_name))
+                if not listed_name or not isinstance(labels, dict) or labels.get(SESSION_LABEL_MANAGED) != "true":
+                    continue
+                if entry.get("status") in ("exited", "dead", "removing"):
+                    continue
+                live_names.add(str(listed_name))
             untracked_live = live_names - known_names.get(name, set())
             observed[name] = db_counts.get(name, 0) + len(untracked_live)
         return observed
 
-    def _apply_count_heals(self, counters: dict[str, int], updates: dict[str, int]) -> set[str]:
+    def _apply_count_heals(
+        self,
+        counters: dict[str, int],
+        updates: dict[str, int],
+        db_counts: Counter[str],
+        known_names: dict[str, set[str]],
+        ambiguous_reservation: bool,
+    ) -> set[str]:
         from CTFd.models import db
         from .models import DesktopDockerContextModel
 
         applied_names: set[str] = set()
-        for name, target in updates.items():
-            changed = DesktopDockerContextModel.query.filter(  # preserve reservations made after the scan
-                DesktopDockerContextModel.context_name == name,
-                DesktopDockerContextModel.active_sessions == counters[name],
-            ).update({DesktopDockerContextModel.active_sessions: target}, synchronize_session=False)
-            if changed == 1:
+        try:
+            for name, target in updates.items():
+                db.session.rollback()
+                current = (
+                    DesktopDockerContextModel.query.filter(DesktopDockerContextModel.context_name == name)
+                    .populate_existing()
+                    .with_for_update()
+                    .first()
+                )
+                if current is None or int(current.active_sessions or 0) != counters[name]:
+                    db.session.rollback()
+                    continue
+                _, current_counts, current_names, current_ambiguity = self._count_committed_sessions()
+                if (
+                    current_counts.get(name, 0) != db_counts.get(name, 0)
+                    or current_names.get(name, set()) != known_names.get(name, set())
+                    or current_ambiguity != ambiguous_reservation
+                ):
+                    db.session.rollback()
+                    continue
+                current.active_sessions = target
+                db.session.commit()
                 applied_names.add(name)
-        if applied_names:
-            db.session.commit()
-        elif updates:
+        except Exception:
             db.session.rollback()
+            raise
         return applied_names
 
     def audit_counts(self) -> None:  # only the elected leader may reconcile counters
+        from CTFd.models import db
+
         counters, db_counts, known_names, ambiguous_reservation = self._count_committed_sessions()
+        db.session.rollback()
         observed = self._observe_host_counts(counters, db_counts, known_names)
 
         updates, events = plan_count_audit(
@@ -651,7 +677,7 @@ class Orchestrator:
             suppress_down_heal=ambiguous_reservation,  # a reservation without a context may belong to any host
         )
 
-        applied_names = self._apply_count_heals(counters, updates)
+        applied_names = self._apply_count_heals(counters, updates, db_counts, known_names, ambiguous_reservation)
 
         for name, counter, dbn, kind in events:
             if name not in applied_names:
