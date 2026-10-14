@@ -34,7 +34,7 @@
         transform: translateY(-100%);
         transition: transform 0.2s ease;
     }
-    .navbar::before { /* hit area bridges the gap below the hidden navbar */
+    .navbar::before {
         content: '';
         position: absolute;
         top: 100%;
@@ -649,6 +649,22 @@ function scheduleStartCooldown() {
     }, remaining);
 }
 
+function scheduleCreationWatchdog() {
+    clearTimeout(pollDeadline);
+    const generation = creationPoll.generation;
+    pollDeadline = setTimeout(() => {
+        if (generation !== creationPoll.generation) return;
+        cancelPoll(creationPoll);
+        resetStartButton();
+        showSessionError('Readiness could not be confirmed. Refresh to check whether your desktop is ready.');
+    }, 120000);
+}
+
+function creationMessage(data) {
+    if (typeof data.message === 'string' && data.message) return data.message;
+    return ['cancel_requested', 'cleanup_pending'].includes(data.status) ? 'Cleaning up...' : 'Creating container...';
+}
+
 function checkStatus() {
     pollRequest(creationPoll, '/remote-desktop/api/creation-status', (data, generation) => {
         const button = document.getElementById('start-btn');
@@ -677,9 +693,10 @@ function checkStatus() {
         if (!['none', 'queued', 'selecting', 'reserved', 'creating', 'waiting_ready', 'cancel_requested', 'cleanup_pending', 'selecting_host', 'starting_container', 'waiting_vnc'].includes(data.status)) {
             throw new Error('invalid creation status');
         }
+        if (data.status !== 'none') scheduleCreationWatchdog();
         if (button) {
             button.innerHTML = '<span class="loading-spinner"></span> ';
-            button.append(document.createTextNode(typeof data.message === 'string' ? data.message : 'Creating container...'));
+            button.append(document.createTextNode(creationMessage(data)));
         }
     });
 }
@@ -687,13 +704,7 @@ function checkStatus() {
 function pollCreationStatus() {
     cancelPoll(creationPoll);
     creationPoll.active = true;
-    const generation = creationPoll.generation;
-    pollDeadline = setTimeout(() => {
-        if (generation !== creationPoll.generation) return;
-        cancelPoll(creationPoll);
-        resetStartButton();
-        showSessionError('Readiness could not be confirmed. Refresh to check whether your desktop is ready.');
-    }, 120000);
+    scheduleCreationWatchdog();
     pollInterval = setInterval(checkStatus, 2000);
     checkStatus();
 }
@@ -781,7 +792,7 @@ function startSession() {
         if (ok && data.status === 'creating') {
             hideSessionError();
             pollCreationStatus();
-        } else if (data.error === 'Session creation already in progress') { // src/messages.py owns these error literals
+        } else if (['Session creation already in progress', 'Creation already in progress', 'Session creation or cleanup already in progress'].includes(data.error)) {
             hideSessionError();
             pollCreationStatus();
         } else if (data.error === 'Session already exists') {
@@ -1275,12 +1286,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const startBtn = document.getElementById('start-btn');
     if (startBtn) {
         startBtn.disabled = true;
-        const message = creationStatus.message || 'Creating container...';
+        const message = creationMessage(creationStatus);
         startBtn.innerHTML = '<span class="loading-spinner"></span>';
         startBtn.append(document.createTextNode(message));
     }
 
-    showStatusMessage(creationStatus.message || 'Creating container...', 0);
+    showStatusMessage(creationMessage(creationStatus), 0);
     pollCreationStatus();
     {% elif container_info %}
     setTimeout(syncWithServer, 500);
