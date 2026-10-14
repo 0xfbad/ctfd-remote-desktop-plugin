@@ -185,8 +185,6 @@ _RESERVED_NAMES = {
 CreationStatusDict = dict[str, str]
 ContainerInfoDict = dict[str, str | int | float | None]
 TimerDict = dict[str, bool | int]
-_RESOLVED_USERNAME_ATTEMPTS = 3
-_RESOLVED_USERNAME_RETRY_DELAY_SECONDS = 0.2
 _READY_HEARTBEAT_INTERVAL_SECONDS = 30
 _VNC_RETRY_INTERVAL_SECONDS = 0.5
 TimerStatusDict = dict[str, bool | int | str]
@@ -505,35 +503,21 @@ class ContainerManager:
             return _sanitize_username(user.email.split("@")[0], user.id)
         return _sanitize_username(user.name, user.id)
 
-    def _read_resolved_username(self, context_name: str, container_name: str) -> str:
+    def _read_resolved_username(self, context_name: str, container_name: str, probe_budget: float) -> str | None:
         command = [  # account collisions in the image can change the requested username
+            "timeout",
+            "--signal=KILL",
+            str(probe_budget),
             "/bin/bash",
             "-c",
             "/usr/local/bin/remote-desktop-healthcheck && cat -- /var/lib/remote-desktop/resolved-username",
         ]
-        last_exception: Exception | None = None
-        for attempt in range(_RESOLVED_USERNAME_ATTEMPTS):
-            try:
-                code, output = self.host_manager.exec_in_container(
-                    context_name,
-                    container_name,
-                    command,
-                )
-            except Exception as exc:
-                last_exception = exc
-                code, output = -1, ""
-
-            if code != -1:
-                break
-            if attempt < _RESOLVED_USERNAME_ATTEMPTS - 1:
-                time.sleep(_RESOLVED_USERNAME_RETRY_DELAY_SECONDS)
-        else:
-            if last_exception is not None:
-                raise RuntimeError("desktop image did not publish its resolved Linux username") from last_exception
-            raise RuntimeError("desktop image did not publish its resolved Linux username")
-
+        try:
+            code, output = self.host_manager.exec_in_container(context_name, container_name, command)
+        except Exception:
+            return None
         if code != 0:
-            raise RuntimeError("desktop image did not publish its resolved Linux username or pass its health check")
+            return None
         if isinstance(output, bytes):
             try:
                 output = output.decode("utf-8", errors="strict")
@@ -553,6 +537,7 @@ class ContainerManager:
         novnc_port: int,
         max_attempts: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
+        readiness_check: Callable[[float], bool] | None = None,
     ) -> bool:
         if max_attempts is None:
             max_attempts = int(self._get_setting("vnc_ready_attempts"))  # type: ignore[arg-type]
@@ -572,6 +557,7 @@ class ContainerManager:
             if progress_callback:  # each attempt must allow a lease renewal even when probes stall
                 progress_callback(attempt, max_attempts)
 
+            http_ready = False
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -579,13 +565,21 @@ class ContainerManager:
                 req = urllib.request.Request(f"http://{hostname}:{novnc_port}/", method="GET")
                 req.add_header("User-Agent", "CTFd-VNC-Check")
                 with opener.open(req, timeout=min(float(http_timeout), remaining)) as response:
-                    if response.status == 200:
-                        logger.info(f"VNC ready on {hostname}:{novnc_port} after {attempt + 1} attempts")
-                        return True
+                    http_ready = response.status == 200
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionRefusedError):
                 pass
             except Exception as e:
                 logger.debug(f"VNC check attempt {attempt + 1} error: {str(e)}")
+
+            remaining = deadline - time.monotonic()
+            if (
+                http_ready
+                and remaining > 0
+                and (readiness_check is None or readiness_check(min(float(http_timeout), remaining)))
+                and time.monotonic() < deadline
+            ):
+                logger.info(f"VNC ready on {hostname}:{novnc_port} after {attempt + 1} attempts")
+                return True
 
             if attempt < max_attempts - 1:
                 remaining = deadline - time.monotonic()
@@ -673,7 +667,7 @@ class ContainerManager:
                 f"SSH:{ssh_port} VNC:{vnc_port} noVNC:{novnc_port} ttyd:{ttyd_port}"
             )
 
-            self._wait_for_session_ready(
+            container_username = self._wait_for_session_ready(
                 user_id,
                 session_uuid,
                 worker_uuid,
@@ -681,9 +675,10 @@ class ContainerManager:
                 display_hostname,
                 check_hostname,
                 novnc_port,
+                context_name,
+                container_name,
             )
 
-            container_username = self._read_resolved_username(context_name, container_name)
             vnc_url = proxy_vnc_url(user_id, vnc_password)
 
             if fenced and self._creation_cancelled(user_id, session_uuid, worker_uuid):
@@ -917,7 +912,9 @@ class ContainerManager:
         display_hostname: str,
         check_hostname: str | None,
         novnc_port: int,
-    ) -> None:
+        context_name: str,
+        container_name: str,
+    ) -> str:
         with self.lock:
             self.creation_status[user_id] = {
                 "status": "waiting_vnc",
@@ -926,6 +923,12 @@ class ContainerManager:
         if fenced and not self._update_operation(user_id, session_uuid, worker_uuid, OP_WAITING_READY):
             raise RuntimeError("creation cancelled while waiting for readiness")
         ready_heartbeat_at = time.monotonic()
+        resolved_username: str | None = None
+
+        def _desktop_ready(probe_budget: float) -> bool:
+            nonlocal resolved_username
+            resolved_username = self._read_resolved_username(context_name, container_name, probe_budget)
+            return resolved_username is not None
 
         def _vnc_progress(attempt: int, max_attempts: int) -> None:
             nonlocal ready_heartbeat_at
@@ -945,10 +948,12 @@ class ContainerManager:
             check_hostname,  # type: ignore[arg-type]
             novnc_port,
             progress_callback=_vnc_progress,
+            readiness_check=_desktop_ready,
         )
-        if not vnc_ready:
+        if not vnc_ready or resolved_username is None:
             logger.warning("VNC server on %s:%s did not become ready in time", check_hostname, novnc_port)
             raise Exception(NOT_READY_IN_TIME)
+        return resolved_username
 
     def _commit_created_session(
         self,
