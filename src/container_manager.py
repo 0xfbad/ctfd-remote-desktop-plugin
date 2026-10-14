@@ -735,6 +735,8 @@ class ContainerManager:
                     metadata={
                         "context": context_name,
                         "container_name": container_name,
+                        "container_id": container_id,
+                        "session_uuid": session_uuid,
                         "ssh_port": ssh_port,
                         "ttyd_port": ttyd_port,
                         "vnc_port": vnc_port,
@@ -1086,7 +1088,14 @@ class ContainerManager:
             user_id=user_id,
             username=username,
             level="error",
-            metadata={"error": str(e), "traceback": traceback.format_exc()},
+            metadata={
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "context": context_name,
+                "container_name": container_name,
+                "session_uuid": session_uuid,
+                "cleanup_confirmed": cleanup_confirmed,
+            },
         )
 
     def create_container(
@@ -1138,6 +1147,7 @@ class ContainerManager:
                 level="info",
                 metadata={
                     "client_ip": client_ip,
+                    "session_uuid": session_uuid,
                     "hosts": {  # type: ignore[dict-item]
                         str(h["context_name"]): {
                             "containers": h["active_containers"],
