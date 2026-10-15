@@ -4,6 +4,7 @@ import os
 import io
 import json
 import math
+import re
 import tarfile
 import time
 import threading
@@ -21,7 +22,7 @@ import paramiko
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
 from .messages import HOST_UNREACHABLE, SERVER_BUSY
-from .quota_security import run_quota_container, workspace_quota_seccomp
+from .quota_security import WORKSPACE_RUNTIME, run_quota_container, workspace_quota_options
 from .utils import normalize_public_hostname, parse_size
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,9 @@ logger = logging.getLogger(__name__)
 SESSION_LABEL_MANAGED = "org.ctfd.remote-desktop.managed"
 SESSION_LABEL_USER_ID = "org.ctfd.remote-desktop.user-id"
 SESSION_LABEL_UUID = "org.ctfd.remote-desktop.session-uuid"
+SESSION_LABEL_ISOLATION = "org.ctfd.remote-desktop.isolation"
 IMAGE_CONTRACT_LABEL = "edu.ucsc.ctfd-remote-desktop.contract"
-IMAGE_CONTRACT_VERSION = "3"
+IMAGE_CONTRACT_VERSION = "4"
 
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
@@ -67,7 +69,7 @@ def _install_bounded_ssh_adapter() -> None:
         try:
             from docker.api import client as api_client
         except (ImportError, AttributeError):
-            return  # test stubs omit the adapter module
+            return
         original_adapter = api_client.SSHHTTPAdapter
         if getattr(original_adapter, "_ctfd_bounded_connect", False):
             _SSH_ADAPTER_PATCHED = True
@@ -75,7 +77,7 @@ def _install_bounded_ssh_adapter() -> None:
 
         class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
             _ctfd_bounded_connect = True
-            # both plugins use this attribute so either adapter install order shares the timeout
+            # either plugin may install the shared ssh adapter first
             _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT
 
             def _create_paramiko_client(self, base_url):
@@ -90,7 +92,6 @@ def _install_bounded_ssh_adapter() -> None:
 
 
 def _ssh_timeout_local() -> threading.local:
-    # another plugin may own the installed adapter and its timeout local
     try:
         from docker.api import client as api_client
 
@@ -182,7 +183,6 @@ def _metadata_name_and_endpoint(meta: object) -> tuple[str | None, str | None]:
 
 
 def _validate_endpoint(candidate: str, context_name: str) -> str | None:
-    # operator metadata must not enable unauthenticated tcp daemons
     if not candidate or candidate != candidate.strip() or any(c.isspace() for c in candidate):
         return None
     if candidate.startswith("unix://"):
@@ -191,7 +191,7 @@ def _validate_endpoint(candidate: str, context_name: str) -> str | None:
         return None
     try:
         parsed = urlsplit(candidate)
-        parsed_port = parsed.port  # reading the port is what rejects a malformed or out of range value
+        parsed_port = parsed.port
         parsed_hostname = parsed.hostname
         parsed_username = parsed.username
         parsed_password = parsed.password
@@ -341,7 +341,7 @@ class DockerHostManager:
     def __init__(self) -> None:
         self._context_configs: dict[str, str] = {}
         self._pub_hostnames: dict[str, str] = {}
-        # reachability is separate from the endpoint catalog so a startup probe failure does not drop the host
+        # failed startup probes must retain endpoints for background recovery
         self._connected_contexts: set[str] = set()
 
         self._clients: dict[ClientKey, docker.DockerClient] = {}
@@ -457,7 +457,6 @@ class DockerHostManager:
     def _sweep_owned_stale_entries_locked(
         self, current_thread: threading.Thread, to_close: list[docker.DockerClient]
     ) -> None:
-        # retired contexts otherwise keep their ssh transports open
         owned_stale_keys = [
             cached_key
             for cached_key in self._clients
@@ -628,7 +627,6 @@ class DockerHostManager:
 
         effective_profile = get_all_settings()
         rd_network = str(effective_profile["rd_network_name"] or "bridge")
-        storage_limit = str(effective_profile["storage_limit"] or "").strip()
 
         for ctx in contexts:
             endpoint = _resolve_endpoint(ctx.context_name, ctx.hostname)
@@ -641,12 +639,10 @@ class DockerHostManager:
                 logger.error(f"invalid public hostname for context '{ctx.context_name}': {exc}")
                 continue
 
-            # keep the resolved endpoint even if the probe below fails, the health check needs a url to recover it
             new_configs[ctx.context_name] = endpoint
             new_pub_hostnames[ctx.context_name] = public_hostname
 
             if not probe:
-                # the first health tick repopulates reachability, boot must not pay a connect per context
                 logger.info(f"catalog: context '{ctx.context_name}' -> {endpoint}")
                 continue
 
@@ -669,16 +665,6 @@ class DockerHostManager:
                                 )
                         except Exception as e:
                             logger.warning(f"context {ctx_name} network check failed for '{rd_network}': {e}")
-                    if storage_limit:
-                        try:
-                            backing = dict(client.info().get("DriverStatus") or []).get("Backing Filesystem", "")
-                            if backing and backing != "xfs":
-                                logger.warning(
-                                    f"context {ctx_name} storage_limit={storage_limit} but backing "
-                                    f"filesystem is {backing} (needs xfs+pquota) - creates WILL fail"
-                                )
-                        except Exception as e:
-                            logger.debug(f"context {ctx_name} backing-fs check failed: {e}")
                     return None
                 except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, OSError) as e:
                     return e
@@ -772,7 +758,6 @@ class DockerHostManager:
             return False
         if reachable:
             return True
-        # a failed ping must not delay teardown of live sessions
         self._clear_client(context_name)
         return False
 
@@ -797,19 +782,15 @@ class DockerHostManager:
         pids_limit = effective_profile["pids_limit"]
         cap_drop = [c.strip() for c in str(effective_profile["cap_drop"]).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(effective_profile["cap_add"]).split(",") if c.strip()]
+        if cap_drop != ["ALL"]:
+            raise ValueError("workspace isolation requires cap_drop=ALL")
 
         extra_kwargs: dict = {}
 
-        storage_limit = str(effective_profile["storage_limit"] or "").strip()
-        if storage_limit:
-            parse_size(storage_limit)
-            extra_kwargs["storage_opt"] = {"size": storage_limit}
-            extra_kwargs["security_opt"] = [workspace_quota_seccomp()]
-            extra_kwargs["tmpfs"] = {"/run": "rw,exec,nosuid,nodev,size=64m,mode=0755"}
+        storage_bytes = parse_size(str(effective_profile["storage_limit"]))
 
         log_max_size = str(effective_profile["log_max_size"] or "").strip()
         if log_max_size:
-            # the daemon rejects integer log options
             extra_kwargs["log_config"] = {
                 "type": "json-file",
                 "config": {"max-size": log_max_size, "max-file": str(int(effective_profile["log_max_file"] or 3))},
@@ -823,7 +804,6 @@ class DockerHostManager:
             extra_kwargs["mem_reservation"] = mem_reservation
 
         if memory is not None:
-            # the default cushion equals the memory limit so a spike spills to swap instead of oom killing an app
             swap_raw = str(effective_profile["swap_limit"] or "").strip()
             if swap_raw == "-1":
                 extra_kwargs["memswap_limit"] = -1
@@ -889,7 +869,21 @@ class DockerHostManager:
 
             last_err: Exception | None = None
             container = None
-            run_container = partial(run_quota_container, client) if storage_limit else client.containers.run
+            info = client.info()
+            apparmor = any(str(option).startswith("name=apparmor") for option in info.get("SecurityOptions", []))
+            generation = (labels or {}).get(SESSION_LABEL_UUID, "")
+            user_id = int((labels or {}).get(SESSION_LABEL_USER_ID, "0"))
+            if not 1 <= user_id <= 2147483646:
+                raise ValueError("workspace isolation requires a valid account ID")
+            quota_options = workspace_quota_options(generation, cap_add, apparmor=apparmor)
+            container_labels = dict(labels or {})
+            container_labels[SESSION_LABEL_ISOLATION] = IMAGE_CONTRACT_VERSION
+            environment = dict(env)
+            environment["CTFD_USER_ID"] = str(user_id)
+            environment["WORKSPACE_DISK_BYTES"] = str(storage_bytes)
+            if apparmor:
+                environment["WORKSPACE_GUEST_APPARMOR"] = "docker-default"
+            run_container = partial(run_quota_container, client)
             for _ in range(50):
                 port_bindings = {p: _sysrand.randint(40000, 59999) for p in ports}
                 try:
@@ -900,18 +894,18 @@ class DockerHostManager:
                         detach=True,
                         auto_remove=True,
                         init=True,
-                        environment=env,
+                        environment=environment,
                         ports=port_bindings,
                         shm_size=shm_size,
                         mem_limit=memory,
                         nano_cpus=nano_cpus,
                         cap_drop=cap_drop,
-                        cap_add=cap_add,
                         pids_limit=pids_limit,
                         extra_hosts=extra_hosts or {},
                         network=network,
-                        labels=labels or {},
+                        labels=container_labels,
                         **extra_kwargs,
+                        **quota_options,
                     )
                     break
                 except docker.errors.APIError as e:
@@ -983,8 +977,8 @@ class DockerHostManager:
             container = None
             try:
                 container = client.containers.get(container_name)
-                # auto_remove never fires for created containers that have not started
-                container.remove(force=True)
+                # auto_remove does not clean containers that never started
+                container.remove(force=True, v=True)
             except docker.errors.NotFound:
                 logger.debug(f"container {container_name} already removed")
             except docker.errors.APIError as exc:
@@ -1034,7 +1028,7 @@ class DockerHostManager:
                     raise ValueError("paused orphan ownership labels changed; refresh and retry")
                 if normalize_container_state(container.status) != "paused":
                     raise ValueError("container is no longer paused; refusing removal")
-                container.remove(force=True)
+                container.remove(force=True, v=True)
                 return {str(key): str(value) for key, value in labels.items()}
             except docker.errors.NotFound as exc:
                 raise ValueError("paused orphan no longer exists; refresh and retry") from exc
@@ -1138,31 +1132,25 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
-    def check_storage_limit_compatibility(self, context_name: str, storage_limit: str) -> bool:
-        # reject unsupported quota settings before they can strand a creation reservation
-        if not storage_limit.strip():
-            return True
-
+    def check_workspace_isolation(self, context_name: str) -> bool:
         def _do() -> bool:
             try:
                 client = self._get_client(context_name)
                 info = client.info() or {}
-                driver = str(info.get("Driver") or "").strip().lower()
-                status = {
-                    str(key).strip().lower(): str(value).strip().lower()
-                    for key, value in (info.get("DriverStatus") or [])
-                }
-                backing = status.get("backing filesystem", "")
-                supports_dtype = status.get("supports d_type", "")
-                compatible = driver == "overlay2" and backing == "xfs" and supports_dtype in ("true", "1", "yes")
+                version = re.match(r"(\d+)\.(\d+)", str(info.get("KernelVersion", "")))
+                kernel = tuple(map(int, version.groups())) if version else (0, 0)
+                security = [str(option) for option in info.get("SecurityOptions", [])]
+                compatible = (
+                    kernel >= (5, 14)
+                    and any(option.startswith("name=seccomp") for option in security)
+                    and not any(option.startswith(("name=rootless", "name=userns")) for option in security)
+                )
                 if not compatible:
                     logger.warning(
-                        "context %s is ineligible for storage_limit=%s (driver=%r backing=%r supports_d_type=%r)",
+                        "context %s cannot enforce workspace storage isolation (kernel=%r security=%r)",
                         context_name,
-                        storage_limit,
-                        driver or "unknown",
-                        backing or "unknown",
-                        supports_dtype or "unknown",
+                        info.get("KernelVersion"),
+                        security,
                     )
                 return compatible
             except (docker.errors.DockerException, paramiko.ssh_exception.SSHException, EOFError, OSError):
@@ -1223,7 +1211,14 @@ class DockerHostManager:
             try:
                 client = self._get_client(context_name)
                 container = client.containers.get(container_name_or_id)
-                exit_code, output = container.exec_run(cmd)
+                if container.labels.get(SESSION_LABEL_ISOLATION) == IMAGE_CONTRACT_VERSION:
+                    generation = container.labels.get(SESSION_LABEL_UUID, "")
+                    if not generation:
+                        return -1, "workspace session UUID is missing"
+                    command = [WORKSPACE_RUNTIME, "enter", generation, *cmd]
+                else:
+                    command = cmd
+                exit_code, output = container.exec_run(command)
                 if isinstance(output, bytes):
                     output = output.decode("utf-8", errors="replace")
                 return exit_code, output
@@ -1367,5 +1362,4 @@ class DockerHostManager:
         state = self.inspect_container_state(context_name, container_id)
         if state == "unknown":
             raise HostsUnavailableException(f"container state unavailable on {context_name}")
-        # paused is alive, it is an evidence hold rather than a dead container to reap
         return state in ("running", "paused")

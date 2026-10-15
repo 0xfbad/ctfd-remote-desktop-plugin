@@ -52,7 +52,7 @@ def rank_candidates(healthy: list[str], snapshot: dict[str, tuple[int, int, int]
             continue
 
         active, cap, weight = snapshot[name]
-        if active >= cap:  # lowered caps may leave existing sessions above capacity
+        if active >= cap:
             continue
 
         out.append((-(weight / (active + 1)), name))
@@ -87,7 +87,7 @@ class Orchestrator:
         self._capacity_refusals: int = 0
         self._last_capacity_event_ts: float = 0.0
         self.lock = Lock()
-        self._load_lock = Lock()  # prevent an older reload from overwriting a newer snapshot
+        self._load_lock = Lock()  # an older reload must not replace a newer snapshot
         self.context_fences: dict[str, ContextFence] = {}
         self._initial_probe = Event()
         self._initial_probe.set()
@@ -112,7 +112,6 @@ class Orchestrator:
         ctx,
         is_connected: bool,
         docker_image: str,
-        storage_limit: str,
     ) -> tuple[bool, int, bool, tuple[str, str, str, dict[str, str | int | ImageInfo | None]]]:
         name = ctx.context_name
         image_info = self.host_manager.get_image_info(name, docker_image) if is_connected else None
@@ -121,9 +120,7 @@ class Orchestrator:
             and image_info.get("contract") == IMAGE_CONTRACT_VERSION
             and image_info.get("contract_status") == "compatible"
         )
-        storage_compatible = bool(
-            is_connected and self.host_manager.check_storage_limit_compatibility(name, storage_limit)
-        )
+        storage_compatible = bool(is_connected and self.host_manager.check_workspace_isolation(name))
 
         if ctx.max_containers is not None:
             auto_cap, stale = 0, False
@@ -175,8 +172,8 @@ class Orchestrator:
         from .models import DesktopDockerContextModel, get_setting
 
         settings_revision = int(
-            str(get_setting("_settings_revision"))
-        )  # revision must precede settings reads to fence concurrent updates
+            str(get_setting("_settings_revision"))  # settings reads must follow this revision read
+        )
         contexts = DesktopDockerContextModel.query.filter_by(enabled=True).all()
         new_context_fences: dict[str, ContextFence] = {
             str(ctx.context_name): (
@@ -202,12 +199,9 @@ class Orchestrator:
         if probe:
             connected = set(self.host_manager.get_connected_contexts())
             docker_image = str(get_setting("docker_image"))
-            storage_limit = str(get_setting("storage_limit") or "").strip()
             for ctx in contexts:
                 name = ctx.context_name
-                healthy, auto_cap, stale, event = self._probe_context(  # docker calls must stay outside the lock
-                    ctx, name in connected, docker_image, storage_limit
-                )
+                healthy, auto_cap, stale, event = self._probe_context(ctx, name in connected, docker_image)
                 new_health[name] = healthy
                 if ctx.max_containers is None:
                     new_auto_caps[name] = auto_cap
@@ -265,7 +259,7 @@ class Orchestrator:
         self._initial_probe.set()
 
     def _await_initial_probe(self, timeout: float = 5.0) -> None:
-        self._initial_probe.wait(timeout)  # wait for background health results without probing on requests
+        self._initial_probe.wait(timeout)
 
     def has_healthy_context(self) -> bool:
         with self.lock:
@@ -361,7 +355,7 @@ class Orchestrator:
                     db.session.rollback()
                     raise ReservationOwnershipError("creation lease is no longer owned by this worker")
 
-            db.session.commit()  # capacity and ownership must commit together
+            db.session.commit()
             return True
         except ReservationOwnershipError:
             raise
@@ -369,7 +363,7 @@ class Orchestrator:
             db.session.rollback()
             raise
 
-    def release_slot(self, context_name: str) -> None:
+    def release_slot(self, context_name: str) -> None:  # if unrelated changes are pending, commit them before calling
         from CTFd.models import db
         from .models import DesktopDockerContextModel
 
@@ -381,8 +375,8 @@ class Orchestrator:
                 {DesktopDockerContextModel.active_sessions: DesktopDockerContextModel.active_sessions - 1},
                 synchronize_session=False,
             )
-            db.session.commit()  # callers must not have unrelated uncommitted changes
-        except Exception:  # the leader audit repairs failed decrements
+            db.session.commit()
+        except Exception:  # the leader audit repairs missed decrements
             db.session.rollback()
             logger.error(f"release_slot failed for {context_name}", exc_info=True)
 
@@ -392,7 +386,7 @@ class Orchestrator:
         user_id: int,
         session_uuid: str,
         worker_lease_uuid: str,
-    ) -> bool:  # after release, lock the operation and commit its ownership clear in this transaction
+    ) -> bool:  # the caller must lock the operation and clear ownership in this transaction
         from .models import DesktopDockerContextModel, DesktopSessionOperationModel
 
         owner_exists = DesktopSessionOperationModel.query.filter(
@@ -403,7 +397,7 @@ class Orchestrator:
             DesktopSessionOperationModel.capacity_reserved.is_(True),
         ).exists()
 
-        changed = DesktopDockerContextModel.query.filter(  # match admission by locking the context first
+        changed = DesktopDockerContextModel.query.filter(  # admission locks the context before the operation
             DesktopDockerContextModel.context_name == context_name,
             DesktopDockerContextModel.active_sessions > 0,
             owner_exists,
@@ -442,7 +436,7 @@ class Orchestrator:
             DesktopSessionOperationModel.capacity_reserved.is_(True),
         ).exists()
 
-        changed = DesktopDockerContextModel.query.filter(  # match admission by locking the context first
+        changed = DesktopDockerContextModel.query.filter(  # admission locks the context before the operation
             DesktopDockerContextModel.context_name == context_name,
             DesktopDockerContextModel.active_sessions > 0,  # the audit repairs a zero count without another decrement
             owner_exists,
@@ -549,9 +543,9 @@ class Orchestrator:
                 return
             logger.warning("Docker context catalog changed without a local reload; refreshing before admission")
             already_probed = self._initial_probe.is_set()
-            self._load_from_db_serialized(probe=False)  # requests must not wait for docker probes
+            self._load_from_db_serialized(probe=False)
             if already_probed:
-                self._initial_probe.set()  # later reloads must not restart the initial wait
+                self._initial_probe.set()
 
     def _count_committed_sessions(self) -> tuple[dict[str, int], Counter[str], dict[str, set[str]], bool]:
         from .models import DesktopContainerInfoModel, DesktopDockerContextModel, DesktopSessionOperationModel
@@ -607,7 +601,7 @@ class Orchestrator:
         observed: dict[str, int] = {}
         for name, counter in counters.items():
             listing = self.host_manager.list_session_containers_strict(name, "rd-session-")
-            if listing is None:  # an unreachable host cannot justify reducing its count
+            if listing is None:
                 observed[name] = max(db_counts.get(name, 0), counter)
                 continue
 
@@ -741,7 +735,6 @@ class Orchestrator:
             cap_stale = set(self._cap_stale)
 
         docker_image = str(get_setting("docker_image"))
-        storage_limit = str(get_setting("storage_limit") or "").strip()
 
         for name in names:
             reachable = self.host_manager.ping(name)
@@ -750,12 +743,12 @@ class Orchestrator:
             reason = "unreachable"
             if reachable:
                 image_compatible = self.host_manager.check_image(name, docker_image)
-                storage_compatible = self.host_manager.check_storage_limit_compatibility(name, storage_limit)
+                storage_compatible = self.host_manager.check_workspace_isolation(name)
                 eligible = image_compatible and storage_compatible
                 if not image_compatible:
                     reason = "image missing or incompatible"
                 elif not storage_compatible:
-                    reason = "configured storage limit is unsupported"
+                    reason = "workspace isolation is unsupported"
 
             derived_cap: int | None = None
             fence = fences.get(name)
@@ -771,7 +764,7 @@ class Orchestrator:
             changed_to_healthy = False
             changed_to_unhealthy = False
             with self.lock:
-                if self.context_fences.get(name) != fence:  # ignore probes started before an admin reload
+                if self.context_fences.get(name) != fence:
                     continue
 
                 current_health = bool(self.health.get(name))
@@ -784,7 +777,7 @@ class Orchestrator:
                 else:
                     self.health[name] = False
                     changed_to_unhealthy = current_health
-                self._initial_probe.set()  # one result avoids waiting for unreachable peers
+                self._initial_probe.set()  # one result must release admission before unreachable peers finish
 
             if changed_to_healthy:
                 logger.info(f"health_check: context {name} recovered")

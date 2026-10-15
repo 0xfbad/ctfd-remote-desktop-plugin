@@ -80,7 +80,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "ssh_enabled": _spec(True),
     "web_terminal_enabled": _spec(True),
     "workspace_context_enabled": _spec(False),
-    "storage_limit": _spec("", max_length=32, allow_empty=True),
+    "storage_limit": _spec("20g", max_length=32),
     "log_max_size": _spec("50m", max_length=32, allow_empty=True),
     "log_max_file": _spec(3, minimum=1, maximum=100),
     "pause_watch_interval": _spec(60, minimum=5, maximum=86400, restart_required=True),
@@ -92,8 +92,11 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     "cgroup_parent": _spec("", max_length=128, allow_empty=True),
     "capacity_ram_fraction": _spec(0.7, minimum=0.01, maximum=1.0),
     "image_cache": _spec(
-        "", max_length=60000, allow_empty=True, public=False
-    ),  # the database text column limits diagnostic blobs
+        "",
+        max_length=60000,  # the database text column limits diagnostic blobs
+        allow_empty=True,
+        public=False,
+    ),
     "_settings_revision": _spec(1, minimum=1, maximum=2147483647, public=False),  # every settings write locks this row
 }
 
@@ -181,10 +184,10 @@ def validate_setting_value(key: str, value: object) -> SettingValue:
     if key in {"memory_limit", "shm_size"}:
         if _parse_size(parsed) <= 0:
             raise SettingsValidationError(f"{key} must be greater than zero")
-    elif key == "storage_limit" and parsed:
+    elif key == "storage_limit":
         size = _parse_size(parsed)
-        if size < 1024**3 or size > 1024**4:
-            raise SettingsValidationError("storage_limit must be empty or between 1g and 1t")
+        if size < 1024**3 or size > 20 * 1024**3:
+            raise SettingsValidationError("storage_limit must be between 1g and 20g")
     elif key == "log_max_size" and parsed:
         size = _parse_size(parsed)
         if size < 1024**2 or size > 1024**3:
@@ -252,6 +255,8 @@ def decode_stored_setting(key: str, raw: object) -> SettingValue:
         raise SettingsValidationError(f"unknown persisted setting {key!r}")
     if type(raw) is not str:
         raise SettingsValidationError(f"persisted setting {key} must contain text")
+    if key == "storage_limit" and raw == "":
+        return SETTING_SPECS[key].default
 
     if spec.value_type is bool:
         if raw == "true":

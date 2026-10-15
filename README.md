@@ -19,7 +19,7 @@ docker compose up -d --build
 - Fresh installs only: start with an empty database that has no `desktop_*`
   tables.
 - Image contract: the configured desktop image must carry the label
-  `edu.ucsc.ctfd-remote-desktop.contract=3`.
+  `edu.ucsc.ctfd-remote-desktop.contract=4`.
 - Settings: the plugin starts disabled; configure and enable it under
   **Admin > Config > Remote Desktop**. Setting specs live in `src/settings.py`.
 

@@ -86,8 +86,8 @@
                 </div>
             </div>
             <div class="form-group">
-                <label>Writable-Layer Limit <span class="cfg-help" data-tip="Optional Docker storage_opt size such as 20g. Leave empty unless every target Docker daemon supports writable-layer quotas.">?</span></label>
-                <input type="text" class="form-control" id="rd-setting-storage_limit" placeholder="empty">
+                <label>Workspace Storage <span class="cfg-help" data-tip="Writable disk space per workspace, excluding the base image. Between 1g and 20g.">?</span></label>
+                <input type="text" class="form-control" id="rd-setting-storage_limit" placeholder="20g" required>
             </div>
             <div class="form-group">
                 <label>Parent Cgroup <span class="cfg-help" data-tip="Optional Docker cgroup_parent value. Leave empty to use the daemon default; systemd cgroups require a .slice name.">?</span></label>
