@@ -7,6 +7,7 @@ import secrets
 import traceback
 import uuid
 from dataclasses import dataclass
+from contextlib import nullcontext
 from typing import Callable, TypeGuard, TypeVar
 
 from typing_extensions import TypeIs
@@ -14,7 +15,7 @@ from threading import Lock
 
 import docker
 import paramiko
-from flask import Flask
+from flask import Flask, current_app, has_app_context
 from sqlalchemy.exc import IntegrityError, OperationalError
 from CTFd.models import db, Users
 from .models import (
@@ -864,8 +865,6 @@ class ContainerManager:
                 "ENABLE_WORKSPACE_CONTEXT": "1" if workspace_context_enabled else "0",
             }
 
-            from flask import current_app
-
             if user is not None:
                 attempt.cookie_app = current_app._get_current_object()
                 minted = _mint_session_cookie(attempt.cookie_app, user)
@@ -877,6 +876,20 @@ class ContainerManager:
                     logger.warning(f"failed to mint session cookie for user {user_id}, autologin disabled")
 
             db.session.rollback()  # end the implicit transaction opened by the settings reads before remote io
+            before_start = None
+            if fenced:
+                app = current_app._get_current_object()
+
+                def before_start():
+                    context = (
+                        nullcontext()
+                        if has_app_context() and current_app._get_current_object() is app
+                        else app.app_context()
+                    )
+                    with context:
+                        if self._creation_cancelled(user_id, session_uuid, worker_uuid):
+                            raise RuntimeError("creation cancelled before Docker start")
+
             attempt.container_create_started = (
                 True  # past this line a transport failure leaves the create outcome unknown
             )
@@ -891,6 +904,7 @@ class ContainerManager:
                 nano_cpus=nano_cpus,
                 extra_hosts=extra_hosts,
                 network=network_name,
+                before_start=before_start,
                 labels={
                     SESSION_LABEL_MANAGED: "true",
                     SESSION_LABEL_USER_ID: str(user_id),

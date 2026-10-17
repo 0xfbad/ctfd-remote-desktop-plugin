@@ -9,7 +9,7 @@ import tarfile
 import time
 import threading
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from functools import partial
 from typing import Literal
@@ -18,6 +18,7 @@ import docker
 import gevent.monkey
 import gevent.pool
 import paramiko
+from CTFd.models import db
 
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
@@ -775,10 +776,13 @@ class DockerHostManager:
         extra_hosts: dict[str, str] | None = None,
         network: str | None = None,
         labels: dict[str, str] | None = None,
+        *,
+        before_start: Callable[[], None] | None = None,
     ) -> ContainerResult:
         from .models import get_all_settings
 
         effective_profile = get_all_settings()
+        db.session.rollback()
         pids_limit = effective_profile["pids_limit"]
         cap_drop = [c.strip() for c in str(effective_profile["cap_drop"]).split(",") if c.strip()]
         cap_add = [c.strip() for c in str(effective_profile["cap_add"]).split(",") if c.strip()]
@@ -904,6 +908,7 @@ class DockerHostManager:
                         extra_hosts=extra_hosts or {},
                         network=network,
                         labels=container_labels,
+                        before_start=before_start,
                         **extra_kwargs,
                         **quota_options,
                     )

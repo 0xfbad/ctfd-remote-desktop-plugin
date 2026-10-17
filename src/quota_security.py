@@ -84,6 +84,7 @@ def run_quota_container(
     detach,
     entrypoint,
     healthcheck,
+    before_start=None,
     **host_config_options,
 ):
     host_config = client.api.create_host_config(port_bindings=ports, network_mode=network, **host_config_options)
@@ -106,6 +107,8 @@ def run_quota_container(
     created = client.api.create_container_from_config(config, name=name)
     container = client.containers.get(created["Id"])
     try:
+        if before_start is not None:
+            before_start()
         container.start()
     except Exception:
         try:
