@@ -126,6 +126,7 @@ class DesktopContainerInfoModel(db.Model):
 
 class DesktopSessionOperationModel(db.Model):
     __tablename__ = "desktop_session_operations"
+    uid_slot = db.Column(db.Integer, nullable=True, unique=True)
     user_id = db.Column(db.Integer, primary_key=True)  # account deletion must preserve pending recovery
     operation_uuid = db.Column(db.String(36), nullable=False)
     worker_lease_uuid = db.Column(db.String(36), nullable=True)

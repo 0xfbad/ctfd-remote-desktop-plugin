@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
 import io
 import json
 import math
@@ -9,7 +11,8 @@ import tarfile
 import time
 import threading
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import partial
 from typing import Literal
@@ -19,11 +22,21 @@ import gevent.monkey
 import gevent.pool
 import paramiko
 from CTFd.models import db
+from flask import current_app
 
 from .models import DesktopDockerContextModel, DISPLAY_DATETIME_FORMAT
 from .exceptions import HostsUnavailableException
 from .messages import HOST_UNREACHABLE, SERVER_BUSY
-from .quota_security import WORKSPACE_RUNTIME, run_quota_container, workspace_quota_options
+from .quota_security import (
+    WORKSPACE_RUNTIME,
+    run_quota_container,
+    workspace_quota_options,
+    MAPPED_IDS_LABEL,
+    MAPPED_IDS_VERSION,
+    MAPPED_ID_MIN,
+    MAPPED_ID_LIMIT,
+    MAPPED_ID_WIDTH,
+)
 from .utils import normalize_public_hostname, parse_size
 
 logger = logging.getLogger(__name__)
@@ -34,6 +47,69 @@ SESSION_LABEL_UUID = "org.ctfd.remote-desktop.session-uuid"
 SESSION_LABEL_ISOLATION = "org.ctfd.remote-desktop.isolation"
 IMAGE_CONTRACT_LABEL = "edu.ucsc.ctfd-remote-desktop.contract"
 IMAGE_CONTRACT_VERSION = "4"
+
+POOL_MARKER_NAME = "ctfd-rd-mapped-ids-v1"
+POOL_LABEL_PREFIX = "org.ctfd.remote-desktop.pool."
+
+
+def _mapped_owner(secret: str | bytes) -> str:
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    if not isinstance(secret, bytes) or not secret:
+        raise ValueError("mapped desktop pool requires the existing CTFd secret")
+    return hmac.new(secret, b"ctfd-remote-desktop mapped pool owner v1", hashlib.sha256).hexdigest()
+
+
+def _pool_labels(owner: str) -> dict[str, str]:
+    return {
+        POOL_LABEL_PREFIX + "purpose": "mapped-ids",
+        POOL_LABEL_PREFIX + "owner": owner,
+        POOL_LABEL_PREFIX + "version": MAPPED_IDS_VERSION,
+        POOL_LABEL_PREFIX + "range": f"{MAPPED_ID_MIN}:{MAPPED_ID_LIMIT}:{MAPPED_ID_WIDTH}",
+    }
+
+
+def _validate_pool_volume(volume, owner: str) -> None:
+    volume.reload()
+    attrs = volume.attrs
+    if (
+        attrs.get("Name") != POOL_MARKER_NAME
+        or attrs.get("Driver") != "local"
+        or attrs.get("Scope") != "local"
+        or attrs.get("Options") not in (None, {})
+        or attrs.get("Labels") != _pool_labels(owner)
+    ):
+        raise RuntimeError("mapped desktop pool marker does not match this controller and pool")
+
+
+def _require_pool_marker(client, owner: str) -> None:
+    try:
+        marker = client.volumes.get(POOL_MARKER_NAME)
+    except docker.errors.NotFound as exc:
+        raise RuntimeError("mapped desktop pool marker has not been provisioned") from exc
+    _validate_pool_volume(marker, owner)
+
+
+@contextmanager
+def all_configured_hosts() -> Iterator[DockerHostManager]:
+    manager = DockerHostManager()
+    names: set[str] = set()
+    try:
+        db.session.rollback()
+        contexts = DesktopDockerContextModel.query.populate_existing().all()
+        names = {str(context.context_name) for context in contexts}
+        manager.load_contexts(contexts, probe=False)
+        if names != set(manager.get_endpoints()):
+            raise RuntimeError("could not load every configured desktop Docker context")
+        db.session.rollback()
+        yield manager
+    finally:
+        try:
+            db.session.rollback()
+        finally:
+            for name in names:
+                manager._clear_client(name)
+
 
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
@@ -788,9 +864,12 @@ class DockerHostManager:
         labels: dict[str, str] | None = None,
         *,
         before_start: Callable[[], None] | None = None,
+        mapped_ids: Callable[[], tuple[int, int]] | None = None,
+        legacy_admission: Callable[[], None] | None = None,
     ) -> ContainerResult:
         from .models import get_all_settings
 
+        pool_secret = current_app.config.get("SECRET_KEY")
         effective_profile = get_all_settings()
         db.session.rollback()
         pids_limit = effective_profile["pids_limit"]
@@ -872,6 +951,30 @@ class DockerHostManager:
                     f"desktop image {image!r} on context {context_name!r} did not resolve to an immutable image ID"
                 )
 
+            image_labels = getattr(resolved_image, "labels", None) or {}
+            mapped_version = image_labels.get(MAPPED_IDS_LABEL)
+            if mapped_version not in (None, MAPPED_IDS_VERSION):
+                raise ValueError("desktop image has an unsupported mapped identity capability")
+            bases = None
+            pool_owner = ""
+            if mapped_version is not None:
+                pool_owner = _mapped_owner(pool_secret)
+                if mapped_ids is None:
+                    raise ValueError("mapped desktop image requires a fenced main controller callback")
+                _require_pool_marker(client, pool_owner)
+                bases = mapped_ids()
+                if any(
+                    type(base) is not int
+                    or base % MAPPED_ID_WIDTH
+                    or not MAPPED_ID_MIN <= base <= MAPPED_ID_LIMIT - MAPPED_ID_WIDTH
+                    for base in bases
+                ):
+                    raise ValueError("main controller returned invalid mapped identity bases")
+            else:
+                if legacy_admission is None:
+                    raise ValueError("legacy desktop image requires a main controller admission check")
+                legacy_admission()
+
             container_hostname = hostname or name
             if not hostname:
                 try:
@@ -889,10 +992,19 @@ class DockerHostManager:
             user_id = int((labels or {}).get(SESSION_LABEL_USER_ID, "0"))
             if not 1 <= user_id <= 2147483646:
                 raise ValueError("workspace isolation requires a valid account ID")
-            quota_options = workspace_quota_options(generation, cap_add, apparmor=apparmor)
+            quota_options = workspace_quota_options(generation, cap_add, apparmor=apparmor, mapped=bases is not None)
             container_labels = dict(labels or {})
             container_labels[SESSION_LABEL_ISOLATION] = IMAGE_CONTRACT_VERSION
             environment = dict(env)
+            if bases is not None:
+                uid_base, gid_base = bases
+                environment["WORKSPACE_UID_BASE"] = str(uid_base)
+                environment["WORKSPACE_GID_BASE"] = str(gid_base)
+                container_labels[MAPPED_IDS_LABEL] = MAPPED_IDS_VERSION
+                container_labels[POOL_LABEL_PREFIX + "owner"] = pool_owner
+                container_labels[POOL_LABEL_PREFIX + "range"] = _pool_labels(pool_owner)[POOL_LABEL_PREFIX + "range"]
+                container_labels[POOL_LABEL_PREFIX + "uid-base"] = str(uid_base)
+                container_labels[POOL_LABEL_PREFIX + "gid-base"] = str(gid_base)
             environment["CTFD_USER_ID"] = str(user_id)
             environment["WORKSPACE_DISK_BYTES"] = str(storage_bytes)
             if apparmor:
@@ -969,6 +1081,29 @@ class DockerHostManager:
             }
 
         return self._call(context_name, _do)
+
+    def has_mapped_pool(self, context_name: str, owner: str) -> bool:
+        def inspect_marker():
+            client = self._get_client(context_name)
+            try:
+                marker = client.volumes.get(POOL_MARKER_NAME)
+            except docker.errors.NotFound:
+                return False
+            _validate_pool_volume(marker, owner)
+            return True
+
+        return self._call(context_name, inspect_marker)
+
+    def provision_mapped_pool(self, context_name: str) -> None:
+        owner = _mapped_owner(current_app.config["SECRET_KEY"])
+        db.session.rollback()
+
+        def provision():
+            client = self._get_client(context_name)
+            marker = client.volumes.create(name=POOL_MARKER_NAME, driver="local", labels=_pool_labels(owner))
+            _validate_pool_volume(marker, owner)
+
+        self._call(context_name, provision)
 
     def stop_container(self, context_name: str, container_name: str, timeout: int = 10) -> None:
         def _do():
@@ -1226,7 +1361,13 @@ class DockerHostManager:
             try:
                 client = self._get_client(context_name)
                 container = client.containers.get(container_name_or_id)
-                if container.labels.get(SESSION_LABEL_ISOLATION) == IMAGE_CONTRACT_VERSION:
+                isolation = container.labels.get(SESSION_LABEL_ISOLATION)
+                managed = container.labels.get(SESSION_LABEL_MANAGED) == "true"
+                if (managed or isolation is not None) and isolation != IMAGE_CONTRACT_VERSION:
+                    return -1, "workspace isolation contract is unsupported"
+                if container.labels.get(MAPPED_IDS_LABEL) not in (None, MAPPED_IDS_VERSION):
+                    return -1, "workspace mapped identity capability is unsupported"
+                if isolation == IMAGE_CONTRACT_VERSION:
                     generation = container.labels.get(SESSION_LABEL_UUID, "")
                     if not generation:
                         return -1, "workspace session UUID is missing"

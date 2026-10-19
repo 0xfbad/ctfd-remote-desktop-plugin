@@ -16,11 +16,14 @@ from threading import Lock
 import docker
 import paramiko
 from flask import Flask, current_app, has_app_context
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, OperationalError
 from CTFd.models import db, Users
 from .models import (
     DesktopContainerInfoModel,
+    DesktopDockerContextModel,
     DesktopSessionOperationModel,
+    DesktopPluginMetadataModel,
     SettingValue,
     proxy_vnc_url,
     END_REASON_RECONCILIATION,
@@ -59,9 +62,16 @@ from .docker_host_manager import (
     SESSION_LABEL_MANAGED,
     SESSION_LABEL_USER_ID,
     SESSION_LABEL_UUID,
+    SESSION_LABEL_ISOLATION,
+    IMAGE_CONTRACT_VERSION,
     normalize_container_state,
+    POOL_LABEL_PREFIX,
+    _pool_labels,
+    _mapped_owner,
+    all_configured_hosts,
     parse_size,
 )
+from .quota_security import mapped_start_ids, MAPPED_IDS_LABEL, MAPPED_IDS_VERSION
 from .orchestrator import Orchestrator, ReservationClaim
 from .exceptions import HostsUnavailableException
 from .messages import (
@@ -88,12 +98,25 @@ logger = logging.getLogger(__name__)
 _TransactionResult = TypeVar("_TransactionResult")
 
 
+def _rollback_transaction() -> bool:
+    try:
+        db.session.rollback()
+        return True
+    except BaseException:
+        try:
+            db.session.remove()
+        except BaseException:
+            pass
+        return False
+
+
 def _retry_transaction(action: Callable[[], _TransactionResult]) -> _TransactionResult:
     for attempt in range(5):
         try:
             return action()
         except OperationalError as exc:
-            db.session.rollback()
+            if not _rollback_transaction():
+                raise
             if not exc.orig.args or exc.orig.args[0] not in (1205, 1213) or attempt == 4:
                 raise
             time.sleep(0.02 * (attempt + 1) + secrets.randbelow(20) / 1000)
@@ -376,6 +399,205 @@ class ContainerManager:
             db.session.rollback()  # a competing insert can create the mutex before this transaction
             query = DesktopSessionOperationModel.query.filter_by(user_id=user_id)
             return query.populate_existing().with_for_update().first()
+
+    def _has_retained_mapped_claim(self) -> bool:
+        db.session.rollback()
+        try:
+            return (
+                DesktopSessionOperationModel.query.filter(DesktopSessionOperationModel.uid_slot.isnot(None)).first()
+                is not None
+            )
+        finally:
+            _rollback_transaction()
+
+    def require_legacy_admission(self) -> None:
+        if self._has_retained_mapped_claim():
+            raise RuntimeError("legacy desktop creation is disabled after mapped pool use")
+        owner = _mapped_owner(current_app.config["SECRET_KEY"])
+        with all_configured_hosts() as hosts:
+            for name in hosts.get_endpoints():
+                if hosts.has_mapped_pool(name, owner):
+                    raise RuntimeError("legacy desktop creation is disabled after mapped pool provisioning")
+
+    def _require_mapped_pool_provisioning_ready(self) -> list[tuple]:
+        db.session.rollback()
+        try:
+            if db.engine.dialect.name not in ("mysql", "mariadb"):
+                raise RuntimeError("mapped desktop pool provisioning requires MariaDB")
+            if self._get_setting("remote_desktop_enabled") is not False:
+                raise RuntimeError("disable remote desktop admissions before provisioning the mapped pool")
+            unsettled = DesktopSessionOperationModel.query.filter(
+                DesktopSessionOperationModel.state.notin_({OP_IDLE, OP_FAILED, OP_ACTIVE, OP_HELD})
+            ).first()
+            pending = DesktopContainerInfoModel.query.filter(
+                DesktopContainerInfoModel.lifecycle_state.in_(
+                    {LIFECYCLE_STOPPING, LIFECYCLE_CLEANUP_PENDING, LIFECYCLE_UNPAUSING}
+                )
+            ).first()
+            if unsettled is not None or pending is not None:
+                raise RuntimeError("settle every desktop create and cleanup issuer before provisioning the mapped pool")
+            return [
+                (context.id, context.context_name, context.hostname, context.enabled)
+                for context in DesktopDockerContextModel.query.populate_existing()
+                .order_by(DesktopDockerContextModel.id)
+                .all()
+            ]
+        finally:
+            _rollback_transaction()
+
+    def validate_mapped_pool(self, *, provision: bool = False) -> None:
+        if provision:
+            catalogue = self._require_mapped_pool_provisioning_ready()
+
+        retained = self._has_retained_mapped_claim()
+        owner = _mapped_owner(current_app.config["SECRET_KEY"])
+        with all_configured_hosts() as hosts:
+            missing = []
+            pool_present = False
+            legacy_present = False
+            inventory: list[dict[str, object]] = []
+            mapped_entries: dict[str, dict[str, object]] = {}
+            for name in hosts.get_endpoints():
+                marker_present = hosts.has_mapped_pool(name, owner)
+                pool_present = pool_present or marker_present
+                if not marker_present:
+                    missing.append(name)
+                entries = hosts.list_session_containers_strict(name, self.RECONCILE_NAME_PREFIX)
+                if entries is None:
+                    raise RuntimeError(f"could not inventory desktop Docker context {name!r}")
+                for entry in entries:
+                    labels = entry.get("labels")
+                    if not isinstance(labels, dict) or MAPPED_IDS_LABEL not in labels:
+                        legacy_present = True
+                        inventory.append(entry)
+                        continue
+                    container_id = str(entry.get("id") or "")
+                    if not container_id:
+                        raise RuntimeError("mapped inventory is missing an immutable container ID")
+                    prior = mapped_entries.get(container_id)
+                    if prior is None:
+                        mapped_entries[container_id] = dict(entry, contexts=[name])
+                        continue
+                    if prior.get("name") != entry.get("name") or prior.get("labels") != labels:
+                        raise RuntimeError("mapped inventory has conflicting observations of one container")
+                    contexts = prior["contexts"]
+                    if isinstance(contexts, list):
+                        contexts.append(name)
+
+            inventory.extend(mapped_entries.values())
+            self.validate_mapped_inventory(inventory, owner)
+            if legacy_present and (provision or retained or pool_present):
+                raise RuntimeError("drain every legacy desktop before using or provisioning the mapped pool")
+            if not provision and missing and (retained or pool_present):
+                raise RuntimeError("mapped desktop pool marker is missing from a configured Docker context")
+            if provision:
+                challenge_manager = getattr(current_app, "container_manager", None)
+                if challenge_manager is None:
+                    raise RuntimeError("mapped pool provisioning requires the challenge container manager")
+                recheck_challenges = challenge_manager.require_drained_for_mapped_pool(hosts.get_endpoints())
+                recheck_challenges()
+                self.validate_mapped_inventory(inventory, owner)
+                with all_configured_hosts() as current_hosts:
+                    if current_hosts.get_endpoints() != hosts.get_endpoints():
+                        raise RuntimeError("desktop Docker endpoints changed during mapped pool provisioning")
+                if self._require_mapped_pool_provisioning_ready() != catalogue:
+                    raise RuntimeError("desktop Docker catalogue changed during mapped pool provisioning")
+                completed: list[str] = []
+                for name in hosts.get_endpoints():
+                    try:
+                        hosts.provision_mapped_pool(name)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"mapped pool provisioning failed on {name!r}, verified contexts {completed!r}, markers retained"
+                        ) from exc
+                    completed.append(name)
+                    logger.info("mapped desktop pool marker verified on context %s", name)
+
+    def validate_mapped_inventory(self, entries: list[dict[str, object]], owner: str) -> None:
+        db.session.rollback()
+        try:
+            expected_pool = _pool_labels(owner)
+            observed_bases: dict[int, str] = {}
+            for entry in entries:
+                labels = entry.get("labels")
+                if not isinstance(labels, dict):
+                    continue
+                if labels.get(SESSION_LABEL_ISOLATION) not in (None, IMAGE_CONTRACT_VERSION):
+                    raise RuntimeError("desktop inventory has an unsupported isolation contract")
+                if MAPPED_IDS_LABEL not in labels:
+                    continue
+                if labels[MAPPED_IDS_LABEL] != MAPPED_IDS_VERSION:
+                    raise RuntimeError("mapped inventory has an unsupported identity capability")
+                try:
+                    user_id = int(labels[SESSION_LABEL_USER_ID])
+                    operation = (
+                        DesktopSessionOperationModel.query.filter_by(user_id=user_id).populate_existing().first()
+                    )
+                    if operation is None or operation.uid_slot is None:
+                        raise ValueError("retained mapped claim is missing")
+                    uid_base, gid_base = mapped_start_ids(operation.uid_slot)
+                    container_id = str(entry.get("id") or "")
+                    if container_id:
+                        prior_id = observed_bases.setdefault(uid_base, container_id)
+                        if prior_id != container_id:
+                            raise ValueError("multiple containers use one mapped claim")
+                    expected_name = getattr(operation, "container_name", None)
+                    expected_context = getattr(operation, "docker_context", None)
+                    contexts = entry.get("contexts")
+                    if (
+                        (expected_name and entry.get("name") != expected_name)
+                        or (expected_context and isinstance(contexts, list) and expected_context not in contexts)
+                        or operation.session_uuid != labels.get(SESSION_LABEL_UUID)
+                        or labels.get(POOL_LABEL_PREFIX + "owner") != owner
+                        or labels.get(POOL_LABEL_PREFIX + "range") != expected_pool[POOL_LABEL_PREFIX + "range"]
+                        or labels.get(POOL_LABEL_PREFIX + "uid-base") != str(uid_base)
+                        or labels.get(POOL_LABEL_PREFIX + "gid-base") != str(gid_base)
+                    ):
+                        raise ValueError("mapped identity contradicts retained claim")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise RuntimeError("mapped inventory contradicts the authoritative database") from exc
+        finally:
+            _rollback_transaction()
+
+    def _mapped_start_ids(self, user_id: int, session_uuid: str, worker_uuid: str) -> tuple[int, int]:
+        return _retry_transaction(lambda: self._mapped_start_ids_once(user_id, session_uuid, worker_uuid))
+
+    def _mapped_start_ids_once(self, user_id: int, session_uuid: str, worker_uuid: str) -> tuple[int, int]:
+        db.session.rollback()
+        try:
+            if db.engine.dialect.name not in ("mysql", "mariadb"):
+                raise RuntimeError("mapped desktop allocation requires MariaDB")
+            metadata = (
+                DesktopPluginMetadataModel.query.filter_by(key="settings_schema_version")
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
+            if metadata is None:
+                raise RuntimeError("settings schema metadata is missing")
+            operation = self._locked_operation(user_id)
+            if (
+                operation is None
+                or operation.user_id != user_id
+                or operation.session_uuid != session_uuid
+                or operation.worker_lease_uuid != worker_uuid
+                or operation.state != OP_CREATING
+                or operation.cancel_requested
+            ):
+                raise RuntimeError("mapped desktop creation lease is no longer current")
+            slot = operation.uid_slot
+            if slot is None:
+                maximum = db.session.query(func.max(DesktopSessionOperationModel.uid_slot)).scalar()
+                if maximum is not None:
+                    mapped_start_ids(maximum)
+                slot = 0 if maximum is None else maximum + 1
+            bases = mapped_start_ids(slot)
+            operation.uid_slot = slot
+            db.session.commit()
+            return bases
+        except BaseException:
+            _rollback_transaction()
+            raise
 
     def _claim_create_operation(self, user_id: int) -> tuple[str, str] | None:
         return _retry_transaction(lambda: self._claim_create_operation_once(user_id))
@@ -877,8 +1099,28 @@ class ContainerManager:
 
             db.session.rollback()  # end the implicit transaction opened by the settings reads before remote io
             before_start = None
+            mapped_ids = None
+            app = current_app._get_current_object()
+
+            def legacy_admission():
+                context = (
+                    nullcontext()
+                    if has_app_context() and current_app._get_current_object() is app
+                    else app.app_context()
+                )
+                with context:
+                    self.require_legacy_admission()
+
             if fenced:
-                app = current_app._get_current_object()
+
+                def mapped_ids():
+                    context = (
+                        nullcontext()
+                        if has_app_context() and current_app._get_current_object() is app
+                        else app.app_context()
+                    )
+                    with context:
+                        return self._mapped_start_ids(user_id, session_uuid, worker_uuid)
 
                 def before_start():
                     context = (
@@ -905,6 +1147,8 @@ class ContainerManager:
                 extra_hosts=extra_hosts,
                 network=network_name,
                 before_start=before_start,
+                mapped_ids=mapped_ids,
+                legacy_admission=legacy_admission,
                 labels={
                     SESSION_LABEL_MANAGED: "true",
                     SESSION_LABEL_USER_ID: str(user_id),
@@ -1810,6 +2054,7 @@ class ContainerManager:
 
     def periodic_cleanup(self) -> None:
         with self.app.app_context():  # type: ignore[union-attr]
+            self.validate_mapped_pool()
             with self.lock:
                 active_user_ids = {
                     r.user_id
@@ -2397,7 +2642,11 @@ class ContainerManager:
         labels = entry.get("labels")
         if not isinstance(name, str) or not isinstance(labels, dict):
             return None
-        if labels.get(SESSION_LABEL_MANAGED) != "true":
+        if (
+            labels.get(SESSION_LABEL_MANAGED) != "true"
+            or labels.get(SESSION_LABEL_ISOLATION) not in (None, IMAGE_CONTRACT_VERSION)
+            or labels.get(MAPPED_IDS_LABEL) not in (None, MAPPED_IDS_VERSION)
+        ):
             return None
         user_raw = labels.get(SESSION_LABEL_USER_ID)
         session_raw = labels.get(SESSION_LABEL_UUID)

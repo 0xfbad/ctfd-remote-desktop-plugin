@@ -13,6 +13,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+import click
 import docker
 import paramiko
 from flask import Flask
@@ -282,6 +283,7 @@ def _reconcile_containers(
     if container_manager is None:
         container_manager = ContainerManager(host_manager, orchestrator, app)
 
+    container_manager.validate_mapped_pool()
     rows = [
         (
             int(row.user_id),
@@ -368,6 +370,20 @@ def load(app: Flask) -> None:
 
     container_manager = ContainerManager(host_manager, orchestrator, app)
     workspace_context.install(host_manager)
+
+    @app.cli.command(
+        "remote-desktop-provision-mapped-pool",
+        help=(
+            "Requires disabled desktop admissions, drained challenges and legacy desktops, and a qualified frozen "
+            "main deployment with every old issuer settled and stopped."
+        ),
+    )
+    def provision_mapped_pool() -> None:
+        try:
+            container_manager.validate_mapped_pool(provision=True)
+        except Exception as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo("Mapped desktop pool markers provisioned on every configured Docker context.")
 
     event_bus.init(app, on_message=_make_bus_callback(orchestrator))
 

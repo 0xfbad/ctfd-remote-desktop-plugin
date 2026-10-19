@@ -11,6 +11,21 @@ WORKSPACE_CAPABILITIES = frozenset(
     "AUDIT_WRITE CHOWN DAC_OVERRIDE FOWNER KILL NET_BIND_SERVICE NET_RAW SETGID SETUID SYS_CHROOT".split()
 )
 
+
+MAPPED_IDS_LABEL = "edu.ucsc.ctfd-remote-desktop.mapped-ids"
+MAPPED_IDS_VERSION = "1"
+MAPPED_ID_WIDTH = 65536
+MAPPED_ID_MIN = 2147483648
+MAPPED_ID_LIMIT = 4294901760
+
+
+def mapped_start_ids(slot: int) -> tuple[int, int]:
+    if type(slot) is not int or not 0 <= slot < (MAPPED_ID_LIMIT - MAPPED_ID_MIN) // MAPPED_ID_WIDTH:
+        raise ValueError("invalid or exhausted retained desktop uid slot")
+    base = MAPPED_ID_MIN + slot * MAPPED_ID_WIDTH
+    return base, base
+
+
 QUOTA_SECCOMP_PATH = Path(__file__).with_name("seccomp") / "workspace-quota.json"
 QUOTA_SECCOMP_SHA256 = "63405c81b33f692155cd10d177e48239d891ed2ffb4f9f065f984dde768e3616"
 
@@ -27,7 +42,7 @@ def workspace_quota_seccomp() -> str:
     return "seccomp=" + json.dumps(profile, separators=(",", ":"))
 
 
-def workspace_quota_options(generation: str, capabilities: list[str], *, apparmor: bool) -> dict:
+def workspace_quota_options(generation: str, capabilities: list[str], *, apparmor: bool, mapped: bool = False) -> dict:
     if (
         not generation
         or len(generation) > 127
@@ -39,7 +54,7 @@ def workspace_quota_options(generation: str, capabilities: list[str], *, apparmo
     security = [workspace_quota_seccomp()]
     if apparmor:
         security.append("apparmor=unconfined")
-    return {
+    options: dict = {
         "read_only": True,
         "cap_add": sorted(set(capabilities) | {"SYS_ADMIN", "MKNOD", "SETPCAP"}),
         "security_opt": security,
@@ -69,6 +84,13 @@ def workspace_quota_options(generation: str, capabilities: list[str], *, apparmo
             "retries": 3,
         },
     }
+    if apparmor:
+        options["cap_add"] = sorted(set(options["cap_add"]) | {"MAC_OVERRIDE"})
+    if mapped:
+        options["cap_add"] = sorted(set(options["cap_add"]) | {"NET_ADMIN", "SETFCAP"})
+        options["devices"].append("/dev/fuse:/dev/fuse:rwm")
+        options["sysctls"] = {"net.ipv4.ip_forward": "1"}
+    return options
 
 
 def run_quota_container(

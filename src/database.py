@@ -4,6 +4,8 @@ import hashlib
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from .quota_security import mapped_start_ids
+
 
 _SCHEMA_BOOTSTRAP_LOCK_PREFIX = "ctfd_rd_schema_"
 
@@ -20,6 +22,18 @@ def prepare_database(app: Any) -> None:
     database_url = app.config.get("SQLALCHEMY_DATABASE_URI")
     if not isinstance(database_url, str):
         app.db.create_all()  # test app doubles set no SQLALCHEMY_DATABASE_URI, production always does
+        return
+
+    if database_url.startswith("sqlite"):
+        from sqlalchemy import text
+
+        with app.db.engine.connect() as connection:
+            with connection.begin():
+                connection.execute(text("PRAGMA busy_timeout = 60000"))
+                connection.execute(text("BEGIN IMMEDIATE"))
+                app.db.metadata.create_all(bind=connection)
+                _upgrade_uid_slot_schema(connection)
+        validate_database_schema(app)
         return
 
     if not database_url.startswith(("mysql", "mariadb")):
@@ -42,6 +56,7 @@ def prepare_database(app: Any) -> None:
 
         try:
             app.db.create_all()
+            _upgrade_uid_slot_schema(lock_connection)
             validate_database_schema(app)
         finally:
             try:
@@ -58,11 +73,82 @@ def prepare_database(app: Any) -> None:
                 raise RuntimeError("failed to release remote desktop schema bootstrap lock")
 
 
+_UID_SLOT_INDEX = "uq_desktop_session_operations_uid_slot"
+
+
+def _validate_uid_slot_column(inspector: Any) -> None:
+    from sqlalchemy import INTEGER
+    from sqlalchemy.dialects.mysql import INTEGER as MySQLInteger
+
+    table = "desktop_session_operations"
+    columns = {column["name"]: column for column in inspector.get_columns(table)}
+    column = columns.get("uid_slot")
+    if column is None:
+        raise RuntimeError("desktop uid slot column is missing")
+    reflected = column.get("type")
+    if type(reflected) not in (INTEGER, MySQLInteger) or getattr(reflected, "unsigned", False):
+        raise RuntimeError("desktop uid slot must be a signed INTEGER")
+    if column.get("nullable") is not True or column.get("default") is not None:
+        raise RuntimeError("desktop uid slot must be nullable without a default")
+    if any("uid_slot" in (key.get("constrained_columns") or ()) for key in inspector.get_foreign_keys(table)):
+        raise RuntimeError("desktop uid slot must not have a foreign key")
+
+
+def _uid_slot_unique(inspector: Any) -> bool:
+    table = "desktop_session_operations"
+    found = False
+    entries = inspector.get_unique_constraints(table) + inspector.get_indexes(table)
+    for entry in entries:
+        options = entry.get("dialect_options") or {}
+        unique = "unique" not in entry or bool(entry["unique"])
+        exact = unique and entry.get("column_names") == ["uid_slot"] and not options
+        if not exact and (
+            entry.get("name") == _UID_SLOT_INDEX or (unique and "uid_slot" in (entry.get("column_names") or ()))
+        ):
+            raise RuntimeError("desktop uid slot index has an invalid shape")
+        found = found or exact
+    return found
+
+
+def _validate_uid_slot_data(connection: Any) -> None:
+    from sqlalchemy import text
+
+    rows = connection.execute(text("SELECT uid_slot FROM desktop_session_operations WHERE uid_slot IS NOT NULL"))
+    for row in rows:
+        try:
+            mapped_start_ids(row[0])
+        except ValueError as exc:
+            raise RuntimeError("retained desktop uid slot data is malformed") from exc
+
+
+def _upgrade_uid_slot_schema(connection: Any) -> None:
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("desktop_session_operations")}
+    if "uid_slot" not in columns:
+        connection.execute(text("ALTER TABLE desktop_session_operations ADD COLUMN uid_slot INTEGER NULL"))
+    _validate_uid_slot_column(inspect(connection))
+    if not _uid_slot_unique(inspect(connection)):
+        connection.execute(
+            text("CREATE UNIQUE INDEX uq_desktop_session_operations_uid_slot ON desktop_session_operations (uid_slot)")
+        )
+    if not _uid_slot_unique(inspect(connection)):
+        raise RuntimeError("desktop uid slot unique index is missing")
+    _validate_uid_slot_data(connection)
+
+
 def validate_database_schema(app: Any) -> None:
     from sqlalchemy import inspect
 
     inspector = inspect(app.db.engine)
     tables = set(inspector.get_table_names())
+    if "desktop_session_operations" in tables:
+        _validate_uid_slot_column(inspector)
+        if not _uid_slot_unique(inspector):
+            raise RuntimeError("desktop uid slot unique index is missing")
+        with app.db.engine.connect() as connection:
+            _validate_uid_slot_data(connection)
     required_columns = {
         "desktop_docker_contexts": {
             "id",
@@ -113,6 +199,7 @@ def validate_database_schema(app: Any) -> None:
             "session_uuid",
         },
         "desktop_session_operations": {
+            "uid_slot",
             "user_id",
             "operation_uuid",
             "worker_lease_uuid",
@@ -256,6 +343,7 @@ def validate_database_schema(app: Any) -> None:
             "session_uuid": (False, ("char", "string"), 36),
         },
         "desktop_session_operations": {
+            "uid_slot": (True, ("int",), None),
             "user_id": (False, ("int",), None),
             "operation_uuid": (False, ("char", "string"), 36),
             "worker_lease_uuid": (True, ("char", "string"), 36),
