@@ -790,7 +790,7 @@
                 var e = mx[img] && mx[img][ctx];
                 if (!e || !e.available || !e.info) return;
 
-                if (e.info.contract_status === 'compatible' && (!latest || Number(e.info.created_at || 0) > Number(latest.created_at || 0))) {
+                if (!latest || Number(e.info.created_at || 0) > Number(latest.created_at || 0)) {
                     latest = e.info;
                 }
             });
@@ -804,17 +804,10 @@
         var rows = imgs.map(function(img) {
             var ref = newestRef(img);
             var anyMissing = false;
-            var anyIncompatible = false;
             var anyOutdated = false;
 
             var cells = ctxs.map(function(ctx) {
                 var entry = mx[img] && mx[img][ctx];
-
-                if (entry && ((entry.info && entry.info.contract_status !== 'compatible') || (entry.available && !entry.info))) {
-                    anyIncompatible = true;
-                    return '<td class="text-center" style="background:rgba(220,53,69,0.06)">' +
-                        '<i class="fas fa-ban text-danger" title="Incompatible image contract ' + escapeHtml((entry.info && entry.info.contract) || 'missing') + '. Expected contract 3; rebuild or load the current image."></i></td>';
-                }
 
                 if (!entry || !entry.available) {
                     anyMissing = true;
@@ -822,7 +815,7 @@
                         '<i class="fas fa-times-circle text-danger" title="Not found. Build or load this image on this host."></i></td>';
                 }
 
-                var info = entry.info;
+                var info = entry.info || {};
                 if (!(Number(info.created_at) > 0)) {
                     return '<td class="text-center"><i class="fas fa-question-circle text-muted" title="Build date unavailable; scan again to compare image dates."></i></td>';
                 }
@@ -848,8 +841,7 @@
             }).join('');
 
             var badge = '';
-            if (anyIncompatible) badge = ' <span class="badge bg-danger">incompatible contract</span>';
-            else if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
+            if (anyMissing) badge = ' <span class="badge bg-danger">missing</span>';
             else if (anyOutdated) badge = ' <span class="badge bg-warning text-dark">possibly outdated</span>';
 
             return '<tr><td>' + escapeHtml(img) + badge + '</td>' + cells + '</tr>';

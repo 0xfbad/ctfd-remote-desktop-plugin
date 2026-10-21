@@ -30,7 +30,6 @@ from .models import (
     _esc,
 )
 from .docker_host_manager import (
-    IMAGE_CONTRACT_VERSION,
     LOCAL_CONTEXT_NAME,
     LOCAL_SOCKET_PATH,
     discover_contexts,
@@ -394,7 +393,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         parsed = urlparse(request.url_root)
         if parsed.hostname in ("localhost", "127.0.0.1"):
-            container_host = "host.docker.internal"  # container localhost cannot reach ctfd on the host
+            container_host = "host.docker.internal"
             extra_hosts = {"host.docker.internal": "host-gateway"}
         else:
             container_host = parsed.hostname or ""
@@ -404,8 +403,11 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
 
         try:
             result = container_manager.create_container(
-                user.id, container_url, extra_hosts, client_ip=get_ip()
-            )  # trusted proxies must determine the client ip
+                user.id,
+                container_url,
+                extra_hosts,
+                client_ip=get_ip(),  # trusted proxies must determine the client ip
+            )
         except HostsUnavailableException as err:
             return jsonify({"error": str(err)}), 503
 
@@ -426,33 +428,22 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         user = get_current_user()
         status = container_manager.get_creation_status(user.id)
 
-        if not status:
-            container_info = container_manager.get_container_info(user.id)
-            if container_info:
-                timer_status = container_manager.get_session_timer_status(user.id)
-                return jsonify(
-                    {
-                        "status": "ready",
-                        "message": "Desktop ready!",
-                        "session": _session_dict(container_info, timer_status),
-                    }
-                )
+        if status and status.get("status") != "ready":
+            return jsonify(status)
+
+        container_info = container_manager.get_container_info(user.id)
+        if not container_info:
             return jsonify({"status": "none"})
 
-        if status.get("status") == "ready":
-            container_info = container_manager.get_container_info(user.id)
-            if not container_info:  # creation status can outlive an expired or reaped session
-                return jsonify({"status": "none"})
-            timer_status = container_manager.get_session_timer_status(user.id)
-            return jsonify(
-                {
-                    "status": "ready",
-                    "message": status.get("message", "Desktop ready!"),
-                    "session": _session_dict(container_info, timer_status),
-                }
-            )
-
-        return jsonify(status)
+        timer_status = container_manager.get_session_timer_status(user.id)
+        message = status.get("message", "Desktop ready!") if status else "Desktop ready!"
+        return jsonify(
+            {
+                "status": "ready",
+                "message": message,
+                "session": _session_dict(container_info, timer_status),
+            }
+        )
 
     @remote_desktop_bp.route("/remote-desktop/api/destroy", methods=["POST"])
     @authed_only
@@ -910,7 +901,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 _ctx_name, info = future.result()
             except Exception:
                 return {"available": False}
-            entry: dict[str, object] = {"available": bool(info and info.get("contract_status") == "compatible")}
+            entry: dict[str, object] = {"available": info is not None}
             if info:
                 entry["info"] = info
             return entry
@@ -1079,7 +1070,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 return "", 502
             check_hostname = container_manager.host_manager.get_check_hostname(
                 docker_context
-            )  # the internal endpoint can differ from pub_hostname
+            )  # the internal endpoint can differ from the public hostname
             if not isinstance(check_hostname, str) or not check_hostname:
                 return "", 502
         except Exception:
@@ -1517,19 +1508,6 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
         image_info = container_manager.host_manager.get_image_info(context.context_name, docker_image)
         if image_info is None:
             return jsonify({"error": f"image {docker_image} not found on context"}), 503
-        if image_info.get("contract_status") != "compatible":
-            found_contract = image_info.get("contract", "missing")
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            f"image {docker_image} has incompatible remote-desktop contract "
-                            f"{found_contract!r}; expected {IMAGE_CONTRACT_VERSION!r}"
-                        )
-                    }
-                ),
-                503,
-            )
 
         return jsonify({"success": True})
 

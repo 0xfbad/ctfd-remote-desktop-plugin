@@ -32,14 +32,12 @@ SESSION_LABEL_MANAGED = "org.ctfd.remote-desktop.managed"
 SESSION_LABEL_USER_ID = "org.ctfd.remote-desktop.user-id"
 SESSION_LABEL_UUID = "org.ctfd.remote-desktop.session-uuid"
 SESSION_LABEL_ISOLATION = "org.ctfd.remote-desktop.isolation"
-IMAGE_CONTRACT_LABEL = "edu.ucsc.ctfd-remote-desktop.contract"
-IMAGE_CONTRACT_VERSION = "4"
 
 LOCAL_CONTEXT_NAME = "local"
 LOCAL_SOCKET_PATH = "/var/run/docker.sock"
 DOCKER_CONFIG_DIR = os.environ.get("DOCKER_CONFIG", os.path.expanduser("~/.docker"))
 
-DEFAULT_CLIENT_TIMEOUT = 10  # ssh connect has a separate deadline
+DEFAULT_CLIENT_TIMEOUT = 10
 CLIENT_FAILURE_COOLDOWN = 60
 HOST_CONCURRENCY = 4
 ContextMeta = dict[str, str | dict[str, dict[str, str]]]
@@ -55,9 +53,10 @@ _SSH_ADAPTER_PATCHED = False
 
 
 def _apply_ssh_connect_timeouts(params: dict[str, object], timeout: int | float) -> None:
-    # the docker sdk does not forward its timeout to SSHClient.connect
     bounded = max(1.0, float(timeout))
-    params.update(timeout=bounded, banner_timeout=bounded, auth_timeout=bounded, channel_timeout=bounded)
+    params.update(  # docker client timeouts exclude the ssh handshake
+        timeout=bounded, banner_timeout=bounded, auth_timeout=bounded, channel_timeout=bounded
+    )
 
 
 def _install_bounded_ssh_adapter() -> None:
@@ -78,8 +77,7 @@ def _install_bounded_ssh_adapter() -> None:
 
         class BoundedSSHHTTPAdapter(original_adapter):  # type: ignore[misc, valid-type]
             _ctfd_bounded_connect = True
-            # either plugin may install the shared ssh adapter first
-            _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT
+            _ctfd_ssh_connect_timeout = _SSH_CONNECT_TIMEOUT  # both plugins must share the installed adapter timeout
 
             def _create_paramiko_client(self, base_url):
                 local = getattr(type(self), "_ctfd_ssh_connect_timeout", _SSH_CONNECT_TIMEOUT)
@@ -126,20 +124,6 @@ def _new_docker_client(endpoint: str, timeout: int = DEFAULT_CLIENT_TIMEOUT):
             pass
 
 
-def _image_contract(image: object) -> str | None:
-    attrs = getattr(image, "attrs", None)
-    if not isinstance(attrs, Mapping):
-        return None
-    config = attrs.get("Config")
-    if not isinstance(config, Mapping):
-        return None
-    labels = config.get("Labels")
-    if not isinstance(labels, Mapping):
-        return None
-    contract = labels.get(IMAGE_CONTRACT_LABEL)
-    return str(contract) if contract is not None else None
-
-
 def normalize_container_state(value: object) -> ContainerState:
     if value == "running":
         return "running"
@@ -165,11 +149,11 @@ def _scan_context_meta(context_name: str | None = None) -> ContextMeta | list[Co
         try:
             with open(meta_path) as f:
                 meta = json.load(f)
-            if context_name:
-                if meta.get("Name") == context_name:
-                    return meta
-            else:
+            if not context_name:
                 results.append(meta)
+                continue
+            if meta.get("Name") == context_name:
+                return meta
         except Exception:
             continue
 
@@ -225,8 +209,7 @@ def _validate_endpoint(candidate: str, context_name: str) -> str | None:
 
 
 def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
-    # docker stores context dirs by hash, not name, so scan for a match
-    meta = _scan_context_meta(context_name)
+    meta = _scan_context_meta(context_name)  # docker context directories use hashes rather than names
     if meta:
         _name, endpoint = _metadata_name_and_endpoint(meta)
         if endpoint is not None:
@@ -251,10 +234,11 @@ def discover_contexts() -> list[DiscoveredContext]:
     metadata = _scan_context_meta()
     for meta in metadata if isinstance(metadata, list) else []:
         name, endpoint = _metadata_name_and_endpoint(meta)
-        if name is not None and endpoint is not None:
-            validated = _validate_endpoint(endpoint, name)
-            if validated is not None:
-                discovered.append({"name": name, "endpoint": validated})
+        if name is None or endpoint is None:
+            continue
+        validated = _validate_endpoint(endpoint, name)
+        if validated is not None:
+            discovered.append({"name": name, "endpoint": validated})
 
     local_missing = not any(d["name"] == LOCAL_CONTEXT_NAME for d in discovered)
     if local_missing and os.path.exists(LOCAL_SOCKET_PATH):
@@ -270,7 +254,7 @@ def _get_host_gateway() -> str:
         with open("/proc/net/route") as f:
             for line in f:
                 parts = line.strip().split()
-                if parts[1] == "00000000":  # destination 0 is the default route
+                if parts[1] == "00000000":
                     gw = struct.pack("<I", int(parts[2], 16))
                     return ".".join(str(b) for b in gw)
     except Exception:
@@ -350,22 +334,23 @@ def _build_deadline_archive(deadline: int, mtime: int) -> bytes:
 
 class DockerHostManager:
     def __init__(self) -> None:
-        self._context_configs: dict[str, str] = {}
+        self._context_configs: dict[
+            str, str
+        ] = {}  # keep endpoints after probe failures so background retries can reconnect
         self._pub_hostnames: dict[str, str] = {}
-        # failed startup probes must retain endpoints for background recovery
         self._connected_contexts: set[str] = set()
 
         self._clients: dict[ClientKey, docker.DockerClient] = {}
         self._idle_clients: dict[ClientKey, list[tuple[int, int, docker.DockerClient]]] = {}
         self._client_generations: dict[ClientKey, int] = {}
 
-        # an epoch bump lets each worker replace its own client instead of closing a peer paramiko transport
         self._client_epochs: dict[ClientKey, int] = {}
         self._context_client_epochs: dict[str, int] = {}
         self._client_threads: dict[ClientKey, threading.Thread] = {}
 
-        # share failed connects across rows so an unavailable host costs one timeout per cooldown
-        self._client_failures: dict[str, float] = {}
+        self._client_failures: dict[
+            str, float
+        ] = {}  # a failed connect must suppress retries across rows until cooldown ends
 
         self._config_generation: int = 0
         self._lock: threading.RLock = threading.RLock()
@@ -396,8 +381,9 @@ class DockerHostManager:
             finally:
                 self._release_client(context_name)
 
-        # paramiko transport greenlets need the serving hub to keep running between requests
-        return self._get_pool(context_name).apply(leased_call)
+        return self._get_pool(context_name).apply(
+            leased_call
+        )  # paramiko transport greenlets need the serving hub between requests
 
     def _release_client(self, context_name: str) -> None:
         key = (context_name, threading.get_ident())
@@ -447,11 +433,11 @@ class DockerHostManager:
         return client
 
     def _sweep_dead_entries_locked(self, to_close: list[docker.DockerClient]) -> None:
-        # idents are reused after a worker exits, so the owner object decides who inherits a transport
         dead_keys = [
             cached_key
             for cached_key in self._clients
-            if (owner := self._client_threads.get(cached_key)) is None or not owner.is_alive()
+            if (owner := self._client_threads.get(cached_key)) is None
+            or not owner.is_alive()  # thread identifiers can be reused after exit
         ]
         for dead_key in dead_keys:
             dead_client = self._pop_entry_locked(dead_key)
@@ -485,7 +471,6 @@ class DockerHostManager:
         if client is None:
             return None
         if self._client_threads.get(key) is not current_thread or self._entry_is_stale_locked(key):
-            # roll only this worker entry, closing another thread transport can abort its create
             rolled_client = self._pop_entry_locked(key)
             if rolled_client is not None:
                 to_close.append(rolled_client)
@@ -495,9 +480,10 @@ class DockerHostManager:
     def _connect_and_store(
         self, context_name: str, key: ClientKey, owner: threading.Thread, url: str
     ) -> docker.DockerClient:
-        """the handshake runs unlocked, an ssh connect to a dead host would otherwise stall every lock reader"""
         try:
-            client = _new_docker_client(url, timeout=DEFAULT_CLIENT_TIMEOUT)
+            client = _new_docker_client(
+                url, timeout=DEFAULT_CLIENT_TIMEOUT
+            )  # ssh handshakes must not hold the shared client lock
         except Exception:
             with self._lock:
                 self._client_failures[context_name] = time.monotonic() + CLIENT_FAILURE_COOLDOWN
@@ -562,8 +548,9 @@ class DockerHostManager:
         if cooling_down:
             raise HostsUnavailableException(HOST_UNREACHABLE)
         if not url:
-            # typed so callers map a stale row miss to 503 instead of 500
-            raise HostsUnavailableException(f"no client for context '{context_name}'")
+            raise HostsUnavailableException(
+                f"no client for context '{context_name}'"
+            )  # unavailable contexts must return 503 rather than 500
         return self._connect_and_store(context_name, key, current_thread, url)
 
     def _transient_host_failure(self, context_name: str) -> HostsUnavailableException:
@@ -572,10 +559,11 @@ class DockerHostManager:
         return HostsUnavailableException(HOST_UNREACHABLE)
 
     def _clear_client(self, context_name: str) -> None:
-        # retain the connect cooldown when failures invalidate transports
         key = (context_name, threading.get_ident())
-        with self._lock:
-            self._context_client_epochs[context_name] = self._context_client_epochs.get(context_name, 0) + 1
+        with self._lock:  # connect cooldowns must survive transport invalidation
+            self._context_client_epochs[context_name] = (
+                self._context_client_epochs.get(context_name, 0) + 1
+            )  # peer transports must stay open until their calls finish
             old = self._pop_entry_locked(key)
             to_close = [old] if old is not None else []
             idle_key = (context_name, threading.get_native_id())
@@ -583,7 +571,6 @@ class DockerHostManager:
         self._close_clients(to_close)
 
     def _init_semaphores(self, limit: int) -> None:
-        # retain unchanged semaphores so reloads cannot split in flight acquisitions across generations
         with self._lock:
             old_semaphores = self._semaphores
             old_limits = self._semaphore_limits
@@ -591,7 +578,7 @@ class DockerHostManager:
             for ctx_name in self._context_configs:
                 old = old_semaphores.get(ctx_name)
                 if old is not None and old_limits.get(ctx_name) == limit:
-                    new_semaphores[ctx_name] = old
+                    new_semaphores[ctx_name] = old  # reloads must preserve in flight acquisitions
                 else:
                     new_semaphores[ctx_name] = threading.BoundedSemaphore(limit)
 
@@ -610,17 +597,18 @@ class DockerHostManager:
         return sem
 
     def release_semaphore(self, semaphore: threading.BoundedSemaphore | str | None) -> None:
-        # callers must release the acquired object to survive reloads
         if isinstance(semaphore, str):
             with self._lock:
                 sem = self._semaphores.get(semaphore)
         else:
-            sem = semaphore
-        if sem is not None:
-            try:
-                sem.release()
-            except ValueError:
-                pass
+            sem = semaphore  # permits belong to the acquired object across reloads
+        if sem is None:
+            return
+
+        try:
+            sem.release()
+        except ValueError:
+            pass
 
     def load_contexts(self, contexts: list[DesktopDockerContextModel], probe: bool = True) -> None:
         from .models import get_all_settings
@@ -704,9 +692,8 @@ class DockerHostManager:
             raise ValueError("max_concurrent_creates must be an integer")
 
         with self._lock:
-            # clearing unchanged cooldowns would retry every unavailable host
             unchanged = {name for name, url in new_configs.items() if self._context_configs.get(name) == url}
-            self._client_failures = {
+            self._client_failures = {  # reloaded contexts must retain their connect cooldowns
                 name: until
                 for name, until in self._client_failures.items()
                 if name in unchanged and name not in probed_ok
@@ -736,9 +723,11 @@ class DockerHostManager:
             configured = self._pub_hostnames.get(context_name)
             endpoint = self._context_configs.get(context_name, "")
 
-        # ctfd runs in a container so readiness traffic to a local daemon has to go through the bridge gateway
         if endpoint.startswith("unix://"):
-            return configured or None, _get_host_gateway()
+            return (
+                configured or None,
+                _get_host_gateway(),
+            )  # container readiness traffic must reach local ports through the bridge gateway
 
         if configured:
             return configured, configured
@@ -754,21 +743,19 @@ class DockerHostManager:
         if not url:
             return False
 
-        # cached paramiko transports can wait on dead sockets beyond the health check interval
-        reachable = ping_endpoint(url, timeout=3)
+        reachable = ping_endpoint(
+            url, timeout=3
+        )  # cached paramiko transports can wait beyond the health check interval
 
         with self._lock:
-            endpoint_is_current = self._context_configs.get(context_name) == url
-            if endpoint_is_current:
-                if reachable:
-                    self._connected_contexts.add(context_name)
-                    self._client_failures.pop(context_name, None)
-                else:
-                    self._connected_contexts.discard(context_name)
-        if not endpoint_is_current:
-            return False
-        if reachable:
-            return True
+            if self._context_configs.get(context_name) != url:
+                return False
+            if reachable:
+                self._connected_contexts.add(context_name)
+                self._client_failures.pop(context_name, None)
+                return True
+            self._connected_contexts.discard(context_name)
+
         self._clear_client(context_name)
         return False
 
@@ -860,12 +847,6 @@ class DockerHostManager:
                 self._clear_client(context_name)
                 raise
 
-            contract = _image_contract(resolved_image)
-            if contract != IMAGE_CONTRACT_VERSION:
-                raise docker.errors.DockerException(
-                    f"desktop image {image!r} on context {context_name!r} has "
-                    f"{IMAGE_CONTRACT_LABEL}={contract!r}; expected {IMAGE_CONTRACT_VERSION!r}"
-                )
             resolved_image_id = getattr(resolved_image, "id", None)
             if not isinstance(resolved_image_id, str) or not resolved_image_id:
                 raise docker.errors.DockerException(
@@ -891,7 +872,7 @@ class DockerHostManager:
                 raise ValueError("workspace isolation requires a valid account ID")
             quota_options = workspace_quota_options(generation, cap_add, apparmor=apparmor)
             container_labels = dict(labels or {})
-            container_labels[SESSION_LABEL_ISOLATION] = IMAGE_CONTRACT_VERSION
+            container_labels[SESSION_LABEL_ISOLATION] = "true"
             environment = dict(env)
             environment["CTFD_USER_ID"] = str(user_id)
             environment["WORKSPACE_DISK_BYTES"] = str(storage_bytes)
@@ -992,8 +973,7 @@ class DockerHostManager:
             container = None
             try:
                 container = client.containers.get(container_name)
-                # auto_remove does not clean containers that never started
-                container.remove(force=True, v=True)
+                container.remove(force=True, v=True)  # automatic removal leaves containers that never started
             except docker.errors.NotFound:
                 logger.debug(f"container {container_name} already removed")
             except docker.errors.APIError as exc:
@@ -1065,7 +1045,6 @@ class DockerHostManager:
             from datetime import datetime
 
             iso = created_raw.replace("Z", "+00:00")
-            # python parses at most microseconds, docker emits 9 digit fractional seconds
             if "." in iso:
                 head, tail = iso.split(".", 1)
                 tz_idx = max(tail.find("+"), tail.find("-"))
@@ -1073,7 +1052,7 @@ class DockerHostManager:
                     frac, tz_suffix = tail, ""
                 else:
                     frac, tz_suffix = tail[:tz_idx], tail[tz_idx:]
-                iso = f"{head}.{frac[:6]}{tz_suffix}"
+                iso = f"{head}.{frac[:6]}{tz_suffix}"  # python datetime uses microsecond precision
             return datetime.fromisoformat(iso).timestamp()
         except (ValueError, AttributeError):
             return 0.0
@@ -1082,8 +1061,9 @@ class DockerHostManager:
         containers = client.containers.list(all=True, filters={"name": name_prefix})
         results: list[dict[str, object]] = []
         for c in containers:
-            # the docker name filter is a regex match not a prefix, so enforce the caller namespace locally
-            if not str(c.name or "").startswith(name_prefix):
+            if not str(c.name or "").startswith(
+                name_prefix
+            ):  # docker name filters are regular expressions rather than prefixes
                 continue
             created_raw = c.attrs.get("Created", "") if c.attrs else ""
             results.append(
@@ -1109,14 +1089,13 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def list_session_containers_strict(self, context_name: str, name_prefix: str) -> list[dict[str, object]] | None:
-        # destructive callers must distinguish an empty host from an unreachable one
         def _do() -> list[dict[str, object]] | None:
             try:
                 client = self._get_client(context_name)
                 return self._list_by_prefix(client, name_prefix)
             except Exception:
                 self._clear_client(context_name)
-                return None
+                return None  # removal must distinguish unreachable hosts from empty hosts
 
         return self._call(context_name, _do)
 
@@ -1124,17 +1103,7 @@ class DockerHostManager:
         def _do():
             try:
                 client = self._get_client(context_name)
-                img = client.images.get(image)
-                contract = _image_contract(img)
-                if contract != IMAGE_CONTRACT_VERSION:
-                    logger.warning(
-                        "image %s on context %s has remote-desktop contract %r; expected %r",
-                        image,
-                        context_name,
-                        contract,
-                        IMAGE_CONTRACT_VERSION,
-                    )
-                    return False
+                client.images.get(image)
                 return True
             except docker.errors.ImageNotFound:
                 return False
@@ -1185,11 +1154,10 @@ class DockerHostManager:
                 attrs = img.attrs or {}
                 size_mb = round((attrs.get("Size") or 0) / 1024 / 1024)
                 raw = attrs.get("Created", "")[:19]
-                # reproducible builds use a fixed creation timestamp, use the last tag time instead
                 if raw.startswith("1980"):
                     last_tag = (attrs.get("Metadata") or {}).get("LastTagTime", "")
                     if last_tag:
-                        raw = last_tag[:19]
+                        raw = last_tag[:19]  # reproducible builds have a fixed creation timestamp
                 try:
                     created_time = datetime.strptime(raw.replace("T", " "), "%Y-%m-%d %H:%M:%S").replace(
                         tzinfo=timezone.utc
@@ -1200,15 +1168,11 @@ class DockerHostManager:
                     created = raw.replace("T", " ")
                     created_at = 0.0
                 short_id = img.short_id.replace("sha256:", "")
-                contract = _image_contract(img)
-                contract_status = "compatible" if contract == IMAGE_CONTRACT_VERSION else "incompatible"
                 return {
                     "size_mb": size_mb,
                     "created": created,
                     "created_at": created_at,
                     "id": short_id,
-                    "contract": str(contract) if contract is not None else "missing",
-                    "contract_status": contract_status,
                 }
             except docker.errors.ImageNotFound:
                 return None
@@ -1226,7 +1190,7 @@ class DockerHostManager:
             try:
                 client = self._get_client(context_name)
                 container = client.containers.get(container_name_or_id)
-                if container.labels.get(SESSION_LABEL_ISOLATION) == IMAGE_CONTRACT_VERSION:
+                if SESSION_LABEL_ISOLATION in container.labels:
                     generation = container.labels.get(SESSION_LABEL_UUID, "")
                     if not generation:
                         return -1, "workspace session UUID is missing"
@@ -1289,8 +1253,9 @@ class DockerHostManager:
                 if credited_mtime > now + 1:
                     raise ValueError("maximum-lifetime deadline mtime is in the future")
 
-                # archive mtime prevents retries from crediting the same hold twice
-                credit_from = max(paused_at, credited_mtime)
+                credit_from = max(
+                    paused_at, credited_mtime
+                )  # archive times keep retries from crediting the same hold twice
                 credit_seconds = max(0, math.ceil(now - credit_from))
                 new_deadline = current_deadline + credit_seconds
                 if new_deadline - now < minimum_remaining:
@@ -1298,10 +1263,11 @@ class DockerHostManager:
                 if new_deadline > 9_999_999_999:
                     raise ValueError("maximum-lifetime deadline extension overflowed")
 
-                # archive io works while paused so the watchdog cannot observe a partial replacement
                 if credit_seconds:
                     archive = _build_deadline_archive(new_deadline, int(now))
-                    if container.put_archive(_DEADLINE_STATE_DIR, archive) is False:
+                    if (
+                        container.put_archive(_DEADLINE_STATE_DIR, archive) is False
+                    ):  # paused containers cannot run the watchdog during replacement
                         raise ValueError("Docker rejected maximum-lifetime deadline update")
 
                 verified_deadline, verified_mtime = _read_deadline_state(container)
@@ -1354,8 +1320,6 @@ class DockerHostManager:
         return self._call(context_name, _do)
 
     def inspect_container_state(self, context_name: str, container_id: str) -> ContainerState:
-        # destructive callers must preserve paused and unknown sessions
-
         def _do():
             try:
                 client = self._get_client(context_name)
@@ -1371,7 +1335,9 @@ class DockerHostManager:
                 return "unknown"
 
         state = self._call(context_name, _do)
-        return state if state in ("running", "paused", "created", "exited", "not_found") else "unknown"
+        return (
+            state if state in ("running", "paused", "created", "exited", "not_found") else "unknown"
+        )  # removal must preserve paused or unknown sessions
 
     def is_container_running(self, context_name: str, container_id: str) -> bool:
         state = self.inspect_container_state(context_name, container_id)

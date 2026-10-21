@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from threading import Event, Lock
 
 from .docker_host_manager import (
-    IMAGE_CONTRACT_VERSION,
     DockerHostManager,
     ImageInfo,
     SESSION_LABEL_MANAGED,
@@ -115,11 +114,7 @@ class Orchestrator:
     ) -> tuple[bool, int, bool, tuple[str, str, str, dict[str, str | int | ImageInfo | None]]]:
         name = ctx.context_name
         image_info = self.host_manager.get_image_info(name, docker_image) if is_connected else None
-        image_compatible = bool(
-            image_info
-            and image_info.get("contract") == IMAGE_CONTRACT_VERSION
-            and image_info.get("contract_status") == "compatible"
-        )
+        image_available = image_info is not None
         storage_compatible = bool(is_connected and self.host_manager.check_workspace_isolation(name))
 
         if ctx.max_containers is not None:
@@ -129,7 +124,7 @@ class Orchestrator:
             auto_cap, stale = self._derive_auto_cap(name, is_connected)
             cap_value, cap_source = auto_cap, "fallback" if stale else "auto"
 
-        healthy = is_connected and image_compatible and storage_compatible and not stale
+        healthy = is_connected and image_available and storage_compatible and not stale
 
         if healthy:
             meta: dict[str, str | int | ImageInfo | None] = {
@@ -148,10 +143,8 @@ class Orchestrator:
             reason = "image not found"
         elif not storage_compatible:
             reason = "configured storage limit is unsupported"
-        elif stale:
-            reason = "host memory unavailable for capacity validation"
         else:
-            reason = "incompatible image contract"
+            reason = "host memory unavailable for capacity validation"
         meta = {
             "context_name": name,
             "reason": reason,
@@ -159,7 +152,6 @@ class Orchestrator:
         }
         if image_info is not None:
             meta["image"] = image_info
-            meta["expected_contract"] = IMAGE_CONTRACT_VERSION
         event = (
             "host_unhealthy",
             f"context {name} marked unhealthy: {reason}",
@@ -438,7 +430,7 @@ class Orchestrator:
 
         changed = DesktopDockerContextModel.query.filter(  # admission locks the context before the operation
             DesktopDockerContextModel.context_name == context_name,
-            DesktopDockerContextModel.active_sessions > 0,  # the audit repairs a zero count without another decrement
+            DesktopDockerContextModel.active_sessions > 0,
             owner_exists,
             operation_owner_exists,
         ).update(
@@ -742,11 +734,11 @@ class Orchestrator:
             eligible = reachable
             reason = "unreachable"
             if reachable:
-                image_compatible = self.host_manager.check_image(name, docker_image)
+                image_available = self.host_manager.check_image(name, docker_image)
                 storage_compatible = self.host_manager.check_workspace_isolation(name)
-                eligible = image_compatible and storage_compatible
-                if not image_compatible:
-                    reason = "image missing or incompatible"
+                eligible = image_available and storage_compatible
+                if not image_available:
+                    reason = "image not found"
                 elif not storage_compatible:
                     reason = "workspace isolation is unsupported"
 
