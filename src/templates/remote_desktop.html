@@ -581,6 +581,22 @@ function cancelPolling() {
     cancelPoll(sessionPoll);
 }
 
+function redirectToLogin(response) {
+    const login = new URL((window.init.urlRoot || '') + '/login', window.location.origin);
+    if (login.origin !== window.location.origin) return false;
+    if (response.redirected) {
+        const destination = new URL(response.url, window.location.origin);
+        if (destination.origin !== login.origin || destination.pathname !== login.pathname) return false;
+    } else if (response.status !== 401 && response.status !== 403) return false;
+
+    cancelPolling();
+    allowNavigation();
+    if (window.location.pathname === login.pathname) return true;
+    login.searchParams.set('next', window.location.pathname + window.location.search);
+    window.location.assign(login.href);
+    return true;
+}
+
 function pollRequest(state, path, accept) {
     if (!state.active || state.pending) return;
     const generation = state.generation;
@@ -594,11 +610,13 @@ function pollRequest(state, path, accept) {
         signal: controller.signal
     }))
     .then(response => {
+        if (generation !== state.generation || !state.active || state.pending !== controller || controller.signal.aborted) return;
+        if (redirectToLogin(response)) return;
         if (!response.ok) throw new Error('status request failed');
         return response.json();
     })
     .then(data => {
-        if (generation !== state.generation || !state.active) return;
+        if (generation !== state.generation || !state.active || state.pending !== controller || controller.signal.aborted) return;
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
             throw new Error('invalid status response');
         }
