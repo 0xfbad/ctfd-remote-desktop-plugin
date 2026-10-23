@@ -5,6 +5,7 @@ import io
 import json
 import math
 import re
+import struct
 import tarfile
 import time
 import threading
@@ -1183,7 +1184,63 @@ class DockerHostManager:
 
         return self._call(context_name, _do)
 
-    def exec_in_container(self, context_name: str, container_name_or_id: str, cmd: list[str]) -> tuple[int, str]:
+    @staticmethod
+    def _exec_bounded(client, container_id: str, command: list[str], limit: int, timeout: float) -> tuple[int, str]:
+        execution = client.api.exec_create(container_id, command, stdout=True, stderr=True)
+        stream = client.api.exec_start(execution["Id"], socket=True)
+        transport = getattr(stream, "_sock", stream)
+        receive = getattr(stream, "recv", None) or stream.read
+        deadline = time.monotonic() + timeout
+
+        def read_exact(count: int) -> bytes:
+            data = bytearray()
+            while len(data) < count:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("desktop command read timed out")
+                transport.settimeout(remaining)
+                chunk = receive(min(count - len(data), 65536))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            return bytes(data)
+
+        output = bytearray()
+        try:
+            while True:
+                header = read_exact(8)
+                if not header:
+                    break
+                if len(header) != 8:
+                    raise ValueError("incomplete desktop command frame")
+                channel, length = struct.unpack(">BxxxI", header)
+                if channel not in (1, 2) or length > limit - len(output):
+                    raise ValueError("desktop command output exceeds limit")
+                data = read_exact(length)
+                if len(data) != length:
+                    raise ValueError("incomplete desktop command output")
+                output.extend(data)
+        finally:
+            try:
+                response = getattr(stream, "_response", None)
+                if response is not None:
+                    response.close()
+            finally:
+                stream.close()
+                if transport is not stream:
+                    transport.close()
+        result = client.api.exec_inspect(execution["Id"])
+        return result["ExitCode"] if result["ExitCode"] is not None else -1, output.decode("utf-8", errors="replace")
+
+    def exec_in_container(
+        self,
+        context_name: str,
+        container_name_or_id: str,
+        cmd: list[str],
+        *,
+        max_output_bytes: int | None = None,
+        timeout_seconds: float = 3.0,
+    ) -> tuple[int, str]:
         def _do():
             try:
                 client = self._get_client(context_name)
@@ -1195,6 +1252,8 @@ class DockerHostManager:
                     command = [WORKSPACE_RUNTIME, "enter", generation, *cmd]
                 else:
                     command = cmd
+                if max_output_bytes is not None:
+                    return self._exec_bounded(client, container.id, command, max_output_bytes, timeout_seconds)
                 exit_code, output = container.exec_run(command)
                 if isinstance(output, bytes):
                     output = output.decode("utf-8", errors="replace")

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import threading
 import time
+import unicodedata
 
 from CTFd.models import db
 
+from .command_logs import JOURNAL_PATH, normalize_command_record
 from .models import LIFECYCLE_ACTIVE, DesktopContainerInfoModel, get_setting
 
 logger = logging.getLogger(__name__)
 
-WORKSPACE_LOG_PATH = "/var/lib/rd-workspace/commands.log"
-READ_BYTES = 16384
+READ_BYTES = 65536
 MAX_COMMANDS = 25
 MAX_COMMAND_CHARS = 160
 MAX_CONTEXT_CHARS = 8000
@@ -20,16 +22,51 @@ MAX_CONTEXT_CHARS = 8000
 _READ_SLOTS = threading.BoundedSemaphore(2)
 _host_manager = None
 
+_READ_TAIL = """import base64,os,stat,sys
+remaining = int(sys.argv[2])
+chunks = []
+seen = set()
+for path in (sys.argv[1], sys.argv[1] + '.1'):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            identity = (info.st_dev, info.st_ino)
+            if not stat.S_ISREG(info.st_mode) or identity in seen:
+                continue
+            seen.add(identity)
+            take = min(info.st_size, remaining)
+            start = info.st_size - take
+            stream.seek(max(0, start - 1))
+            data = stream.read(take + bool(start))
+            remaining -= take
+            if start:
+                data = data[1:] if data[:1] == b'\\n' else data.partition(b'\\n')[2]
+            chunks.insert(0, data[:data.rfind(b'\\n') + 1])
+    except (OSError, ValueError):
+        pass
+    if remaining <= 0:
+        break
+print(base64.b64encode(b''.join(chunks)).decode('ascii'))
+"""
+
 _HEADER = "## recent shell commands (newest last)"
 _REDACTED = "[redacted]"
 
-_NUMERIC_RE = re.compile(r"-?\d{1,15}")
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,16}\{[^}]{0,120}\}")
+_FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,32}\{[^{}\r\n]*\}")
 _BLOB_RE = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
-_PASSWORD_RE = re.compile(r"(?<![\w-])(-p|--pass|--password|sshpass)(\s+)(\S+)")
+_SHELL_WORD = r"""(?:[^\s"'\\]|\\.|"(?:\\.|[^"\\])*(?:"|$)|'[^']*(?:'|$))+"""
+_SECRET_RE = re.compile(
+    r"(?i)(?<![\w-])((?:--?(?:password|passwd|pass|token|api[-_]?key|secret|access[-_]?token)|-p)"
+    r"(?:\s*=\s*|\s+)|(?:[A-Za-z_][A-Za-z0-9_]{0,63}_)?"
+    r"(?:password|passwd|pwd|token|api[-_]?key|secret|access[-_]?token)\s*=\s*|sshpass\s+(?!-))" + _SHELL_WORD
+)
+_ATTACHED_PASSWORD_RE = re.compile(r"(?<![\w-])(-p)(?![\s=])" + _SHELL_WORD)
+_BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[^\s'\"]+")
+_URL_PASSWORD_RE = re.compile(r"(://[^\s/:@]+:)[^\s/@]+(@)")
+_FENCE_RE = re.compile(r"\[\s*/?\s*workspace context", re.IGNORECASE)
 
 
 def install(host_manager) -> None:
@@ -58,17 +95,19 @@ def context_available(user_id: int) -> bool:
 def _sanitize(value: str) -> str:
     value = _ANSI_OSC_RE.sub("", value)
     value = _ANSI_CSI_RE.sub("", value)
-    return _CONTROL_RE.sub("", value)[:MAX_COMMAND_CHARS]
+    value = "".join(char for char in value if unicodedata.category(char) not in {"Cc", "Cf", "Zl", "Zp"})
+    return _FENCE_RE.sub("(workspace context", value)
 
 
-def _redact(value: str) -> str:
-    value = _FLAG_RE.sub(_REDACTED, value)
-    value = _BLOB_RE.sub(_REDACTED, value)
-    return _PASSWORD_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", value)
-
-
-def _redact_cwd(value: str) -> str:
-    return _FLAG_RE.sub(_REDACTED, value)  # the blob rule would also hide long paths
+def _redact(value: str, *, cwd: bool = False) -> str:
+    value = _FLAG_RE.sub(_REDACTED, _sanitize(value))
+    value = _SECRET_RE.sub(lambda match: match[1] + _REDACTED, value)
+    value = _ATTACHED_PASSWORD_RE.sub(lambda match: match[1] + _REDACTED, value)
+    value = _BEARER_RE.sub(lambda match: match[1] + _REDACTED, value)
+    value = _URL_PASSWORD_RE.sub(lambda match: match[1] + _REDACTED + match[2], value)
+    if not cwd:
+        value = _BLOB_RE.sub(_REDACTED, value)
+    return value[:MAX_COMMAND_CHARS]
 
 
 def _age(seconds: float) -> str:
@@ -80,71 +119,69 @@ def _age(seconds: float) -> str:
     return f"{int(seconds // 3600)}h ago"
 
 
-def _parse(payload: str) -> list[tuple[int, int, str, str]]:
-    rows: list[tuple[int, int, str, str]] = []
-    lines = payload.split("\n")
-    if len(payload.encode("utf-8", "replace")) >= READ_BYTES:  # tail -c can start inside a record when the window fills
-        lines = lines[1:]
-    for line in lines:
-        fields = line.split("\t")
-        if len(fields) != 5:
+def _parse(payload: bytes) -> list[tuple[float, int, str, str]]:
+    rows = []
+    complete = payload[: payload.rfind(b"\n") + 1]
+    for line in complete.split(b"\n")[:-1]:
+        record = normalize_command_record(line)
+        if record is None:
             continue
-        if not all(_NUMERIC_RE.fullmatch(field) for field in fields[:3]):
-            continue
-        command = _redact(_sanitize(fields[4]))
-        if not command:
-            continue
-        rows.append((int(fields[0]), int(fields[1]), _redact_cwd(_sanitize(fields[3])), command))
+        command = _redact(record["command"])
+        if command:
+            rows.append((record["timestamp"], record["exit_code"], _redact(record["cwd"], cwd=True), command))
     return rows[-MAX_COMMANDS:]
 
 
-def _render(rows: list[tuple[int, int, str, str]], limit: int) -> str:
+def _render(rows: list[tuple[float, int, str, str]], limit: int) -> str:
     now = time.time()
-    lines = [_HEADER]
-    lines += [f"- {_age(now - epoch)}, exit {code}, {cwd}: {command}" for epoch, code, cwd, command in rows]
-    block = "\n".join(lines)
-    if len(block) <= limit:
-        return block
-    kept: list[str] = []
-    used = 0
-    for line in lines:
-        used += len(line) + (1 if kept else 0)
+    kept = []
+    used = len(_HEADER)
+    for epoch, code, cwd, command in reversed(rows):
+        line = f"- {_age(now - epoch)}, exit {code}, {cwd}: {command}"
+        used += len(line) + 1
         if used > limit:
             break
         kept.append(line)
-    return "\n".join(kept) + "\n[truncated]" if kept else ""
+    if not kept:
+        return ""
+    return "\n".join([_HEADER, *reversed(kept)])
+
+
+def _identity(row) -> tuple:
+    return row.user_id, row.session_uuid, row.docker_context, row.container_id
 
 
 def read_workspace_context(user_id: int, *, max_chars: int = 4000) -> str:
-    if not context_available(user_id):
-        return ""
-    if not _READ_SLOTS.acquire(blocking=False):
+    if not context_available(user_id) or not _READ_SLOTS.acquire(blocking=False):
         return ""
     try:
         host_manager = _host_manager
         row = _active_row(user_id)
         if row is None or host_manager is None:
             return ""
+        identity = _identity(row)
         context_name, container_id = row.docker_context, row.container_id
-        db.session.rollback()  # end the implicit transaction opened by the reads above
+        db.session.rollback()  # remote io must not hold a database transaction
         code, output = host_manager.exec_in_container(
             context_name,
             container_id,
-            [
-                "/bin/sh",
-                "-c",
-                f"[ -r {WORKSPACE_LOG_PATH} ] || exit 0; tail -c {READ_BYTES} {WORKSPACE_LOG_PATH} 2>/dev/null",
-            ],
+            ["python3", "-c", _READ_TAIL, JOURNAL_PATH, str(READ_BYTES)],
+            max_output_bytes=128 * 1024,
+            timeout_seconds=3.0,
         )
-        if code == -1:
+        if code != 0 or not isinstance(output, str) or len(output) > ((READ_BYTES + 2) // 3) * 4 + 1:
             return ""
-        if code != 0:
-            logger.warning("workspace context read on %s exited %s", context_name, code)
+        payload = base64.b64decode(output.strip(), validate=True)
+        if len(payload) > READ_BYTES:
             return ""
-        rows = _parse(output if isinstance(output, str) else "")
-        if not rows:
+        db.session.expire_all()  # session identity must come from the database after remote io
+        current = _active_row(user_id) if context_available(user_id) and host_manager is _host_manager else None
+        matches = current is not None and _identity(current) == identity
+        db.session.rollback()
+        if not matches:
             return ""
-        return _render(rows, min(max_chars, MAX_CONTEXT_CHARS))
+        rows = _parse(payload)
+        return _render(rows, min(max_chars, MAX_CONTEXT_CHARS)) if rows else ""
     except Exception:
         logger.warning("workspace context read failed", exc_info=True)
         return ""

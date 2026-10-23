@@ -1191,7 +1191,7 @@
 	function pauseContainer(userId) {
 		const container = activeContainers[userId];
 		const username = container ? container.username : `User ${userId}`;
-		if (!confirm(`Pause ${username}'s session? The container freezes and is held as evidence; the student cannot destroy it.`)) return;
+		if (!confirm(`Pause ${username}'s session? The container freezes and is held as evidence; the user cannot destroy it.`)) return;
 
 		const formData = new FormData();
 		formData.append('nonce', window.init.csrfNonce);

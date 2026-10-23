@@ -505,6 +505,6 @@ def load(app: Flask) -> None:
         except Exception:
             pass  # shutdown raises gevent.exceptions.BlockingSwitchOutError with no active greenlet
 
-    atexit.register(_safe_shutdown_scheduler)  # worker restarts must preserve student sessions
+    atexit.register(_safe_shutdown_scheduler)  # worker restarts must preserve user sessions
 
     logger.info("remote desktop plugin loaded (automatic scheduler contender)")

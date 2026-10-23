@@ -841,7 +841,6 @@ class ContainerManager:
 
             ssh_enabled = bool(self._get_setting("ssh_enabled"))
             web_terminal_enabled = bool(self._get_setting("web_terminal_enabled"))
-            workspace_context_enabled = bool(self._get_setting("workspace_context_enabled"))
 
             initial_duration = int(self._get_setting("initial_duration"))  # type: ignore[arg-type]
             extension_duration = int(self._get_setting("extension_duration"))  # type: ignore[arg-type]
@@ -856,7 +855,6 @@ class ContainerManager:
                 "CTFD_URL": container_url,
                 "ENABLE_SSH": "1" if ssh_enabled else "0",  # the image enables services when their flags are absent
                 "ENABLE_TTYD": "1" if web_terminal_enabled else "0",
-                "ENABLE_WORKSPACE_CONTEXT": "1" if workspace_context_enabled else "0",
             }
 
             if user is not None:
