@@ -406,7 +406,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                 user.id,
                 container_url,
                 extra_hosts,
-                client_ip=get_ip(),  # trusted proxies must determine the client ip
+                client_ip=get_ip(),
             )
         except HostsUnavailableException as err:
             return jsonify({"error": str(err)}), 503
@@ -1254,7 +1254,7 @@ def create_routes(container_manager: ContainerManager, orchestrator: Orchestrato
                     "pub_hostname": _esc(ctx.pub_hostname),
                     "weight": ctx.weight,
                     "enabled": ctx.enabled,
-                    "max_containers": ctx.max_containers,  # null derives capacity from ram and zero drains the host
+                    "max_containers": ctx.max_containers,  # null derives capacity from ram, zero drains the host
                     "active_sessions": int(ctx.active_sessions or 0),
                     "connected": ctx.context_name in connected,
                     "is_local": ctx.context_name == LOCAL_CONTEXT_NAME,

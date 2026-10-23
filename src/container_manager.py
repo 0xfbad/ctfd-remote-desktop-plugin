@@ -111,7 +111,7 @@ def _revoke_session_cookie(app: Flask, sid: str | None) -> bool:
     try:
         from CTFd.cache import cache
 
-        cache.delete(app.session_interface.key_prefix + sid)  # an absent cache key already counts as revoked
+        cache.delete(app.session_interface.key_prefix + sid)
         return True
     except Exception as exc:
         logger.warning("failed to revoke CTFd session sid: %s", exc)
@@ -248,9 +248,7 @@ class ContainerManager:
         state = getattr(row, "lifecycle_state", LIFECYCLE_ACTIVE)
         if isinstance(state, str):
             return state
-        return (
-            LIFECYCLE_HELD if ContainerManager._is_paused(row) else LIFECYCLE_ACTIVE
-        )  # unit models may expose a mock lifecycle state
+        return LIFECYCLE_HELD if ContainerManager._is_paused(row) else LIFECYCLE_ACTIVE  # test rows can lack state
 
     @staticmethod
     def _is_paused(row: DesktopContainerInfoModel) -> bool:
@@ -309,11 +307,12 @@ class ContainerManager:
 
     @staticmethod
     def _locked_active_row(user_id: int) -> DesktopContainerInfoModel | None:
+        """test doubles can omit table metadata and locked row fields"""
         query = DesktopContainerInfoModel.query.filter_by(user_id=user_id)
         if not isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str):
             return query.first()
         row = query.populate_existing().with_for_update().first()
-        if not isinstance(getattr(row, "user_id", None), int):  # unit doubles configure the direct query only
+        if not isinstance(getattr(row, "user_id", None), int):
             direct = query.first()
             if direct is None or isinstance(getattr(direct, "user_id", None), int):
                 row = direct
@@ -321,10 +320,11 @@ class ContainerManager:
 
     @staticmethod
     def _locked_operation(user_id: int, create: bool = False) -> DesktopSessionOperationModel | None:
+        """test doubles can omit queries and constructor field assignment"""
         try:
             query = DesktopSessionOperationModel.query.filter_by(user_id=user_id)
         except AttributeError:
-            return None  # unit models can omit query, production schema validation forbids this
+            return None
         if create and db.engine.dialect.name in ("mysql", "mariadb"):
             from sqlalchemy.dialects.mysql import insert as mysql_insert
 
@@ -363,7 +363,7 @@ class ContainerManager:
             created_at=now,
             updated_at=now,
         )
-        row.user_id = user_id  # unit model constructors do not assign these attributes
+        row.user_id = user_id
         row.operation_uuid = str(getattr(row, "operation_uuid", "") or uuid.uuid4())
         row.state = OP_IDLE
         row.created_at = now
@@ -394,10 +394,8 @@ class ContainerManager:
 
         session_uuid = str(uuid.uuid4())
         worker_uuid = str(uuid.uuid4())
-        if operation is None:
-            if hasattr(
-                DesktopSessionOperationModel, "query"
-            ):  # unit models can omit query, production schema validation forbids this
+        if operation is None:  # test models can omit durable operation storage
+            if hasattr(DesktopSessionOperationModel, "query"):
                 raise RuntimeError("failed to acquire durable desktop operation row")
             return session_uuid, worker_uuid
         now = time.time()
@@ -487,9 +485,7 @@ class ContainerManager:
         value = getattr(row, "session_uuid", None)
         if isinstance(value, str) and value:
             return value
-        container_id = str(
-            getattr(row, "container_id", "test-double")
-        )  # unit models can omit the uuid, production schema validation forbids this
+        container_id = str(getattr(row, "container_id", "test-double"))  # test rows can omit session_uuid
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ctfd-remote-desktop:{container_id}"))
 
     def _get_setting(self, key: str) -> SettingValue:
@@ -619,9 +615,7 @@ class ContainerManager:
     ) -> None:
         logger.info(f"[BACKGROUND] creating container for user {user_id}")
 
-        fenced = (
-            session_uuid is not None and worker_uuid is not None
-        )  # unit callers omit both tokens, create_container always supplies them in production
+        fenced = session_uuid is not None and worker_uuid is not None  # direct tests omit both tokens
         session_uuid = session_uuid or str(uuid.uuid4())
         worker_uuid = worker_uuid or str(uuid.uuid4())
 
@@ -795,7 +789,7 @@ class ContainerManager:
             raise RuntimeError("creation cancelled after host reservation")
 
         pub_hostname, check_hostname = self.host_manager.get_connection_hostnames(context_name)
-        display_hostname = _esc(context_name)  # escaped because the ui renders creation status messages as html
+        display_hostname = _esc(context_name)
 
         logger.info(f"selected context: {context_name} (public: {pub_hostname}) for user {user_id}")
         return context_name, pub_hostname, check_hostname, display_hostname
@@ -1246,7 +1240,7 @@ class ContainerManager:
     ) -> tuple[DesktopSessionOperationModel | None, DesktopContainerInfoModel | None]:
         db.session.rollback()
         operation = self._locked_operation(user_id, create=create)
-        current = (  # unit models cannot reload the locked row
+        current = (  # test models can reuse snapshots instead of locked queries
             self._locked_active_row(user_id)
             if isinstance(getattr(DesktopContainerInfoModel, "__tablename__", None), str)
             else snapshot_row
@@ -1515,9 +1509,7 @@ class ContainerManager:
             return {"success": False, "error": STOP_OUTCOME_UNKNOWN}
 
         if not cookie_revoked:
-            with self._get_destroy_lock(
-                user_id
-            ):  # keep the row because cookie_sid is the only handle for retrying revocation
+            with self._get_destroy_lock(user_id):
                 operation, current = self._reload_session_rows(user_id, row)
                 if not self._mark_cleanup_pending(
                     operation,
@@ -2349,8 +2341,8 @@ class ContainerManager:
                     DesktopSessionOperationModel.state.in_(CREATE_OPERATION_STATES)
                 ).all()
             }
-        except AttributeError:
-            creating_user_ids = set()  # unit models can omit query, production schema validation forbids this
+        except AttributeError:  # test models can omit operation queries
+            creating_user_ids = set()
 
         user_ids = sorted(active_user_ids | creating_user_ids)
         summary = {

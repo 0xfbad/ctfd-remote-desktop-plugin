@@ -224,7 +224,7 @@ def _make_bus_callback(orchestrator: Orchestrator) -> Callable[[dict], None]:
 def _seed_defaults() -> None:
     from .models import initialize_settings
 
-    initialize_settings()  # locks the revision row and fails startup on an unsafe stored profile
+    initialize_settings()
 
 
 def _seed_local_context() -> None:
@@ -350,7 +350,7 @@ def _reconcile_containers(
 
 
 def load(app: Flask) -> None:
-    _reject_gunicorn_preload()  # must run before any process local state is created
+    _reject_gunicorn_preload()  # reject preload before starting worker services
 
     _prepare_database(app)
 
@@ -505,6 +505,6 @@ def load(app: Flask) -> None:
         except Exception:
             pass  # shutdown raises gevent.exceptions.BlockingSwitchOutError with no active greenlet
 
-    atexit.register(_safe_shutdown_scheduler)  # a routine worker restart must preserve student sessions
+    atexit.register(_safe_shutdown_scheduler)  # worker restarts must preserve student sessions
 
     logger.info("remote desktop plugin loaded (automatic scheduler contender)")

@@ -16,10 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 def _esc_passthrough(val: Any) -> Any:
-    """models._esc coerces to str and returns empty for falsy, that difference is load bearing"""
     if isinstance(val, str):
         return str(_markup_escape(val))
-    return val
+    return val  # `models._esc` would change metadata types and falsy values
 
 
 def _esc_deep(obj: Any) -> Any:
@@ -57,7 +56,6 @@ _persistence_stats: dict[str, int] = {
 
 
 def _reset_after_fork() -> None:
-    """a lock held at fork time stays held in the child, replace every inherited one"""
     global _persist_queue, _persist_queue_lock, _drainer_stop, _drainer_app, _drainer_handle
     global _persistence_stats_lock, _persistence_stats
     _persist_queue = None
@@ -145,7 +143,6 @@ def _event_to_row(event: EventDict) -> dict[str, Any]:
         meta_json = json.dumps(metadata, default=str) if metadata else None
     except Exception:
         meta_json = None
-    # the source always writes a float, this narrows the value union for mypy
     ts = event.get("timestamp") or time.time()
     timestamp = float(ts) if isinstance(ts, (int, float, str)) else time.time()
     return {
@@ -166,8 +163,7 @@ def _enqueue_persist_row(row: dict[str, Any], *, retry: bool = False, queue: Any
         target_queue.put_nowait(row)
     except Exception:
         total = _increment_persistence_stat("dropped_overflow")
-        # first and power of two totals only, so sustained overload does not flood the log itself
-        if total == 1 or total & (total - 1) == 0:
+        if total == 1 or total & (total - 1) == 0:  # logarithmic reporting bounds overflow log volume
             logger.error("event persistence queue overflow; dropped rows total=%d", total)
         return False
     _increment_persistence_stat("retried" if retry else "enqueued")
@@ -253,7 +249,6 @@ class EventLogger:
         metadata: dict[str, int | float | str | bool | None] | None = None,
         user_flags: dict[str, bool] | None = None,
     ) -> EventDict:
-        """commits the audit row before returning, for callers about to destroy the evidence"""
         from CTFd.models import db
         from .models import DesktopEventLogModel
 
@@ -276,8 +271,7 @@ class EventLogger:
         return event
 
     def _deliver_local(self, event: EventDict, persist: bool = True) -> None:
-        # a bus delivered event was already persisted by the worker that originated it
-        if event.pop(_BUS_DELIVERY_MARKER, False):
+        if event.pop(_BUS_DELIVERY_MARKER, False):  # the originating worker already persisted this event
             persist = False
 
         with self.lock:
@@ -330,10 +324,11 @@ def _drain_batch(q: Any, max_batch: int = 100) -> list[dict[str, Any]]:
 
 
 def _row_for_insert(row: dict[str, Any]) -> dict[str, Any]:
-    """the retry counter is queue only, bulk_insert_mappings rejects keys without a column"""
     if _PERSIST_RETRY_FIELD not in row:
         return row
-    return {key: value for key, value in row.items() if key != _PERSIST_RETRY_FIELD}
+    return {
+        key: value for key, value in row.items() if key != _PERSIST_RETRY_FIELD
+    }  # queue metadata has no database column
 
 
 def _write_rows_individually(db: Any, model: Any, batch: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
@@ -362,7 +357,6 @@ def _write_rows_individually(db: Any, model: Any, batch: list[dict[str, Any]]) -
 
 
 def _write_persist_batch(app: Any, batch: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]] | None:
-    """returns rows written and rows still needing a retry, or None when the whole batch failed"""
     try:
         with app.app_context():
             from CTFd.models import db
@@ -375,7 +369,6 @@ def _write_persist_batch(app: Any, batch: list[dict[str, Any]]) -> tuple[int, li
                     db.session.commit()
                     return len(batch), []
                 except (IntegrityError, DataError):
-                    # one duplicate event_id or overlong field must not discard the rest of the batch
                     logger.warning("event log persistence batch rejected, retrying row by row", exc_info=True)
                     db.session.rollback()
                     return _write_rows_individually(db, DesktopEventLogModel, batch)
@@ -427,8 +420,7 @@ def _process_persist_batch(app: Any, q: Any, batch: list[dict[str, Any]]) -> boo
         batch = retry
 
     _increment_persistence_stat("write_failures")
-    # the unique event_id makes a retry after an ambiguous commit collide instead of duplicating
-    _requeue_failed_batch(q, batch)
+    _requeue_failed_batch(q, batch)  # unique event_id values prevent duplicate rows after ambiguous commits
     return False
 
 
@@ -439,7 +431,6 @@ def _retry_backoff(interval: float, failure_streak: int) -> float:
 
 
 def start_persistence_drainer(app: Any, interval: float = 1.0, batch_size: int = 100) -> Any:
-    """every serving worker must call this once, the queue it drains is process local"""
     global _drainer_stop, _drainer_app, _drainer_handle
     _drainer_stop = False
     _drainer_app = app
@@ -476,7 +467,6 @@ def start_persistence_drainer(app: Any, interval: float = 1.0, batch_size: int =
 
 
 def stop_persistence_drainer(deadline_seconds: float = 3.0, batch_size: int = 100) -> int:
-    """flushes the process local queue within the deadline, a hard kill still loses rows"""
     global _drainer_stop
     _drainer_stop = True
     deadline = time.monotonic() + max(float(deadline_seconds), 0.0)
@@ -513,7 +503,6 @@ def prune_event_log(retention_days: int) -> int:
         db.session.commit()
         return deleted
     finally:
-        # explicit remove so the scheduled job does not leak its connection
         db.session.remove()
 
 

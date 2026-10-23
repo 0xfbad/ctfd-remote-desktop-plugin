@@ -1,7 +1,3 @@
-"""recent shell commands from a live session, the only surface the ai tutor plugin touches.
-best effort and silent by contract, a missing capture snippet, a paused container, or a dead host degrades to an empty string.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,7 +18,6 @@ MAX_COMMAND_CHARS = 160
 MAX_CONTEXT_CHARS = 8000
 
 _READ_SLOTS = threading.BoundedSemaphore(2)
-# per gunicorn worker and set by install, preload is rejected so there is no shared parent state
 _host_manager = None
 
 _HEADER = "## recent shell commands (newest last)"
@@ -50,7 +45,6 @@ def _active_row(user_id: int) -> DesktopContainerInfoModel | None:
 
 
 def context_available(user_id: int) -> bool:
-    """no docker io, safe to call on every state poll"""
     try:
         if _host_manager is None or not bool(get_setting("workspace_context_enabled")):
             return False
@@ -74,8 +68,7 @@ def _redact(value: str) -> str:
 
 
 def _redact_cwd(value: str) -> str:
-    # only the flag shape, the blob rule would swallow any path deeper than 40 characters
-    return _FLAG_RE.sub(_REDACTED, value)
+    return _FLAG_RE.sub(_REDACTED, value)  # the blob rule would also hide long paths
 
 
 def _age(seconds: float) -> str:
@@ -90,8 +83,7 @@ def _age(seconds: float) -> str:
 def _parse(payload: str) -> list[tuple[int, int, str, str]]:
     rows: list[tuple[int, int, str, str]] = []
     lines = payload.split("\n")
-    # tail -c starts mid line only when the log outgrew the read window, a short log begins at a boundary
-    if len(payload.encode("utf-8", "replace")) >= READ_BYTES:
+    if len(payload.encode("utf-8", "replace")) >= READ_BYTES:  # tail -c can start inside a record when the window fills
         lines = lines[1:]
     for line in lines:
         fields = line.split("\t")
@@ -138,7 +130,6 @@ def read_workspace_context(user_id: int, *, max_chars: int = 4000) -> str:
         code, output = host_manager.exec_in_container(
             context_name,
             container_id,
-            # an absent log from an old image or disabled capture exits 0 so only a real read failure warns
             [
                 "/bin/sh",
                 "-c",
@@ -146,7 +137,6 @@ def read_workspace_context(user_id: int, *, max_chars: int = 4000) -> str:
             ],
         )
         if code == -1:
-            # container gone or transport fault, indistinguishable by design
             return ""
         if code != 0:
             logger.warning("workspace context read on %s exited %s", context_name, code)

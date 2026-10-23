@@ -1,0 +1,506 @@
+/*
+ * noVNC general input element CSS
+ * Copyright (C) 2025 The noVNC authors
+ * noVNC is licensed under the MPL 2.0 (see LICENSE.txt)
+ * This file is licensed under the 2-Clause BSD license (see LICENSE.txt).
+ */
+
+input,
+textarea,
+button,
+select,
+input::file-selector-button {
+    padding: 0.5em var(--input-xpadding);
+    border-radius: 6px;
+    appearance: none;
+    text-overflow: ellipsis;
+
+    font: inherit;
+    line-height: 1.6;
+}
+input:disabled,
+textarea:disabled,
+button:disabled,
+select:disabled,
+label[disabled] {
+    opacity: 0.4;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible::file-selector-button {
+    outline: 2px solid var(--novnc-lightblue);
+    outline-offset: 1px;
+}
+
+input:not([type]),
+input[type=date],
+input[type=datetime-local],
+input[type=email],
+input[type=month],
+input[type=number],
+input[type=password],
+input[type=search],
+input[type=tel],
+input[type=text],
+input[type=time],
+input[type=url],
+input[type=week],
+textarea {
+    border: 1px solid var(--novnc-lightgrey);
+
+    padding: calc(0.5em - 1px) var(--input-xpadding);
+}
+input:not([type]):focus-visible,
+input[type=date]:focus-visible,
+input[type=datetime-local]:focus-visible,
+input[type=email]:focus-visible,
+input[type=month]:focus-visible,
+input[type=number]:focus-visible,
+input[type=password]:focus-visible,
+input[type=search]:focus-visible,
+input[type=tel]:focus-visible,
+input[type=text]:focus-visible,
+input[type=time]:focus-visible,
+input[type=url]:focus-visible,
+input[type=week]:focus-visible,
+textarea:focus-visible {
+    outline-offset: -1px;
+}
+
+textarea {
+    margin: unset;
+
+    scrollbar-gutter: stable;
+
+    min-height: 1lh; /* border box sizing would require vertical padding and border compensation */
+    vertical-align: baseline;
+}
+
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { /* native number spinner controls cannot be styled consistently */
+
+    appearance: none;
+}
+input[type=number] {
+
+    appearance: textfield;
+}
+
+input, button, select, option,
+input::file-selector-button,
+.button-activations {
+    --button-activation-level: 0;
+
+    --button-activation-alpha: calc(0.08 * var(--button-activation-level)); /* css variables inherit values without recalculating their expressions */
+
+    --button-activation-overlay: /* browser support requires a gradient instead of an image function */
+        linear-gradient(rgba(0, 0, 0, var(--button-activation-alpha))
+        100%, transparent);
+    --button-activation-overlay-light:
+        linear-gradient(rgba(255, 255, 255, calc(0.23 * var(--button-activation-level)))
+        100%, transparent);
+}
+.button-activations {
+    background-image: var(--button-activation-overlay);
+
+    -webkit-tap-highlight-color: transparent;
+}
+
+.button-activations.light-overlay {
+    background-image: var(--button-activation-overlay-light);
+
+    background-blend-mode: overlay; /* normal blending washes out the activation colors */
+}
+
+input:hover, button:hover, select:hover, option:hover,
+input::file-selector-button:hover,
+.button-activations:hover {
+    --button-activation-level: 1;
+}
+
+@media (any-pointer: coarse) { /* touch hover styles would persist after a tap */
+    input:hover, button:hover, select:hover, option:hover,
+    input::file-selector-button:hover,
+    .button-activations:hover {
+        --button-activation-level: 0;
+    }
+}
+input:active, button:active, select:active, option:active,
+input::file-selector-button:active,
+.button-activations:active {
+    --button-activation-level: 2;
+}
+input:disabled, button:disabled, select:disabled, select:disabled option,
+input:disabled::file-selector-button,
+.button-activations:disabled {
+    --button-activation-level: 0;
+}
+
+input[type=button],
+input[type=color],
+input[type=image],
+input[type=reset],
+input[type=submit],
+input::file-selector-button,
+button,
+select {
+    min-width: 8em;
+    border: none;
+    color: black;
+    font-weight: bold;
+    background-color: var(--novnc-buttongrey);
+    background-image: var(--button-activation-overlay);
+    cursor: pointer;
+
+    -webkit-tap-highlight-color: transparent;
+}
+input[type=button]:disabled,
+input[type=color]:disabled,
+input[type=image]:disabled,
+input[type=reset]:disabled,
+input[type=submit]:disabled,
+input:disabled::file-selector-button,
+button:disabled,
+select:disabled {
+
+    cursor: default; /* firefox otherwise retains the disabled control cursor */
+}
+
+input[type=button],
+input[type=color],
+input[type=reset],
+input[type=submit] {
+
+    overflow: clip; /* clipping avoids text overflow rendering bugs in firefox and chromium */
+}
+
+input[type=color] {
+    min-width: unset;
+    box-sizing: content-box;
+    width: 1.4em;
+    height: 1.4em;
+}
+input[type=color]::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+input[type=color]::-webkit-color-swatch { /* browser specific swatch selectors cannot share a selector list */
+    border: none;
+    border-radius: 6px;
+}
+input[type=color]::-moz-color-swatch {
+    border: none;
+    border-radius: 6px;
+}
+
+input[type=radio],
+input[type=checkbox] {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    background-color: var(--novnc-buttongrey);
+    background-image: var(--button-activation-overlay);
+
+    -webkit-tap-highlight-color: transparent;
+    width: 16px;
+    --checkradio-height: 16px;
+    height: var(--checkradio-height);
+    padding: 0;
+    margin: 0 6px 0 0;
+
+    transition: all 0.2s, outline-color 0s, outline-offset 0s;
+
+    outline: 1px solid transparent; /* a transparent outline avoids webkit clipping */
+    position: relative;
+
+    vertical-align: calc(0px - (var(--checkradio-height) - 0.698em) / 2); /* the font capital height is needed to align controls with text */
+
+}
+input[type=radio]:focus-visible,
+input[type=checkbox]:focus-visible {
+    outline-color: var(--novnc-lightblue);
+}
+input[type=checkbox]::before,
+input[type=checkbox]:not(.toggle)::after,
+input[type=radio]::before,
+input[type=radio]::after {
+    content: "";
+    display: block;
+    transition: inherit;
+
+    position: absolute; /* absolute positioning keeps pseudo elements from changing the text baseline */
+}
+input[type=checkbox]:not(.toggle)::after,
+input[type=radio]::after {
+    width: 10px;
+    height: 2px;
+    background-color: transparent;
+    border-radius: 2px;
+}
+
+input[type=checkbox]:not(.toggle) {
+    border-radius: 4px;
+}
+input[type=checkbox]:not(.toggle):checked,
+input[type=checkbox]:not(.toggle):indeterminate {
+    background-color: var(--novnc-blue);
+    background-image: var(--button-activation-overlay-light);
+    background-blend-mode: overlay;
+}
+input[type=checkbox]:not(.toggle)::before {
+    width: 25%;
+    height: 55%;
+    border-style: solid;
+    border-color: transparent;
+    border-width: 0 2px 2px 0;
+    border-radius: 1px;
+    transform: translateY(-1px) rotate(35deg);
+}
+input[type=checkbox]:not(.toggle):checked::before {
+    border-color: white;
+}
+input[type=checkbox]:not(.toggle):indeterminate::after {
+    background-color: white;
+}
+
+input[type=radio] {
+    border-radius: 50%;
+    border: 1px solid transparent;
+}
+input[type=radio]:checked {
+    border: 4px solid var(--novnc-blue);
+    background-color: white;
+
+    background-image: none; /* the radio element must not add a second activation overlay */
+}
+input[type=radio]::before {
+    width: inherit;
+    height: inherit;
+    border-radius: inherit;
+
+    background-image: var(--button-activation-overlay-light);
+    mix-blend-mode: overlay;
+    opacity: 0;
+}
+input[type=radio]:checked::before {
+    opacity: 1;
+}
+input[type=radio]:indeterminate::after {
+    background-color: black;
+}
+
+input[type=checkbox].toggle {
+    display: inline-block;
+    --checkradio-height: 18px;
+    width: 31px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    border-radius: 9px;
+}
+input[type=checkbox].toggle:disabled {
+    cursor: default;
+}
+input[type=checkbox].toggle:indeterminate {
+    background-color: var(--novnc-buttongrey);
+    background-image: var(--button-activation-overlay);
+}
+input[type=checkbox].toggle:checked {
+    background-color: var(--novnc-blue);
+    background-image: var(--button-activation-overlay-light);
+    background-blend-mode: overlay;
+}
+input[type=checkbox].toggle::before {
+    --circle-diameter: 10px;
+    --circle-offset: 4px;
+    width: var(--circle-diameter);
+    height: var(--circle-diameter);
+    top: var(--circle-offset);
+    left: var(--circle-offset);
+    background: white;
+    border-radius: 6px;
+}
+input[type=checkbox].toggle:checked::before {
+    left: calc(100% - var(--circle-offset) - var(--circle-diameter));
+}
+input[type=checkbox].toggle:indeterminate::before {
+    left: calc(50% - var(--circle-diameter) / 2);
+}
+
+input[type=range] {
+    border: unset;
+    border-radius: 8px;
+    height: 15px;
+    padding: 0;
+    background: transparent;
+
+    overflow: hidden; /* the progress track can extend beyond the thumb at its maximum */
+}
+@supports selector(::-webkit-slider-thumb) {
+    input[type=range] {
+
+        width: 125px;
+
+        clip-path: path(' \
+         M 4.5 3 \
+         L 4.5 0 \
+         L 120.5 0 \
+         L 120.5 3 \
+         A 1 1 0 0 1 120.5 12 \
+         L 120.5 15 \
+         L 4.5 15 \
+         L 4.5 12 \
+         A 1 1 0 0 1 4.5 3 \
+        '); /* a separate clip preserves the narrower track corners */
+    }
+}
+input[type=range]:hover {
+    cursor: grab;
+}
+input[type=range]:active {
+    cursor: grabbing;
+}
+input[type=range]:disabled {
+    cursor: default;
+}
+input[type=range]:focus-visible {
+    clip-path: none;
+}
+
+input[type=range]::-webkit-slider-runnable-track { /* browser specific slider selectors cannot share a selector list */
+    background-color: var(--novnc-buttongrey);
+    height: 7px;
+    border-radius: 4px;
+    margin: 0 3px;
+}
+input[type=range]::-moz-range-track {
+    background-color: var(--novnc-buttongrey);
+    height: 7px;
+    border-radius: 4px;
+}
+input[type=range]::-moz-range-progress {
+    background-color: var(--novnc-blue);
+    height: 9px;
+
+    border-radius: 5px 0 0 5px; /* right corner rounding would start before the thumb */
+}
+input[type=range]::-webkit-slider-thumb {
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background-color: white;
+    background-image: var(--button-activation-overlay);
+
+    -webkit-tap-highlight-color: transparent;
+    border: 3px solid var(--novnc-blue);
+    margin-top: -4px;
+
+    box-shadow: calc(-100vw - 8px) 0 0 100vw var(--novnc-blue); /* webkit lacks a selector for the filled part of the track */
+    clip-path: path(' \
+     M -1000 3 \
+     L 3 3 \
+     L 15 7.5 \
+     A 1 1 0 0 1 0 7.5 \
+     A 1 1 0 0 1 15 7.5 \
+     L 3 12 \
+     L -1000 12 Z \
+    ');
+}
+input[type=range]::-moz-range-thumb {
+    appearance: none;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    box-sizing: border-box;
+    background-color: white;
+    background-image: var(--button-activation-overlay);
+    border: 3px solid var(--novnc-blue);
+    margin-top: -7px;
+}
+
+input[type=file] {
+    background-image: none;
+    border: none;
+}
+input::file-selector-button {
+    margin-right: 6px;
+}
+input[type=file]:focus-visible {
+    outline: none;
+}
+
+select {
+    --select-arrow: url('data:image/svg+xml;utf8, \
+        <svg width="11" height="6" version="1.1" viewBox="0 0 11 6" \
+             xmlns="http://www.w3.org/2000/svg"> \
+            <path d="m10.5.5-5 5-5-5" fill="none" \
+                  stroke="black" stroke-width="1.5" \
+                  stroke-linecap="round" stroke-linejoin="round"/> \
+        </svg>');
+
+    background-color: white; /* firefox exposes the select background around the dropdown options */
+
+    --grey-background: linear-gradient(var(--novnc-buttongrey) 100%,
+                                       transparent); /* the gradient keeps the closed control distinct from its dropdown */
+    background-image:
+        var(--select-arrow),
+        var(--button-activation-overlay),
+        var(--grey-background);
+    background-position: calc(100% - var(--input-xpadding)), left top, left top;
+    background-repeat: no-repeat;
+    padding-right: calc(2*var(--input-xpadding) + 11px);
+    overflow: auto;
+}
+
+select:active {
+
+    background-image: url('data:image/svg+xml;utf8, \
+        <svg width="11" height="6" version="1.1" viewBox="0 0 11 6" \
+             xmlns="http://www.w3.org/2000/svg" transform="rotate(180)"> \
+            <path d="m10.5.5-5 5-5-5" fill="none" \
+                  stroke="black" stroke-width="1.5" \
+                  stroke-linecap="round" stroke-linejoin="round"/> \
+        </svg>'),
+        var(--button-activation-overlay),
+        var(--grey-background);
+}
+select:disabled {
+    background-image:
+        var(--select-arrow),
+        var(--grey-background);
+}
+
+option {
+
+    background-color: white; /* chrome otherwise inherits the closed control background */
+    color: black;
+    font-weight: normal;
+    background-image: var(--button-activation-overlay);
+}
+option:checked {
+    background-color: var(--novnc-lightgrey);
+}
+
+select[size]:not([size="1"]), select[multiple] {
+    background-color: white;
+    background-image: unset;
+    border: 1px solid var(--novnc-lightgrey);
+    padding: 0;
+    font-weight: normal; /* webkit otherwise makes list options bold */
+
+    min-height: 39px; /* mobile browsers render multiple selects as a single line */
+}
+select[size]:not([size="1"]):focus-visible,
+select[multiple]:focus-visible {
+
+    outline-offset: -1px;
+}
+select[size]:not([size="1"]) option, select[multiple] option {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 4px var(--input-xpadding);
+}

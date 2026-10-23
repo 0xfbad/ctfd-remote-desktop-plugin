@@ -209,7 +209,7 @@ def _validate_endpoint(candidate: str, context_name: str) -> str | None:
 
 
 def _resolve_endpoint(context_name: str, hostname: str | None) -> str | None:
-    meta = _scan_context_meta(context_name)  # docker context directories use hashes rather than names
+    meta = _scan_context_meta(context_name)
     if meta:
         _name, endpoint = _metadata_name_and_endpoint(meta)
         if endpoint is not None:
@@ -548,9 +548,7 @@ class DockerHostManager:
         if cooling_down:
             raise HostsUnavailableException(HOST_UNREACHABLE)
         if not url:
-            raise HostsUnavailableException(
-                f"no client for context '{context_name}'"
-            )  # unavailable contexts must return 503 rather than 500
+            raise HostsUnavailableException(f"no client for context '{context_name}'")
         return self._connect_and_store(context_name, key, current_thread, url)
 
     def _transient_host_failure(self, context_name: str) -> HostsUnavailableException:
@@ -1052,7 +1050,7 @@ class DockerHostManager:
                     frac, tz_suffix = tail, ""
                 else:
                     frac, tz_suffix = tail[:tz_idx], tail[tz_idx:]
-                iso = f"{head}.{frac[:6]}{tz_suffix}"  # python datetime uses microsecond precision
+                iso = f"{head}.{frac[:6]}{tz_suffix}"
             return datetime.fromisoformat(iso).timestamp()
         except (ValueError, AttributeError):
             return 0.0

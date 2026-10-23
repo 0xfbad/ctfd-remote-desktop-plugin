@@ -17,12 +17,12 @@ from .settings import (
     validate_setting_value,
 )
 
-END_REASON_RECONCILIATION = "reconciliation"  # persisted reason values must stay compatible with stored history
+END_REASON_RECONCILIATION = "reconciliation"  # stored history depends on these reason values
 END_REASON_USER_DESTROYED = "user_destroyed"
 END_REASON_ADMIN_KILLED = "admin_killed"
 END_REASON_EXPIRED = "expired"
 
-LIFECYCLE_ACTIVE = "active"  # session rows stay authoritative until teardown is confirmed
+LIFECYCLE_ACTIVE = "active"
 LIFECYCLE_STOPPING = "stopping"
 LIFECYCLE_CLEANUP_PENDING = "cleanup_pending"
 LIFECYCLE_HELD = "held"
@@ -53,7 +53,7 @@ CREATE_OPERATION_STATES = frozenset(
     }
 )
 
-NOVNC_VERSION = "6598b25259c7969e"
+NOVNC_VERSION = "4d27ff33b3dbe7ee"
 VNC_VIEWER_QUERY = "autoconnect=true&resize=remote&reconnect=true&host="
 
 
@@ -108,11 +108,11 @@ class DesktopContainerInfoModel(db.Model):
     timer_duration = db.Column(db.Float(precision=53), default=0)
     extensions_used = db.Column(db.Integer, default=0)
     max_extensions = db.Column(db.Integer, default=3)
-    cookie_sid = db.Column(db.String(128), nullable=True)  # null leaves no autologin cache entry to revoke
+    cookie_sid = db.Column(db.String(128), nullable=True)
 
     paused_at = db.Column(db.Float(precision=53), nullable=True)  # paused layers survive cleanup as evidence
 
-    session_uuid = db.Column(db.String(36), nullable=False)  # exists before docker creation and survives teardown
+    session_uuid = db.Column(db.String(36), nullable=False)
     lifecycle_state = db.Column(
         db.String(32), nullable=False, default=LIFECYCLE_ACTIVE, server_default=LIFECYCLE_ACTIVE
     )
@@ -269,7 +269,7 @@ def _ensure_revision_row() -> None:
     try:
         db.session.commit()
     except IntegrityError:
-        db.session.rollback()  # another worker can win the initial seed race
+        db.session.rollback()
 
 
 def _decode_rows(rows) -> tuple[dict[str, SettingValue], dict[str, DesktopSettingsModel]]:

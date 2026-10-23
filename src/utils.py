@@ -125,7 +125,7 @@ def ratelimit_per_user(method="POST", limit=50, interval=300, key_prefix="rl_use
 
             user = get_current_user()
             if user is not None:
-                bucket = f"u{user.id}"  # shared egress must not merge authenticated quotas
+                bucket = f"u{user.id}"
             else:
                 bucket = f"ip{get_ip()}"
             key = f"ctfd-remote-desktop:{key_prefix}:{bucket}:{request.endpoint}:{limit}:{interval}"  # policy changes must not inherit old counters

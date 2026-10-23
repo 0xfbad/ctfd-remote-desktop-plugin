@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 CHANNEL = "ctfd_remote_desktop:events"
 _BUS_DELIVERY_MARKER = "_rd_bus_delivery"
 
-# preload is rejected at load so every worker imports this module itself, no fork repair needed
 WORKER_ID = f"{os.getpid()}-{secrets.token_hex(16)}"
 
 _app = None
@@ -53,8 +52,9 @@ def _get_publish_client():
         try:
             import redis
 
-            # short socket_timeout so a hung redis cannot park the request greenlet
-            client = redis.from_url(url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2)
+            client = redis.from_url(
+                url, decode_responses=True, socket_timeout=2, socket_connect_timeout=2
+            )  # bound request greenlet stalls
             client.ping()
             _pub_client = client
         except Exception:
@@ -70,8 +70,9 @@ def _new_subscribe_client():
     try:
         import redis
 
-        # no socket_timeout, pubsub.listen must block forever waiting for messages
-        client = redis.from_url(url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True)
+        client = redis.from_url(
+            url, decode_responses=True, socket_connect_timeout=2, socket_keepalive=True
+        )  # pubsub.listen must wait without a read timeout
         client.ping()
         return client
     except Exception:
@@ -116,8 +117,7 @@ def _deliver_bus_event(on_message: Callable[[dict], None], event: dict) -> bool:
     if event.get("_origin") == get_worker_id():
         return False
     event.pop("_origin", None)
-    # the callback takes one argument, so the marker is how the receiver learns not to persist
-    event[_BUS_DELIVERY_MARKER] = True
+    event[_BUS_DELIVERY_MARKER] = True  # the callback must skip a second database write
     on_message(event)
     return True
 
@@ -136,7 +136,7 @@ def _subscriber_loop(on_message: Callable[[dict], None]) -> None:
             pubsub = client.pubsub(ignore_subscribe_messages=True)
             pubsub.subscribe(CHANNEL)
             backoff = 1.0
-            assert _app is not None  # start_subscriber guarantees this
+            assert _app is not None
             with _app.app_context():
                 for msg in pubsub.listen():
                     if not msg or msg.get("type") != "message":

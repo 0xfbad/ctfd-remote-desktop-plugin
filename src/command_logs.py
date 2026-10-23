@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 JOURNAL_PATH = "/var/log/.session-init/data.jsonl"
 COLLECTOR_SOCKET_PATH = "/run/.session-init.sock"
+MAX_COMMAND_FIELD_BYTES = 65535  # mariadb text columns store at most 65535 bytes
 _READ_JOURNAL = """import base64,json,os,socket,stat,sys
 capture_available = False
 try:
@@ -55,6 +56,10 @@ except FileNotFoundError:
 
 
 def _tool(command: str) -> str:
+    word = command.partition(" ")[0]
+    if word and word.isascii() and word.isprintable() and not any(char in word for char in ("'", '"', "\\")):
+        return word.rsplit("/", 1)[-1]
+
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -95,6 +100,11 @@ def _parse(payload: bytes, offset: int) -> tuple[list[dict], int]:
             or not isinstance(cwd, str)
             or not isinstance(tty, str)
         ):
+            continue
+        try:
+            if any(len(value.encode("utf-8")) > MAX_COMMAND_FIELD_BYTES for value in (command, cwd, tty)):
+                continue
+        except UnicodeEncodeError:
             continue
         records.append(
             {

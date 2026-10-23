@@ -7,7 +7,6 @@ class RemoteDesktopException(Exception):
         return self.message
 
 
-# routes map this to 503, every other plugin error maps to 500
 class HostsUnavailableException(RemoteDesktopException):
     pass
 
