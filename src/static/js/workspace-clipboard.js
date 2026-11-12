@@ -136,7 +136,7 @@ export function desktopClipboard(UI) {
         field.select();
     }
 
-    function startCopy(rfb) {
+    function startCopy(rfb, explicit = true) {
         clearIntent();
         let resolve;
         let reject;
@@ -178,7 +178,7 @@ export function desktopClipboard(UI) {
             pendingCopy = null;
             clearTimeout(pending.timer);
 
-            if (!written)
+            if (!written && explicit)
                 fallback(value, rfb);
         }, () => {});
     }
@@ -190,11 +190,14 @@ export function desktopClipboard(UI) {
         preferGuestClipboard = true; // the desktop server filters primary selections
         const pending = pendingCopy;
 
-        if (!pending || pending.rfb !== this)
+        if (pending && pending.rfb === this) {
+            clearTimeout(pending.timer);
+            pending.resolve(event.detail.text);
             return;
+        }
 
-        clearTimeout(pending.timer);
-        pending.resolve(event.detail.text);
+        if (navigator.userActivation?.isActive) // stops guest clipboard changes from overwriting the host clipboard while the user is idle
+            void writeClipboard(event.detail.text, () => {});
     }
 
     function bind() {
@@ -263,6 +266,12 @@ export function desktopClipboard(UI) {
 
             pendingPaste = {rfb: UI.rfb, shift: event.shiftKey};
             event.stopImmediatePropagation(); // the browser must provide clipboard data before the guest paste chord
+            return;
+        }
+
+        if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey
+            && ['KeyC', 'KeyX', 'Insert'].includes(event.code)) {
+            startCopy(UI.rfb, false); // plain chords are guest shortcuts, so the key passes through and the host write is best effort
             return;
         }
 
