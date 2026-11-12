@@ -34,6 +34,7 @@
         transform: translateY(-100%);
         transition: transform 0.2s ease;
     }
+
     .navbar::before {
         content: '';
         position: absolute;
@@ -43,6 +44,7 @@
         width: 42px;
         height: 9px;
     }
+
     .navbar::after {
         content: '';
         position: absolute;
@@ -57,12 +59,15 @@
         pointer-events: none;
         transition: opacity 0.2s ease;
     }
+
     .navbar:hover {
         transform: translateY(0);
     }
+
     .navbar:hover::after {
         opacity: 0;
     }
+
     {% endif %}
 
 
@@ -211,9 +216,17 @@
     }
 
     .no-session-screen::before,
-    .no-session-screen::after { content: ""; }
-    .no-session-screen::before { margin-top: auto; /* fixed centering would hide the top of overflowing content */ }
-    .no-session-screen::after { margin-bottom: auto; }
+    .no-session-screen::after {
+        content: "";
+    }
+
+    .no-session-screen::before {
+        margin-top: auto; /* fixed centering would hide the top of overflowing content */
+    }
+
+    .no-session-screen::after {
+        margin-bottom: auto;
+    }
 
     .start-session-btn {
         padding: 12px 28px;
@@ -467,7 +480,13 @@
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-info-circle" style="color: #6c757d; margin-right: 6px;"></i>This is an ephemeral environment, nothing is saved between sessions.</p>
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-shield-alt" style="color: #6c757d; margin-right: 6px;"></i>Avoid logging into anything sensitive.</p>
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-redo" style="color: #6c757d; margin-right: 6px;"></i>If something breaks, just stop and start a new session.</p>
-                {% set modes = ['Desktop'] %}{% if web_terminal_enabled %}{% set modes = modes + ['Terminal'] %}{% endif %}{% if ssh_enabled %}{% set modes = modes + ['SSH'] %}{% endif %}
+                {% set modes = ['Desktop'] %}
+                {% if web_terminal_enabled %}
+                {% set modes = modes + ['Terminal'] %}
+                {% endif %}
+                {% if ssh_enabled %}
+                {% set modes = modes + ['SSH'] %}
+                {% endif %}
                 <p style="margin: 0 0 8px 0;"><i class="fas fa-desktop" style="color: #6c757d; margin-right: 6px;"></i>{{ modes | join(', ') }} mode{{ 's' if modes|length > 1 }} available from the bottom bar once your session starts.</p>
                 <p style="margin: 0; color: #e06070;"><i class="fas fa-clock" style="color: #e06070; margin-right: 6px;"></i>Sessions expire after a set time to save resources and keep your environment fresh.</p>
             </div>
@@ -496,9 +515,13 @@ let terminalLoaded = false;
 
 function showStatusMessage(message, timeout = 3000) {
     const statusDiv = document.getElementById('status-message');
-    if (!statusDiv) return;
+
+    if (!statusDiv)
+        return;
+
     statusDiv.textContent = message;
     statusDiv.classList.remove('hidden');
+
     if (timeout > 0) {
         setTimeout(() => { statusDiv.classList.add('hidden'); }, timeout);
     }
@@ -509,7 +532,10 @@ function showSessionError(detail) {
     const msgEl = document.getElementById('session-error-msg');
     const metaEl = document.getElementById('session-error-meta');
     const detailEl = document.getElementById('session-error-detail');
-    if (!el) return;
+
+    if (!el)
+        return;
+
     msgEl.textContent = {{ server_error_message | tojson }};
     const d = new Date();
     const ts = d.toLocaleString('en-US', {month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true});
@@ -521,7 +547,9 @@ function showSessionError(detail) {
 
 function hideSessionError() {
     const el = document.getElementById('session-error');
-    if (el) el.style.display = 'none';
+
+    if (el)
+        el.style.display = 'none';
 }
 
 function formatTime(seconds) {
@@ -532,6 +560,7 @@ function formatTime(seconds) {
 
 function updateTimerDisplay() {
     const display = document.getElementById('timer-display');
+
     if (display) {
         display.textContent = formatTime(timeRemaining);
         display.classList.toggle('expired', timeRemaining <= 0);
@@ -540,11 +569,15 @@ function updateTimerDisplay() {
 
 function updateAddTimeButton(showCount) {
     const addTimeBtn = document.getElementById('add-time-btn');
-    if (!addTimeBtn || addTimeBtn.querySelector('.loading-spinner')) return;
+
+    if (!addTimeBtn || addTimeBtn.querySelector('.loading-spinner'))
+        return;
+
     const hasActiveSession = document.getElementById('vnc-frame') !== null;
     const maxed = continuationsUsed >= maxContinuations;
     addTimeBtn.disabled = !hasActiveSession || maxed;
     addTimeBtn.setAttribute('data-tip', maxed ? `All ${maxContinuations} extensions used` : 'Add more time to your session');
+
     if (showCount) {
         addTimeBtn.innerHTML = `<i class="fas fa-check"></i> ${continuationsUsed}/${maxContinuations} used`;
         setTimeout(() => {
@@ -568,8 +601,12 @@ function cancelPoll(state) {
     state.active = false;
     const pending = state.pending;
     state.pending = null;
-    if (pending) pending.abort();
-    if (state !== creationPoll) return;
+
+    if (pending)
+        pending.abort();
+    if (state !== creationPoll)
+        return;
+
     clearInterval(pollInterval);
     clearTimeout(pollDeadline);
     clearTimeout(readyReloadTimer);
@@ -583,22 +620,33 @@ function cancelPolling() {
 
 function redirectToLogin(response) {
     const login = new URL((window.init.urlRoot || '') + '/login', window.location.origin);
-    if (login.origin !== window.location.origin) return false;
+
+    if (login.origin !== window.location.origin)
+        return false;
+
     if (response.redirected) {
         const destination = new URL(response.url, window.location.origin);
-        if (destination.origin !== login.origin || destination.pathname !== login.pathname) return false;
-    } else if (response.status !== 401 && response.status !== 403) return false;
+
+        if (destination.origin !== login.origin || destination.pathname !== login.pathname)
+            return false;
+    } else if (response.status !== 401 && response.status !== 403)
+        return false;
 
     cancelPolling();
     allowNavigation();
-    if (window.location.pathname === login.pathname) return true;
+
+    if (window.location.pathname === login.pathname)
+        return true;
+
     login.searchParams.set('next', window.location.pathname + window.location.search);
     window.location.assign(login.href);
     return true;
 }
 
 function pollRequest(state, path, accept) {
-    if (!state.active || state.pending) return;
+    if (!state.active || state.pending)
+        return;
+
     const generation = state.generation;
     const controller = new AbortController();
     state.pending = controller;
@@ -610,16 +658,25 @@ function pollRequest(state, path, accept) {
         signal: controller.signal
     }))
     .then(response => {
-        if (generation !== state.generation || !state.active || state.pending !== controller || controller.signal.aborted) return;
-        if (redirectToLogin(response)) return;
-        if (!response.ok) throw new Error('status request failed');
+        if (generation !== state.generation || !state.active || state.pending !== controller || controller.signal.aborted)
+            return;
+
+        if (redirectToLogin(response))
+            return;
+
+        if (!response.ok)
+            throw new Error('status request failed');
+
         return response.json();
     })
     .then(data => {
-        if (generation !== state.generation || !state.active || state.pending !== controller || controller.signal.aborted) return;
+        if (generation !== state.generation || !state.active || state.pending !== controller || controller.signal.aborted)
+            return;
+
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
             throw new Error('invalid status response');
         }
+
         accept(data, generation);
     })
     .catch(error => {
@@ -629,7 +686,9 @@ function pollRequest(state, path, accept) {
     })
     .finally(() => {
         clearTimeout(responseDeadline);
-        if (state.pending === controller) state.pending = null;
+
+        if (state.pending === controller)
+            state.pending = null;
     });
 }
 
@@ -649,21 +708,28 @@ function validSession(session) {
 function resetStartButton() {
     retryUntil = 0;
     const button = document.getElementById('start-btn');
-    if (!button) return;
+
+    if (!button)
+        return;
+
     button.disabled = false;
     button.innerHTML = '<i class="fas fa-play"></i> Start Remote Desktop';
 }
 
 function scheduleStartCooldown() {
     const remaining = retryUntil - Date.now();
+
     if (remaining <= 0) {
         resetStartButton();
         return;
     }
+
     const generation = creationPoll.generation;
     pollDeadline = setTimeout(() => {
         pollDeadline = null;
-        if (generation === creationPoll.generation) resetStartButton();
+
+        if (generation === creationPoll.generation)
+            resetStartButton();
     }, remaining);
 }
 
@@ -671,7 +737,9 @@ function scheduleCreationWatchdog() {
     clearTimeout(pollDeadline);
     const generation = creationPoll.generation;
     pollDeadline = setTimeout(() => {
-        if (generation !== creationPoll.generation) return;
+        if (generation !== creationPoll.generation)
+            return;
+
         cancelPoll(creationPoll);
         resetStartButton();
         showSessionError('Readiness could not be confirmed. Refresh to check whether your desktop is ready.');
@@ -679,39 +747,53 @@ function scheduleCreationWatchdog() {
 }
 
 function creationMessage(data) {
-    if (typeof data.message === 'string' && data.message) return data.message;
+    if (typeof data.message === 'string' && data.message)
+        return data.message;
+
     return ['cancel_requested', 'cleanup_pending'].includes(data.status) ? 'Cleaning up...' : 'Creating container...';
 }
 
 function checkStatus() {
     pollRequest(creationPoll, '/remote-desktop/api/creation-status', (data, generation) => {
         const button = document.getElementById('start-btn');
+
         if (['message', 'error', 'hostname'].some(key => Object.hasOwn(data, key) && typeof data[key] !== 'string')) {
             throw new Error('invalid creation response');
         }
+
         if (data.status === 'ready') {
-            if (!validSession(data.session)) throw new Error('invalid ready session');
+            if (!validSession(data.session))
+                throw new Error('invalid ready session');
+
             creationPoll.active = false;
             clearInterval(pollInterval);
             clearTimeout(pollDeadline);
             pollInterval = pollDeadline = null;
-            if (button) button.innerHTML = '<span class="loading-spinner"></span> Loading...';
+
+            if (button)
+                button.innerHTML = '<span class="loading-spinner"></span> Loading...';
             readyReloadTimer = setTimeout(() => {
                 readyReloadTimer = null;
-                if (generation === creationPoll.generation) reloadPage();
+
+                if (generation === creationPoll.generation)
+                    reloadPage();
             }, 1000);
             return;
         }
+
         if (data.status === 'failed' || data.status === 'cancelled') {
             cancelPoll(creationPoll);
             resetStartButton();
             showSessionError(typeof data.error === 'string' ? data.error : data.message);
             return;
         }
+
         if (!['none', 'queued', 'selecting', 'reserved', 'creating', 'waiting_ready', 'cancel_requested', 'cleanup_pending', 'selecting_host', 'starting_container', 'waiting_vnc'].includes(data.status)) {
             throw new Error('invalid creation status');
         }
-        if (data.status !== 'none') scheduleCreationWatchdog();
+
+        if (data.status !== 'none')
+            scheduleCreationWatchdog();
         if (button) {
             button.innerHTML = '<span class="loading-spinner"></span> ';
             button.append(document.createTextNode(creationMessage(data)));
@@ -729,35 +811,53 @@ function pollCreationStatus() {
 
 function syncWithServer() {
     pollRequest(sessionPoll, '/remote-desktop/api/status', data => {
-        if (!Object.hasOwn(data, 'session')) throw new Error('session field missing');
+        if (!Object.hasOwn(data, 'session'))
+            throw new Error('session field missing');
+
         if (data.session === null) {
-            if (!document.getElementById('vnc-frame')) return;
+            if (!document.getElementById('vnc-frame'))
+                return;
+
             cancelPoll(sessionPoll);
             clearInterval(sessionTimer);
             sessionTimer = null;
             reloadPage();
             return;
         }
-        if (!validSession(data.session)) throw new Error('invalid session');
+
+        if (!validSession(data.session))
+            throw new Error('invalid session');
+
         const timer = data.session.timer;
-        if (timer === null) return;
+
+        if (timer === null)
+            return;
+
         timeRemaining = timer.time_remaining;
         continuationsUsed = timer.extensions_used;
         maxContinuations = timer.max_extensions;
-        if (timeRemaining > 300) expirationWarningShown = false;
+
+        if (timeRemaining > 300)
+            expirationWarningShown = false;
         updateTimerDisplay();
         updateAddTimeButton();
+
         if (!sessionTimer && timer.active && timeRemaining > 0) {
             sessionTimer = setInterval(updateCountdown, 1000);
         }
         const stopButton = document.getElementById('stop-btn');
-        if (stopButton) stopButton.disabled = false;
+
+        if (stopButton)
+            stopButton.disabled = false;
     });
 }
 
 function startSession() {
     const startBtn = document.getElementById('start-btn');
-    if (!startBtn || startBtn.disabled) return;
+
+    if (!startBtn || startBtn.disabled)
+        return;
+
     cancelPolling();
     creationPoll.active = true;
     const generation = creationPoll.generation;
@@ -778,7 +878,9 @@ function startSession() {
         signal: controller.signal
     })
     .then(response => response.json().catch(error => {
-        if (response.status === 403 || response.status === 429) return null;
+        if (response.status === 403 || response.status === 429)
+            return null;
+
         throw error;
     }).then(data => ({
         ok: response.ok,
@@ -787,8 +889,11 @@ function startSession() {
         data
     })))
     .then(({ok, status, retryAfter, data}) => {
-        if (generation !== creationPoll.generation || creationPoll.pending !== controller) return;
+        if (generation !== creationPoll.generation || creationPoll.pending !== controller)
+            return;
+
         clearTimeout(responseDeadline);
+
         if (status === 429) {
             creationPoll.active = false;
             const delay = Math.max(1, Math.ceil(Number(retryAfter) || 1));
@@ -799,13 +904,16 @@ function startSession() {
             scheduleStartCooldown();
             return;
         }
+
         if (status === 403) {
             creationPoll.active = false;
             resetStartButton();
             showSessionError(data && (data.error || data.message) || 'Start request was denied.');
             return;
         }
-        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid create response');
+
+        if (!data || typeof data !== 'object' || Array.isArray(data))
+            throw new Error('invalid create response');
 
         if (ok && data.status === 'creating') {
             hideSessionError();
@@ -825,22 +933,30 @@ function startSession() {
         }
     })
     .catch(error => {
-        if (generation !== creationPoll.generation || creationPoll.pending !== controller) return;
-        if (error.name !== 'AbortError') console.error('Create session error:', error);
+        if (generation !== creationPoll.generation || creationPoll.pending !== controller)
+            return;
+
+        if (error.name !== 'AbortError')
+            console.error('Create session error:', error);
         hideSessionError();
         pollCreationStatus();
     })
     .finally(() => {
         clearTimeout(responseDeadline);
-        if (creationPoll.pending === controller) creationPoll.pending = null;
+
+        if (creationPoll.pending === controller)
+            creationPoll.pending = null;
     });
 }
 
 function stopSession() {
-    if (!confirm('Are you sure you want to stop your session?')) return;
+    if (!confirm('Are you sure you want to stop your session?'))
+        return;
+
     cancelPolling();
 
     const stopBtn = document.getElementById('stop-btn');
+
     if (stopBtn) {
         stopBtn.disabled = true;
         stopBtn.innerHTML = '<span class="loading-spinner"></span> Stopping...';
@@ -862,7 +978,10 @@ function stopSession() {
 
 function addTime() {
     const addTimeBtn = document.getElementById('add-time-btn');
-    if (!addTimeBtn || addTimeBtn.disabled) return;
+
+    if (!addTimeBtn || addTimeBtn.disabled)
+        return;
+
     addTimeBtn.disabled = true;
     addTimeBtn.innerHTML = '<span class="loading-spinner"></span> Adding...';
 
@@ -878,11 +997,13 @@ function addTime() {
     .then(response => response.json().then(data => ({ok: response.ok, data})))
     .then(({ok, data}) => {
         addTimeBtn.innerHTML = '<i class="fas fa-plus"></i> Extend';
+
         if (!ok || !data.timer) {
             showStatusMessage(data.error || data.message || 'Could not extend the session.', 4000);
             updateAddTimeButton();
             return;
         }
+
         timeRemaining = data.timer.time_remaining;
         continuationsUsed = data.timer.extensions_used;
         maxContinuations = data.timer.max_extensions;
@@ -925,12 +1046,16 @@ function switchMode(mode, tabEl) {
     const terminalFrame = document.getElementById('terminal-frame');
     const sshPanel = document.getElementById('ssh-panel');
 
-    if (vncFrame) vncFrame.classList.add('hidden');
-    if (terminalFrame) terminalFrame.classList.add('hidden');
-    if (sshPanel) sshPanel.classList.add('hidden');
+    if (vncFrame)
+        vncFrame.classList.add('hidden');
+    if (terminalFrame)
+        terminalFrame.classList.add('hidden');
+    if (sshPanel)
+        sshPanel.classList.add('hidden');
 
     if (mode === 'desktop') {
-        if (vncFrame) vncFrame.classList.remove('hidden');
+        if (vncFrame)
+            vncFrame.classList.remove('hidden');
     } else if (mode === 'terminal') {
         if (terminalFrame) {
             if (!terminalLoaded && terminalUrl) {
@@ -940,7 +1065,8 @@ function switchMode(mode, tabEl) {
             terminalFrame.classList.remove('hidden');
         }
     } else if (mode === 'ssh') {
-        if (sshPanel) sshPanel.classList.remove('hidden');
+        if (sshPanel)
+            sshPanel.classList.remove('hidden');
     }
 }
 
@@ -951,9 +1077,13 @@ function setFullscreen(on) {
     const btn = document.getElementById('fullscreen-btn');
     const container = document.getElementById('workspace-container');
     const navbar = document.querySelector('.navbar');
-    if (container) container.classList.toggle('fullscreen', on);
-    if (navbar) navbar.style.display = on ? 'none' : '';
-    if (btn) btn.innerHTML = on
+
+    if (container)
+        container.classList.toggle('fullscreen', on);
+    if (navbar)
+        navbar.style.display = on ? 'none' : '';
+    if (btn)
+        btn.innerHTML = on
         ? '<i class="fas fa-compress"></i>'
         : '<i class="fas fa-expand"></i>';
 }
@@ -967,7 +1097,8 @@ function toggleFullscreen() {
 }
 
 document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement) setFullscreen(false);
+    if (!document.fullscreenElement)
+        setFullscreen(false);
 });
 
 const _tooltipEl = document.createElement('div');
@@ -979,7 +1110,9 @@ let _tooltipSticky = false;
 let _tooltipStickyTimer = null;
 
 function _positionTooltip() {
-    if (!_tooltipTarget) return;
+    if (!_tooltipTarget)
+        return;
+
     const rect = _tooltipTarget.getBoundingClientRect();
     const tipRect = _tooltipEl.getBoundingClientRect();
     const margin = 8;
@@ -988,7 +1121,9 @@ function _positionTooltip() {
     left = Math.max(margin, Math.min(left, window.innerWidth - tipRect.width - margin));
 
     let top = rect.top - tipRect.height - 6;
-    if (top < margin) top = rect.bottom + 6;
+
+    if (top < margin)
+        top = rect.bottom + 6;
 
     _tooltipEl.style.left = `${Math.round(left)}px`;
     _tooltipEl.style.top = `${Math.round(top)}px`;
@@ -996,7 +1131,10 @@ function _positionTooltip() {
 
 function _showTooltip(target) {
     const text = target.getAttribute('data-tip');
-    if (!text) return;
+
+    if (!text)
+        return;
+
     _tooltipTarget = target;
     _tooltipEl.textContent = text;
     _tooltipEl.style.display = 'block';
@@ -1004,14 +1142,19 @@ function _showTooltip(target) {
 }
 
 function _hideTooltip() {
-    if (_tooltipSticky) return;
+    if (_tooltipSticky)
+        return;
+
     _tooltipTarget = null;
     _tooltipEl.style.display = 'none';
 }
 
 function showStickyTooltip(target, text, duration) {
-    if (!target) return;
-    if (_tooltipStickyTimer) clearTimeout(_tooltipStickyTimer);
+    if (!target)
+        return;
+
+    if (_tooltipStickyTimer)
+        clearTimeout(_tooltipStickyTimer);
     _tooltipSticky = true;
     _tooltipTarget = target;
     _tooltipEl.textContent = text;
@@ -1026,16 +1169,27 @@ function showStickyTooltip(target, text, duration) {
 }
 
 document.addEventListener('mouseover', function(e) {
-    if (_tooltipSticky) return;
+    if (_tooltipSticky)
+        return;
+
     const target = e.target.closest('[data-tip]');
-    if (target && target !== _tooltipTarget) _showTooltip(target);
+
+    if (target && target !== _tooltipTarget)
+        _showTooltip(target);
 });
 
 document.addEventListener('mouseout', function(e) {
-    if (_tooltipSticky) return;
-    if (!_tooltipTarget) return;
+    if (_tooltipSticky)
+        return;
+
+    if (!_tooltipTarget)
+        return;
+
     const related = e.relatedTarget;
-    if (related && _tooltipTarget.contains(related)) return;
+
+    if (related && _tooltipTarget.contains(related))
+        return;
+
     _hideTooltip();
 });
 
@@ -1062,11 +1216,15 @@ const REPORT_PLACEHOLDER =
 function syncSendButton() {
     const textarea = document.getElementById('report-textarea');
     const sendBtn = document.getElementById('report-send-btn');
-    if (!textarea || !sendBtn) return;
+
+    if (!textarea || !sendBtn)
+        return;
+
     const empty = textarea.value.trim().length === 0;
     sendBtn.disabled = reportSending || empty || reportShowingThanks;
 
-    if (reportSending) return;
+    if (reportSending)
+        return;
 
     if (reportShowingThanks) {
         sendBtn.textContent = 'Thanks for your feedback!';
@@ -1075,6 +1233,7 @@ function syncSendButton() {
     }
 
     sendBtn.textContent = 'Send';
+
     if (empty) {
         sendBtn.setAttribute('data-tip', 'Type something to send');
     } else {
@@ -1090,7 +1249,10 @@ function isReportOpen() {
 function openReportPopover() {
     const popover = document.getElementById('report-popover');
     const textarea = document.getElementById('report-textarea');
-    if (!popover || !textarea) return;
+
+    if (!popover || !textarea)
+        return;
+
     popover.classList.add('open');
     textarea.value = reportText;
     syncSendButton();
@@ -1099,12 +1261,16 @@ function openReportPopover() {
 
 function closeReportPopover() {
     const popover = document.getElementById('report-popover');
-    if (!popover) return;
+
+    if (!popover)
+        return;
+
     popover.classList.remove('open');
 }
 
 function toggleReportPopover(e) {
-    if (e) e.stopPropagation();
+    if (e)
+        e.stopPropagation();
     if (isReportOpen()) {
         closeReportPopover();
     } else {
@@ -1114,9 +1280,14 @@ function toggleReportPopover(e) {
 
 function onReportInput() {
     const textarea = document.getElementById('report-textarea');
-    if (!textarea) return;
+
+    if (!textarea)
+        return;
+
     reportText = textarea.value;
-    if (reportShowingThanks) reportShowingThanks = false;
+
+    if (reportShowingThanks)
+        reportShowingThanks = false;
     syncSendButton();
 }
 
@@ -1124,9 +1295,14 @@ function sendReport() {
     const textarea = document.getElementById('report-textarea');
     const sendBtn = document.getElementById('report-send-btn');
     const reportBtn = document.getElementById('report-btn');
-    if (!textarea || !sendBtn) return;
+
+    if (!textarea || !sendBtn)
+        return;
+
     const content = textarea.value.trim();
-    if (!content) return;
+
+    if (!content)
+        return;
 
     reportSending = true;
     sendBtn.disabled = true;
@@ -1146,6 +1322,7 @@ function sendReport() {
     .then(response => response.json().then(data => ({ok: response.ok, data})))
     .then(({ok, data}) => {
         reportSending = false;
+
         if (ok && data.success) {
             reportText = '';
             textarea.value = '';
@@ -1167,24 +1344,35 @@ function sendReport() {
 }
 
 document.addEventListener('click', function(e) {
-    if (!isReportOpen()) return;
+    if (!isReportOpen())
+        return;
+
     const wrap = document.querySelector('.report-wrap');
-    if (wrap && !wrap.contains(e.target)) closeReportPopover();
+
+    if (wrap && !wrap.contains(e.target))
+        closeReportPopover();
 });
 
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && isReportOpen()) closeReportPopover();
+    if (e.key === 'Escape' && isReportOpen())
+        closeReportPopover();
 });
 
 function copyField(elementId, btn) {
     const el = document.getElementById(elementId);
-    if (!el || btn.disabled) return;
+
+    if (!el || btn.disabled)
+        return;
+
     const panel = document.getElementById('ssh-panel');
     const status = document.getElementById(elementId + '-copy-status');
     const text = el.value;
     btn.disabled = true;
-    if (panel) panel.copyField = el;
-    if (btn._copyResetTimer) clearTimeout(btn._copyResetTimer);
+
+    if (panel)
+        panel.copyField = el;
+    if (btn._copyResetTimer)
+        clearTimeout(btn._copyResetTimer);
     btn.innerHTML = '<i class="fas fa-copy"></i>';
     btn.title = 'Copy';
     status.hidden = true;
@@ -1200,13 +1388,19 @@ function copyField(elementId, btn) {
     }
 
     function copied() {
+        document.dispatchEvent(new Event('workspace-clipboard-change'));
         btn.disabled = false;
-        if (!currentCopy()) return;
+
+        if (!currentCopy())
+            return;
+
         btn.innerHTML = '<i class="fas fa-check"></i>';
         btn.title = 'Copied';
         status.hidden = true;
         btn._copyResetTimer = setTimeout(() => {
-            if (!current()) return;
+            if (!current())
+                return;
+
             btn.innerHTML = '<i class="fas fa-copy"></i>';
             btn.title = 'Copy';
         }, 1500);
@@ -1217,6 +1411,7 @@ function copyField(elementId, btn) {
             btn.disabled = false;
             return;
         }
+
         let success = false;
         try {
             el.focus();
@@ -1225,10 +1420,12 @@ function copyField(elementId, btn) {
         } catch (error) {}
 
         btn.disabled = false;
+
         if (success) {
             copied();
             return;
         }
+
         status.textContent = 'Press Ctrl+C to copy';
         status.hidden = false;
     }
@@ -1236,7 +1433,8 @@ function copyField(elementId, btn) {
     try {
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
             Promise.resolve(navigator.clipboard.writeText(text)).then(copied, fallback);
-        } else fallback();
+        } else
+            fallback();
     } catch (error) { fallback(); }
 }
 
@@ -1268,8 +1466,11 @@ window.addEventListener('pagehide', () => {
 });
 
 window.addEventListener('pageshow', event => {
-    if (!event.persisted) return;
+    if (!event.persisted)
+        return;
+
     sessionPoll.active = true;
+
     if (retryUntil) {
         scheduleStartCooldown();
     } else if (resumeCreationPolling) {
@@ -1282,26 +1483,32 @@ window.addEventListener('pageshow', event => {
 
 document.addEventListener('DOMContentLoaded', function() {
     const navbar = document.querySelector('.navbar');
+
     if (navbar) {
         document.documentElement.style.setProperty('--navbar-height', navbar.offsetHeight + 'px');
     }
 
     const reportTextarea = document.getElementById('report-textarea');
+
     if (reportTextarea) {
         reportTextarea.placeholder = REPORT_PLACEHOLDER; // html attribute newlines vary by browser
         syncSendButton();
     }
 
     const modeParam = new URLSearchParams(window.location.search).get('mode');
+
     if (modeParam && ['desktop', 'terminal', 'ssh'].includes(modeParam)) {
         const tab = document.querySelector(`.mode-tab[data-mode="${modeParam}"]`);
-        if (tab) switchMode(modeParam, tab);
+
+        if (tab)
+            switchMode(modeParam, tab);
     }
 
     {% if creation_status and creation_status.get('status') not in ['failed', 'ready', 'none', None] %}
     const creationStatus = {{ creation_status | tojson }};
 
     const startBtn = document.getElementById('start-btn');
+
     if (startBtn) {
         startBtn.disabled = true;
         const message = creationMessage(creationStatus);
@@ -1317,5 +1524,6 @@ document.addEventListener('DOMContentLoaded', function() {
     {% endif %}
 });
 </script>
+
 <script type="module" src="{{ url_for('remote_desktop.static', filename='js/workspace-input.js') }}"></script>
 {% endblock %}
