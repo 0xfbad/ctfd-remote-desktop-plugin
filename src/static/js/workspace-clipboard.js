@@ -19,12 +19,15 @@ export function sendShortcut(rfb, code, keysym, shift = false) {
         rfb.sendKey(keysym, code, false);
     for (const [keysym, code] of added)
         rfb.sendKey(keysym, code, true);
+
     rfb.sendKey(keysym, code, true);
     rfb.sendKey(keysym, code, false);
+
     for (const [keysym, code] of added.reverse())
         rfb.sendKey(keysym, code, false);
     for (const [code, keysym] of meta)
         rfb.sendKey(keysym, code, true);
+
     return true;
 }
 
@@ -56,6 +59,7 @@ export function terminalClipboard() {
             parent.document.dispatchEvent(new Event('workspace-clipboard-change'));
         });
     }
+
     document.addEventListener('keydown', event => {
         const copy = event.code === 'KeyC' && !event.altKey && event.ctrlKey && event.shiftKey;
         const term = window.term;
@@ -146,6 +150,7 @@ export function desktopClipboard(UI) {
             if (pendingCopy === pending)
                 clearIntent();
         }, 2000);
+
         function currentText(value) {
             if (pendingCopy !== pending || !owner(rfb))
                 throw new Error('copy canceled');
@@ -205,6 +210,7 @@ export function desktopClipboard(UI) {
             bound._canvas.addEventListener('beforeinput', event => event.preventDefault());
             bound._canvas.addEventListener('paste', event => event.preventDefault());
         }
+
         resetClipboardPreference();
         bound?.addEventListener('clipboard', receive);
         bound?.addEventListener('disconnect', resetClipboardPreference);
@@ -218,6 +224,7 @@ export function desktopClipboard(UI) {
 
         if (copy)
             event.preventDefault();
+
         if (!owner() || !event.isTrusted)
             return;
 
@@ -276,8 +283,10 @@ export function desktopClipboard(UI) {
 
             if (preferGuestClipboard) {
                 sendShortcut(pending.rfb, 'KeyV', pending.shift ? 0x56 : 0x76, pending.shift);
-            } else
-                pasteText(pending.rfb, text, pending.shift);
+                return;
+            }
+
+            pasteText(pending.rfb, text, pending.shift);
         } catch {
             if (pendingPaste !== pending || !owner(pending.rfb))
                 return;
@@ -303,20 +312,20 @@ export function desktopClipboard(UI) {
             return;
         }
 
-        if (!event.clipboardData?.types.includes('text/plain')) {
-            if (event.clipboardData?.types.length !== 0 || typeof navigator.clipboard?.readText !== 'function')
-                return;
-
+        if (event.clipboardData?.types.includes('text/plain')) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            pendingPaste = pending;
-            void readHostPaste(pending); // webkit may withhold paste formats while allowing a clipboard read
+            pasteText(pending.rfb, event.clipboardData.getData('text/plain'), pending.shift);
             return;
         }
 
+        if (event.clipboardData?.types.length !== 0 || typeof navigator.clipboard?.readText !== 'function')
+            return;
+
         event.preventDefault();
         event.stopImmediatePropagation();
-        pasteText(pending.rfb, event.clipboardData.getData('text/plain'), pending.shift);
+        pendingPaste = pending;
+        void readHostPaste(pending); // webkit may withhold paste formats while allowing a clipboard read
     }, true);
 
     document.addEventListener('pointerdown', clearIntent, true);
@@ -327,6 +336,7 @@ export function desktopClipboard(UI) {
         if (!parent.document.hasFocus())
             resetClipboardPreference();
     });
+
     const lifecycle = new AbortController();
     window.addEventListener('pagehide', event => {
         if (!event.persisted)
@@ -340,6 +350,7 @@ export function desktopClipboard(UI) {
         if (parent.document.hidden)
             resetClipboardPreference();
     }, {signal: lifecycle.signal});
+
     for (const type of ['copy', 'cut']) {
         document.addEventListener(type, () => {
             if (document.activeElement !== UI.rfb?._canvas)
@@ -349,11 +360,12 @@ export function desktopClipboard(UI) {
     for (const type of ['copy', 'cut', 'workspace-clipboard-change']) {
         parent.document.addEventListener(type, resetClipboardPreference, {signal: lifecycle.signal});
     }
+
     new MutationObserver(clearIntent).observe(window.frameElement, {attributes: true, attributeFilter: ['class']});
 
     const controls = document.createElement('div');
     controls.style.marginTop = '8px';
-    for (const [label, action] of [
+    const actions = [
         ['Copy', () => {
             const rfb = UI.rfb;
 
@@ -375,7 +387,9 @@ export function desktopClipboard(UI) {
             UI.closeClipboardPanel();
             UI.rfb.focus();
         }],
-    ]) {
+    ];
+
+    for (const [label, action] of actions) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
@@ -383,6 +397,7 @@ export function desktopClipboard(UI) {
         button.addEventListener('click', action);
         controls.append(button);
     }
+
     field.after(controls);
 }
 
@@ -391,7 +406,7 @@ const frameId = window.frameElement?.id;
 if (frameId === 'terminal-frame')
     terminalClipboard();
 if (frameId === 'vnc-frame') {
-    const {default: UI} = await import(new URL('app/ui.js', location.href)); // import in the frame realm so the connected singleton is reused
+    const {default: UI} = await import(new URL('app/ui.js', location.href)); // resolve against the frame document instead of this script so the connected singleton is reused
     const {releaseCapture} = await import(new URL('core/util/events.js', location.href));
     collapseInitialControls(UI);
     releaseInputOnNavigation(UI, releaseCapture);
