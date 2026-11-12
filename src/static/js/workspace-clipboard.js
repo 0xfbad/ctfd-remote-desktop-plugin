@@ -104,6 +104,7 @@ export function desktopClipboard(UI) {
     let pendingPaste = null;
     let preferGuestClipboard = false;
     const field = document.getElementById('noVNC_clipboard_text');
+    const apple = /mac|iphone|ipad|ipod/i.test(navigator.platform);
 
     function owner(rfb = UI.rfb) {
         return rfb && rfb === UI.rfb && UI.connected && !rfb.viewOnly && activeOwner();
@@ -264,8 +265,14 @@ export function desktopClipboard(UI) {
                 return;
             }
 
-            pendingPaste = {rfb: UI.rfb, shift: event.shiftKey};
+            const pending = {rfb: UI.rfb, shift: event.shiftKey};
+            pendingPaste = pending;
             event.stopImmediatePropagation(); // the browser must provide clipboard data before the guest paste chord
+
+            if (apple && !event.metaKey) { // apple browsers only paste for command chords
+                event.preventDefault();
+                void readHostPaste(pending);
+            }
             return;
         }
 
