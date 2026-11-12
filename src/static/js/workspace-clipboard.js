@@ -1,3 +1,5 @@
+import {collapseInitialControls} from './workspace-controls.js';
+
 export function sendShortcut(rfb, code, keysym, shift = false) {
     const held = rfb._keyboard?._keyDownList; // dom flags may arrive without forwarded modifier key events
 
@@ -389,5 +391,6 @@ if (frameId === 'terminal-frame')
     terminalClipboard();
 if (frameId === 'vnc-frame') {
     const {default: UI} = await import(new URL('app/ui.js', location.href)); // import in the frame realm so the connected singleton is reused
+    collapseInitialControls(UI);
     desktopClipboard(UI);
 }
