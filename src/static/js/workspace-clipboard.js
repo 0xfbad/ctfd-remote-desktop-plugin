@@ -1,7 +1,7 @@
 import {collapseInitialControls} from './workspace-controls.js';
 import {releaseInputOnNavigation} from './workspace-input-state.js';
 
-export function sendShortcut(rfb, code, keysym, shift = false) {
+export function sendShortcut(rfb, code, keysym, shift = false, control = true) {
     const held = rfb._keyboard?._keyDownList; // dom flags may arrive without forwarded modifier key events
 
     if (!held || rfb.viewOnly)
@@ -10,7 +10,7 @@ export function sendShortcut(rfb, code, keysym, shift = false) {
     const meta = Object.entries(held).filter(([code]) => code === 'MetaLeft' || code === 'MetaRight');
     const added = [];
 
-    if (!('ControlLeft' in held || 'ControlRight' in held))
+    if (control && !('ControlLeft' in held || 'ControlRight' in held))
         added.push([0xffe3, 'ControlLeft']);
     if (shift && !('ShiftLeft' in held || 'ShiftRight' in held))
         added.push([0xffe1, 'ShiftLeft']);
@@ -31,12 +31,12 @@ export function sendShortcut(rfb, code, keysym, shift = false) {
     return true;
 }
 
-export function pasteText(rfb, text, shift = false) {
+export function pasteText(rfb, text, chord = ['KeyV', 0x76]) {
     if (!rfb._keyboard?._keyDownList || rfb.viewOnly)
         return false;
 
     rfb.clipboardPasteFrom(text);
-    return sendShortcut(rfb, 'KeyV', shift ? 0x56 : 0x76, shift);
+    return sendShortcut(rfb, ...chord);
 }
 
 function activeOwner() {
@@ -253,19 +253,25 @@ export function desktopClipboard(UI) {
             return;
         }
 
-        const paste = event.code === 'KeyV' && !event.altKey && (event.ctrlKey || event.metaKey);
+        const insert = !apple && event.code === 'Insert' && event.shiftKey
+            && !event.ctrlKey && !event.altKey && !event.metaKey;
+        const paste = insert || (event.code === 'KeyV' && !event.altKey && (event.ctrlKey || event.metaKey));
 
         if (paste) {
             clearIntent();
+            const chord = insert ? ['Insert', 0xff63, true, false] : ['KeyV', event.shiftKey ? 0x56 : 0x76, event.shiftKey];
+
+            if (preferGuestClipboard && insert)
+                return; // the viewer forwards the held shift and insert unchanged
 
             if (preferGuestClipboard) {
                 event.preventDefault();
                 event.stopImmediatePropagation();
-                sendShortcut(UI.rfb, 'KeyV', event.shiftKey ? 0x56 : 0x76, event.shiftKey);
+                sendShortcut(UI.rfb, ...chord);
                 return;
             }
 
-            const pending = {rfb: UI.rfb, shift: event.shiftKey};
+            const pending = {rfb: UI.rfb, chord};
             pendingPaste = pending;
             event.stopImmediatePropagation(); // the browser must provide clipboard data before the guest paste chord
 
@@ -298,11 +304,11 @@ export function desktopClipboard(UI) {
             pendingPaste = null;
 
             if (preferGuestClipboard) {
-                sendShortcut(pending.rfb, 'KeyV', pending.shift ? 0x56 : 0x76, pending.shift);
+                sendShortcut(pending.rfb, ...pending.chord);
                 return;
             }
 
-            pasteText(pending.rfb, text, pending.shift);
+            pasteText(pending.rfb, text, pending.chord);
         } catch {
             if (pendingPaste !== pending || !owner(pending.rfb))
                 return;
@@ -324,14 +330,14 @@ export function desktopClipboard(UI) {
         if (preferGuestClipboard) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            sendShortcut(pending.rfb, 'KeyV', pending.shift ? 0x56 : 0x76, pending.shift);
+            sendShortcut(pending.rfb, ...pending.chord);
             return;
         }
 
         if (event.clipboardData?.types.includes('text/plain')) {
             event.preventDefault();
             event.stopImmediatePropagation();
-            pasteText(pending.rfb, event.clipboardData.getData('text/plain'), pending.shift);
+            pasteText(pending.rfb, event.clipboardData.getData('text/plain'), pending.chord);
             return;
         }
 
